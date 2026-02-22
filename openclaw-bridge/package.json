@@ -1,0 +1,27 @@
+{
+  "name": "openclaw-bridge-service",
+  "description": "Local job queue + tool-runner bridge for dispatching security/bounty tasks to OpenClaw.",
+  "license": "MIT",
+  "private": true,
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.12.1"
+  },
+  "devDependencies": {
+    "@types/node": "^22.14.1",
+    "tsx": "^4.20.5",
+    "typescript": "^5.8.3",
+    "vitest": "^3.2.4"
+  },
+  "scripts": {
+    "bridge:build": "tsc -p tsconfig.bridge.json",
+    "bridge:control": "./scripts/bridge-control.sh",
+    "bridge:start": "./scripts/bridge-control.sh start",
+    "bridge:stop": "./scripts/bridge-control.sh stop",
+    "bridge:restart": "./scripts/bridge-control.sh restart",
+    "bridge:status": "./scripts/bridge-control.sh status",
+    "bridge:logs": "./scripts/bridge-control.sh logs",
+    "bridge:health": "./scripts/bridge-control.sh health",
+    "bridge:test": "vitest run bridge/tests"
+  },
+  "version": "0.1.0"
+}

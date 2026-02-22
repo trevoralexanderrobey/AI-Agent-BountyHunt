@@ -1,0 +1,16 @@
+# Secrets — never commit
+.env
+.env.*
+
+# Build output
+dist/
+*.tsbuildinfo
+
+# Dependencies
+node_modules/
+
+# Runtime state
+.bridge/
+
+# OS
+.DS_Store

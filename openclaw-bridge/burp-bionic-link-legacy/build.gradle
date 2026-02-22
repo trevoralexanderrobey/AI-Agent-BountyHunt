@@ -1,0 +1,42 @@
+plugins {
+  id "java"
+}
+
+group = "com.openclaw"
+version = "0.1.0"
+
+repositories {
+  mavenCentral()
+}
+
+dependencies {
+  // Burp provides the extender API at runtime; keep it off the shaded jar classpath.
+  compileOnly "net.portswigger.burp.extender:burp-extender-api:2.3"
+
+  // Small JSON helper (shaded into the jar) for request/response handling.
+  implementation "com.google.code.gson:gson:2.11.0"
+}
+
+tasks.withType(JavaCompile).configureEach {
+  options.encoding = "UTF-8"
+  // Target Java 8 for broad Burp compatibility (Burp runs on newer JREs too).
+  options.release.set(8)
+}
+
+tasks.jar {
+  archiveBaseName.set("BionicLink-Legacy")
+  duplicatesStrategy = DuplicatesStrategy.EXCLUDE
+
+  // Build a single self-contained jar for Burp (includes gson).
+  from({
+    configurations.runtimeClasspath.collect { it.isDirectory() ? it : zipTree(it) }
+  })
+
+  manifest {
+    attributes(
+      "Implementation-Title": "BionicLink-Legacy",
+      "Implementation-Version": project.version
+    )
+  }
+}
+

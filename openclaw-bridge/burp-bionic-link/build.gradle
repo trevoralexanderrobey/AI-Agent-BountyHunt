@@ -1,0 +1,40 @@
+plugins {
+  id "java"
+}
+
+group = "com.openclaw"
+version = "0.1.0"
+
+repositories {
+  mavenCentral()
+}
+
+dependencies {
+  // Burp provides Montoya at runtime. Keep it off the shaded jar classpath.
+  compileOnly "net.portswigger.burp.extensions:montoya-api:2025.5"
+
+  // Small JSON helper (shaded into the jar) for request/response handling.
+  implementation "com.google.code.gson:gson:2.11.0"
+}
+
+tasks.withType(JavaCompile).configureEach {
+  options.encoding = "UTF-8"
+  options.release.set(17)
+}
+
+tasks.jar {
+  archiveBaseName.set("BionicLink")
+  duplicatesStrategy = DuplicatesStrategy.EXCLUDE
+
+  // Build a single self-contained jar for Burp (includes gson).
+  from({
+    configurations.runtimeClasspath.collect { it.isDirectory() ? it : zipTree(it) }
+  })
+
+  manifest {
+    attributes(
+      "Implementation-Title": "BionicLink",
+      "Implementation-Version": project.version
+    )
+  }
+}

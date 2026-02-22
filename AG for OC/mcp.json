@@ -1,0 +1,23 @@
+{
+  "servers": {
+    "openclaw": {
+      "type": "stdio",
+      "command": "/Users/trevorrobey/AI-Agent-BountyHunt/openclaw-bridge/github-pro-mcp/scripts/antigravity-openclaw-bootstrap.sh",
+      "args": [],
+      "env": {
+        "OPENCLAW_TRANSPORT": "http",
+        "OPENCLAW_GATEWAY_BASE_URL": "http://localhost:11434/v1",
+        "OPENCLAW_DEFAULT_MODEL": "qwen2.5-coder:7b",
+        "OPENCLAW_TIMEOUT_MS": "180000",
+        "OPENCLAW_BRIDGE_BASE_URL": "http://127.0.0.1:8787",
+        "BIONICLINK_BASE_URL": "https://127.0.0.1:8090",
+        "OPENCODE_SERVER_BASE_URL": "http://127.0.0.1:8090",
+        "OPENCODE_DAEMON_BASE_URL": "http://127.0.0.1:8091",
+        "OPENCODE_DAEMON_PORT": "8091",
+        "OPENCODE_SERVER_PORT": "8090",
+        "OPENCODE_MAX_ACTIVE_SESSIONS": "2",
+        "OPENCODE_QUEUE_MAX": "8"
+      }
+    }
+  }
+}

@@ -1,0 +1,26 @@
+{
+  "name": "openclaw-github-pro-mcp",
+  "version": "0.1.0",
+  "description": "MCP server bridging GitHub Pro Agent Mode to OpenClaw gateway and skills",
+  "license": "MIT",
+  "private": true,
+  "type": "commonjs",
+  "main": "dist/server.js",
+  "bin": {
+    "openclaw-github-pro-mcp": "dist/server.js"
+  },
+  "scripts": {
+    "build": "tsc",
+    "dev": "tsx src/server.ts",
+    "test": "vitest run"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.12.1"
+  },
+  "devDependencies": {
+    "@types/node": "^22.14.1",
+    "tsx": "^4.20.5",
+    "typescript": "^5.8.3",
+    "vitest": "^3.2.4"
+  }
+}

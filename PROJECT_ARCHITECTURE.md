@@ -1,0 +1,746 @@
+# AI Agent Bounty Hunt - Project Architecture
+
+## Overview
+
+The AI-Agent-BountyHunt project is a sophisticated local AI agent runtime stack that bridges GitHub Pro Agent Mode with OpenClaw for autonomous security research and bounty hunting workflows. It integrates multiple AI models, security tools (Burp Suite, LLDB), and a job queue system to enable intelligent, privileged task execution.
+
+**Current Date**: February 22, 2026  
+**Project Root**: `/Users/trevorrobey/AI-Agent-BountyHunt`  
+**Primary Maintainer**: Trevor Robey
+
+---
+
+## System Architecture
+
+### High-Level Architecture
+
+```
+┌─────────────────────────────────────────────────────────────────┐
+│                    CLIENT LAYER (AI Frontends)                  │
+├─────────────────────────────────────────────────────────────────┤
+│  • GitHub Pro Agent Mode (Claude 3.5 Sonnet / GPT-4o)           │
+│  • Antigravity MCP Client                                       │
+│  • VS Code / Codex MCP Client                                   │
+│  • Qwen MCP Client                                              │
+└─────────────────────────────────────────────────────────────────┘
+                              │
+                              ▼
+┌─────────────────────────────────────────────────────────────────┐
+│                MCP BRIDGE LAYER (github-pro-mcp)                │
+├─────────────────────────────────────────────────────────────────┤
+│  • MCP Server (Model Context Protocol)                          │
+│  • 15+ Tools for OpenClaw interaction                           │
+│  • Director → Executor Pattern                                  │
+│    - Director: GitHub Pro (reasoning/planning)                  │
+│    - Executor: OpenClaw (privileged operations)                 │
+└─────────────────────────────────────────────────────────────────┘
+                              │
+                              ▼
+┌─────────────────────────────────────────────────────────────────┐
+│              OPENCLAW BRIDGE SERVICE (Port 8787)                 │
+├─────────────────────────────────────────────────────────────────┤
+│  • Job Queue & State Management                                 │
+│  • Async Task Execution                                         │
+│  • Skill Tool Router                                            │
+│  • Burp Suite Integration (BionicLink)                          │
+│  • LLDB Crash Triage                                            │
+│  • Bionic Ingest (HTTP Stability Analysis)                      │
+└─────────────────────────────────────────────────────────────────┘
+                              │
+                              ▼
+┌─────────────────────────────────────────────────────────────────┐
+│                   EXECUTION LAYER (Skills)                      │
+├─────────────────────────────────────────────────────────────────┤
+│  • OpenClaw Agent (qwen2.5-coder:7b via Ollama)                │
+│  • Runtime Skills (~/.openclaw/skills/)                         │
+│  • OpenCode Daemon (Port 8091)                                  │
+│  • Burp Suite Professional (via BionicLink extension)           │
+│  • LLDB (via triage_bridge.py)                                  │
+└─────────────────────────────────────────────────────────────────┘
+```
+
+---
+
+## Core Components
+
+### 1. OpenClaw Bridge Service (`/openclaw-bridge/bridge/`)
+
+**Location**: `/Users/trevorrobey/AI-Agent-BountyHunt/openclaw-bridge/bridge/server.ts`  
+**Port**: 8787 (HTTP) or HTTPS with TLS  
+**Purpose**: Central job queue and tool execution router
+
+#### Key Features:
+- **Job Management API**:
+  - `POST /jobs` - Submit new async jobs
+  - `GET /jobs` - List all jobs
+  - `GET /jobs/:id` - Get job details
+  - `POST /jobs/:id/cancel` - Cancel running job
+  - `GET /health` - Health check endpoint
+
+- **Tool Execution**:
+  - `POST /execute-tool` - Execute skill tools or Burp operations
+  - Routes to runtime skills in `~/.openclaw/skills/`
+  - Enforces safety gates (mutation guards, scope locks)
+
+- **Specialized Endpoints**:
+  - `POST /lldb-stop` - Crash triage from LLDB
+  - `POST /bionic-ingest` - HTTP stability analysis
+  - `GET /mcp/sse` - MCP over SSE for Qwen compatibility
+
+- **State Management**:
+  - Workspace: `/Users/trevorrobey/Dev/Bounties`
+  - Job artifacts stored in `${workspace}/jobs/<jobId>/`
+  - Files: `MISSION_INPUT.json`, `MISSION_LOG.ndjson`, `MISSION_REPORT.md`
+
+#### Security Controls:
+- **Mutation Gates** (env vars):
+  - `BOUNTY_HUNTER_ALLOW_MUTATIONS` - Bounty hunter skill mutations
+  - `H1_ALLOW_MUTATIONS` - HackerOne report submission
+  - `BURP_ALLOW_ACTIVE_SCAN` - Burp active scanning
+  - `BURP_ALLOW_RAW_DATA` - Raw request/response access
+
+- **Scope Lock**: All Burp operations validate against Burp Target Scope
+- **Authentication**: Optional Bearer token via `BRIDGE_AUTH_TOKEN`
+- **TLS**: Self-signed certs auto-generated at `~/.openclaw/tls/`
+
+---
+
+### 2. GitHub Pro MCP Bridge (`/openclaw-bridge/github-pro-mcp/`)
+
+**Location**: `/Users/trevorrobey/AI-Agent-BountyHunt/openclaw-bridge/github-pro-mcp/`  
+**Purpose**: MCP server bridging GitHub Pro Agent Mode to OpenClaw
+
+#### Architecture: Director → Executor Pattern
+
+**Director (GitHub Pro)**:
+- Uses Claude 3.5 Sonnet or GPT-4o from GitHub Pro subscription
+- Handles reasoning, planning, code reading
+- Decides when to delegate to OpenClaw
+
+**Executor (OpenClaw)**:
+- Local Ollama (`http://localhost:11434/v1`) with `qwen2.5-coder:7b`
+- Executes privileged operations via bridge tools
+- Runs async jobs and skill tools
+
+#### MCP Tools (15 total):
+
+**OpenClaw Direct (2)**:
+- `openclaw_exec` - Send prompt to OpenClaw agent
+- `openclaw_terminal` - Execute shell commands with full system access
+
+**Job Queue (4)**:
+- `job_submit` - Submit background job
+- `job_list` - List all jobs
+- `job_status` - Get job details by ID
+- `job_cancel` - Cancel job
+
+**ClawHub Skills (3)**:
+- `skill_list` - List installed skills
+- `skill_info` - Read skill manifest
+- `execute_skill_tool` - Execute named skill function
+
+**Burp Suite Integration (4)**:
+- `burp_get_history` - Get proxy traffic (summarized)
+- `burp_analyze_request` - Send through Repeater (scope-locked)
+- `burp_active_scan` - Start active scan (gated)
+- `burp_get_raw_request` - Get raw data (gated)
+
+**Triage (2)**:
+- `lldb_triage` - Submit LLDB crash event for async triage
+- `bionic_ingest` - Submit HTTP pair for stability analysis
+
+#### Client Configurations:
+
+**VS Code / Codex**:
+- Config: `/Users/trevorrobey/AI-Agent-BountyHunt/.vscode/mcp.json`
+- Command: `node /.../github-pro-mcp/dist/server.js`
+
+**Antigravity**:
+- Config: `/Users/trevorrobey/AI-Agent-BountyHunt/AG for OC/mcp.json`
+- Bootstrap: `antigravity-openclaw-bootstrap.sh`
+- Auto-starts bridge services if unhealthy
+
+**Qwen**:
+- Config: `~/Library/Application Support/Qwen/settings.json`
+- Bootstrap: `qwen-openclaw-bootstrap.sh`
+- SSE endpoint: `http://127.0.0.1:8787/mcp/sse`
+
+---
+
+### 3. Runtime Skills (`/openclaw-bridge/skills/`)
+
+**Source**: `/Users/trevorrobey/AI-Agent-BountyHunt/openclaw-bridge/skills/`  
+**Runtime**: `~/.openclaw/skills/` (synced via `sync-skill-to-runtime.sh`)
+
+#### Available Skills:
+
+**1. opencode** (`skills/opencode/`)
+- Purpose: OpenCode session management via daemon
+- Tools: `opencode_session_create`, `opencode_session_message`, `opencode_session_state`, `opencode_session_close`
+- Backend: OpenCode daemon at `http://127.0.0.1:8091`
+
+**2. burp-suite** (`skills/burp-suite/`)
+- Purpose: Safe Burp Suite integration via BionicLink
+- Tools:
+  - `burp_get_history` - Retrieve proxy traffic
+  - `burp_analyze_request` - Repeater-style testing
+  - `burp_active_scan` - Targeted active scanning (gated)
+  - `burp_get_raw_request` - Raw session data (gated)
+  - `burp_zero_click_triage` - Heuristic surface identification
+- Backend: BionicLink extension in Burp at `http://127.0.0.1:8090`
+
+**3. self-improving-agent** (`skills/self-improving-agent/`)
+- Purpose: Continuous learning and error logging
+- Features:
+  - Log corrections, errors, feature requests
+  - Promote learnings to project memory
+  - Detect recurring patterns
+  - Extract reusable skills
+- Workspace files: `AGENTS.md`, `SOUL.md`, `TOOLS.md`, `MEMORY.md`
+- Learning files: `.learnings/LEARNINGS.md`, `ERRORS.md`, `FEATURE_REQUESTS.md`
+
+**4. find-skills** (`skills/find-skills/`)
+- Purpose: Discover and install agent skills from skills.sh ecosystem
+- Tools: Search via `npx skills find`, install via `npx skills add`
+- Use when user asks "how do I do X" or "find a skill for X"
+
+**5. tavily-search** (`skills/tavily-search/`)
+- Purpose: AI-optimized web search via Tavily API
+- Tools: `tavily_search`, `tavily_extract`
+- Requires: `TAVILY_API_KEY` environment variable
+- Options: deep search, news topic, date filtering
+
+**6. algora-bountyfi** (`skills/algora-bountyfi/`)
+- Purpose: Algora bounty management and submission
+- (Details in skill manifest)
+
+---
+
+### 4. OpenCode Daemon (`/openclaw-bridge/github-pro-mcp/src/`)
+
+**Port**: 8091  
+**Backend**: `opencode serve` at port 8090  
+**Purpose**: Local coding agent session management
+
+#### API Endpoints:
+- `GET /health` - Daemon health and metrics
+- `POST /session` - Create session
+- `POST /session/:id/message` - Send message to session
+- `GET /session/:id/state` - Get session state
+- `POST /session/:id/close` - Close session
+- `GET /metrics` - Prometheus metrics
+
+#### Configuration:
+- `OPENCODE_MAX_ACTIVE_SESSIONS=2`
+- `OPENCODE_QUEUE_MAX=8`
+- Fallback to `opencode run --session` if serve unavailable
+
+---
+
+### 5. LLDB Integration (`/openclaw-bridge/lldb/`)
+
+**File**: `triage_bridge.py`  
+**Purpose**: Automatic crash triage from LLDB stop events
+
+#### Workflow:
+1. LLDB stop-hook triggers on crash signals/exceptions
+2. Collects crash context:
+   - Registers (PC, LR, SP, X0-X8 for ARM64)
+   - Exception state (ESR, FAR, CPSR)
+   - Disassembly window around PC
+   - Memory inspection (X0 pointer deref)
+   - Backtrace (30 frames max)
+3. POSTs to `/lldb-stop` endpoint
+4. Creates async job with `LLDB_STOP_EVENT.json`
+5. OpenClaw agent generates `MISSION_REPORT.md` with:
+   - Crash summary
+   - Root cause hypotheses
+   - Debugging recommendations
+   - Mitigation suggestions
+
+#### Safety:
+- Defensive triage only
+- No exploit/payload guidance
+- Small payload cap (200 KiB)
+
+---
+
+### 6. Burp Suite Integration (BionicLink)
+
+**Extension**: BionicLink (custom Burp extension)  
+**Port**: 8090 (HTTP)  
+**Bridge Integration**: Via `/execute-tool` endpoints
+
+#### Features:
+- **Scope Lock**: All operations validate against Burp Target Scope
+- **Traffic Summarization Protocol (TSP)**: Reduces token usage
+- **Redaction**: Sensitive headers automatically redacted
+- **Safety Gates**: Active scan and raw data require explicit enablement
+
+#### Endpoints (via bridge):
+- `/history` - Get proxy traffic
+- `/scope` - Check URL scope
+- `/repeater` - Send custom request
+- `/scan` - Start active scan
+- `/raw` - Get raw request/response (gated)
+
+---
+
+## Deployment & Operations
+
+### Process Management
+
+**Recommended**: PM2 (Process Manager 2)
+- Apps: `openclaw-bridge`, `openclaw-mcp`, `openclaw-opencode-daemon`
+- Auto-restart on failure
+- Log rotation via `pm2-logrotate`
+- State persistence via `pm2 save`
+
+**Alternative**: macOS LaunchAgents
+- Generated by `mcp-install-launchd.sh`
+- Files in `~/Library/LaunchAgents/`
+- **Warning**: Don't mix PM2 and LaunchAgents
+
+### Startup Flow
+
+1. **Environment Setup**:
+   - Load `.env` from `/openclaw-bridge/.env`
+   - Key vars: `BRIDGE_PORT`, `OPENCLAW_GATEWAY_BASE_URL`, `OPENCLAW_DEFAULT_MODEL`
+
+2. **Skill Sync**:
+   - Run `sync-skill-to-runtime.sh`
+   - Copies skills from repo to `~/.openclaw/skills/`
+
+3. **Service Start**:
+   - `mcp-start-pm2.sh` starts all services
+   - Bridge on port 8787
+   - OpenCode daemon on port 8091
+   - MCP server (stdio or SSE)
+
+4. **Health Checks**:
+   ```bash
+   curl http://127.0.0.1:8787/health
+   curl http://127.0.0.1:8091/health
+   curl http://localhost:11434/v1/models
+   ```
+
+### Client Wiring
+
+**VS Code**:
+- MCP config at `.vscode/mcp.json`
+- Points to `github-pro-mcp/dist/server.js`
+
+**Antigravity**:
+- Runtime bundle at `AG for OC/`
+- Bootstrap script auto-starts services
+- MCP config installed to `~/Library/Application Support/Antigravity/User/mcp.json`
+
+**Qwen**:
+- SSE endpoint at `http://127.0.0.1:8787/mcp/sse`
+- Config in Qwen settings directory
+
+---
+
+## Data Flow Examples
+
+### Example 1: Bounty Research Task
+
+```
+User (GitHub Pro) → "Analyze this repo for security issues"
+    ↓
+GitHub Pro Agent (Director)
+    - Reads code, identifies suspicious patterns
+    - Decides to delegate deep analysis
+    ↓
+openclaw_exec tool
+    ↓
+OpenClaw Bridge (Port 8787)
+    - Creates job with instruction + repo URL
+    - Writes MISSION_INPUT.json
+    ↓
+Job Worker
+    - Clones repo to job workspace
+    - Invokes OpenClaw agent (qwen2.5-coder:7b)
+    ↓
+OpenClaw Agent
+    - Analyzes code
+    - Uses burp_get_history if web app
+    - Generates MISSION_REPORT.md
+    ↓
+User receives report with findings and recommendations
+```
+
+### Example 2: LLDB Crash Triage
+
+```
+LLDB stops on SIGSEGV
+    ↓
+triage_bridge.py stop-hook
+    - Collects registers, backtrace, disassembly
+    - POSTs to /lldb-stop
+    ↓
+OpenClaw Bridge
+    - Creates job with LLDB_STOP_EVENT.json
+    - Sets triage-specific hints
+    ↓
+Job Worker
+    - Invokes OpenClaw agent
+    - Provides crash context
+    ↓
+OpenClaw Agent
+    - Analyzes crash pattern
+    - Generates hypotheses
+    - Recommends debugging steps
+    ↓
+MISSION_REPORT.md with:
+    - Crash summary
+    - Likely root causes
+    - Next steps for debugging
+    - Mitigation suggestions
+```
+
+### Example 3: Burp Active Scan
+
+```
+User → "Scan this endpoint for vulnerabilities"
+    ↓
+GitHub Pro Agent
+    - Validates target is in scope
+    - Checks BURP_ALLOW_ACTIVE_SCAN=true
+    ↓
+burp_active_scan tool
+    ↓
+OpenClaw Bridge
+    - Validates URL against Burp scope
+    - Forwards to BionicLink /scan
+    ↓
+Burp Suite (via BionicLink)
+    - Runs active scan
+    - Returns scan results
+    ↓
+Bridge summarizes results (TSP)
+    ↓
+User receives scan summary with findings
+```
+
+---
+
+## Security Architecture
+
+### Defense in Depth
+
+**1. Network Isolation**:
+- All services bound to `127.0.0.1` (loopback only)
+- No external network exposure by default
+
+**2. Authentication**:
+- Optional Bearer token (`BRIDGE_AUTH_TOKEN`)
+- Applied to all bridge endpoints if configured
+
+**3. Authorization Gates**:
+- Mutation operations require explicit env var enablement
+- Default: all mutations disabled
+- Burp active scan requires `BURP_ALLOW_ACTIVE_SCAN=true`
+- HackerOne submission requires `H1_ALLOW_MUTATIONS=true`
+
+**4. Scope Enforcement**:
+- Burp operations validate against Target Scope
+- Out-of-scope requests rejected with 403
+
+**5. Data Redaction**:
+- Sensitive headers automatically redacted:
+  - `Authorization`, `Cookie`, `Set-Cookie`
+  - `X-API-Key`, `X-Auth-Token`
+- Raw request access gated behind `BURP_ALLOW_RAW_DATA`
+
+**6. Payload Limits**:
+- LLDB events capped at 200 KiB
+- Bionic ingest events capped at 200 KiB
+- Prevents log flooding and DoS
+
+**7. Safety Prompts**:
+- LLDB triage: "Do not provide exploit guidance"
+- Bionic ingest: "Do NOT generate weaponized payloads"
+- Generic tasks: "Do not provide exploit or bypass guidance"
+
+---
+
+## Development Workflow
+
+### Directory Structure
+
+```
+/Users/trevorrobey/AI-Agent-BountyHunt/
+├── openclaw-bridge/               # Main bridge service
+│   ├── bridge/                    # Bridge server (TypeScript)
+│   │   └── server.ts              # Main HTTP server
+│   ├── github-pro-mcp/            # MCP bridge for GitHub Pro
+│   │   ├── src/                   # MCP server source
+│   │   │   ├── server.ts          # MCP server entry
+│   │   │   ├── tools/             # Tool implementations
+│   │   │   │   ├── openclaw.ts    # OpenClaw direct tools
+│   │   │   │   ├── jobs.ts        # Job queue tools
+│   │   │   │   ├── burp.ts        # Burp integration tools
+│   │   │   │   ├── skills.ts      # Skill lookup tools
+│   │   │   │   └── triage.ts      # Triage tools
+│   │   │   └── safety.ts          # Safety prompt templates
+│   │   └── scripts/               # Client bootstrap scripts
+│   ├── skills/                    # Skill source-of-truth
+│   │   ├── opencode/              # OpenCode session skill
+│   │   ├── burp-suite/            # Burp integration skill
+│   │   ├── self-improving-agent/  # Learning/logging skill
+│   │   ├── find-skills/           # Skill discovery skill
+│   │   ├── tavily-search/         # Web search skill
+│   │   └── algora-bountyfi/       # Bounty management skill
+│   ├── lldb/                      # LLDB integration
+│   │   └── triage_bridge.py       # LLDB stop-hook
+│   ├── scripts/                   # Operational scripts
+│   │   ├── bridge-control.sh      # Bridge start/stop/status
+│   │   ├── submit-task.sh         # CLI job submission
+│   │   ├── sync-skill-to-runtime.sh  # Skill sync
+│   │   └── generate-tls-certs.sh  # TLS cert generation
+│   ├── docs/                      # Documentation
+│   │   ├── API.md                 # API contract
+│   │   ├── BURP_INTEGRATION.md    # Burp setup guide
+│   │   ├── LLDB_TRIAGE.md         # LLDB setup guide
+│   │   └── OPERATIONS.md          # Operations guide
+│   ├── tests/                     # Test suite
+│   ├── .env                       # Environment config (private)
+│   ├── .env.example               # Env template
+│   ├── package.json               # Bridge dependencies
+│   └── tsconfig.json              # TypeScript config
+├── AG for OC/                     # Antigravity runtime bundle
+│   ├── mcp.json                   # Antigravity MCP config
+│   ├── README.md                  # Setup instructions
+│   └── install-to-antigravity.sh  # Install script
+├── .vscode/                       # VS Code config
+│   └── mcp.json                   # VS Code MCP config
+└── PROJECT_ARCHITECTURE.md        # This document
+```
+
+### Build Process
+
+```bash
+# Install dependencies
+cd /Users/trevorrobey/AI-Agent-BountyHunt/openclaw-bridge
+npm install
+npm --prefix github-pro-mcp install
+
+# Build TypeScript
+npm run bridge:build          # Builds bridge/server.ts
+npm --prefix github-pro-mcp run build  # Builds MCP server
+
+# Start services
+cd github-pro-mcp
+./scripts/mcp-start-pm2.sh    # Starts all services via PM2
+```
+
+### Testing
+
+```bash
+# Run bridge tests
+npm run bridge:test
+
+# Manual health check
+curl http://127.0.0.1:8787/health | jq
+
+# Submit test job
+./scripts/submit-task.sh \
+  --instruction "Test job submission" \
+  --requester "test"
+```
+
+---
+
+## Configuration Reference
+
+### Environment Variables (`.env`)
+
+```bash
+# Bridge Service
+BRIDGE_PORT=8787
+BRIDGE_WORKSPACE_ROOT=/Users/trevorrobey/Dev/Bounties
+BRIDGE_HTTP=true              # Use HTTP instead of HTTPS
+BRIDGE_AUTH_TOKEN=            # Optional auth token
+
+# OpenClaw Gateway
+OPENCLAW_TRANSPORT=cli        # cli or http
+OPENCLAW_GATEWAY_BASE_URL=http://localhost:11434/v1
+OPENCLAW_DEFAULT_MODEL=qwen2.5-coder:7b
+OPENCLAW_TIMEOUT_MS=180000
+
+# Burp Suite (BionicLink)
+BIONICLINK_BASE_URL=http://127.0.0.1:8090
+BIONICLINK_TIMEOUT_MS=8000
+BURP_ALLOW_ACTIVE_SCAN=false
+BURP_ALLOW_RAW_DATA=false
+
+# OpenCode Daemon
+OPENCODE_SERVER_BASE_URL=http://127.0.0.1:8090
+OPENCODE_DAEMON_BASE_URL=http://127.0.0.1:8091
+OPENCODE_MAX_ACTIVE_SESSIONS=2
+OPENCODE_QUEUE_MAX=8
+
+# Mutation Gates
+BOUNTY_HUNTER_ALLOW_MUTATIONS=false
+H1_ALLOW_MUTATIONS=false
+```
+
+### Required Software
+
+- **Node.js** (v18+) with npm
+- **PM2** (`npm install -g pm2`)
+- **Ollama** (`brew install ollama`)
+- **OpenCode CLI** (`brew install anomalyco/tap/opencode`)
+- **Burp Suite Professional** (with BionicLink extension)
+- **LLDB** (Xcode Command Line Tools)
+
+### Models
+
+**Local (Ollama)**:
+- `qwen2.5-coder:7b` (default) - 7B parameter coding model
+
+**Cloud (via gateway)**:
+- `openclaw-sonnet-4` - Claude 3.5 Sonnet
+- `openclaw-gpt-4o` - GPT-4o
+
+---
+
+## Use Cases
+
+### 1. Security Research & Bug Bounty
+
+- **Code Analysis**: Clone repos, analyze for vulnerabilities
+- **Web App Testing**: Use Burp integration for endpoint discovery
+- **Automated Scanning**: Run targeted active scans on suspicious endpoints
+- **Report Generation**: Auto-generate vulnerability reports
+
+### 2. Crash Triage & Debugging
+
+- **LLDB Integration**: Automatic crash analysis
+- **Root Cause Hypotheses**: AI-generated debugging guidance
+- **Mitigation Suggestions**: Fix recommendations
+
+### 3. Protocol Stability Analysis
+
+- **HTTP Fuzzing Prep**: Identify integer width, format string issues
+- **Serialization Analysis**: Detect risky serialization patterns
+- **Input Validation**: Suggest validation improvements
+
+### 4. Continuous Learning
+
+- **Error Logging**: Track failures and corrections
+- **Knowledge Base**: Build project-specific memory
+- **Skill Extraction**: Convert learnings into reusable skills
+
+### 5. Multi-Agent Collaboration
+
+- **Director/Executor**: GitHub Pro plans, OpenClaw executes
+- **Session Communication**: Share context between agents
+- **Background Jobs**: Async processing for long tasks
+
+---
+
+## Troubleshooting
+
+### Bridge Not Starting
+
+```bash
+# Check logs
+pm2 logs openclaw-bridge --lines 120
+
+# Verify port availability
+lsof -i :8787
+
+# Check environment
+cat /Users/trevorrobey/AI-Agent-BountyHunt/openclaw-bridge/.env
+```
+
+### Skills Not Loading
+
+```bash
+# Sync skills to runtime
+./scripts/sync-skill-to-runtime.sh
+
+# Verify runtime path
+ls ~/.openclaw/skills/
+
+# Restart services
+pm2 restart openclaw-bridge
+```
+
+### Burp Integration Failing
+
+```bash
+# Check BionicLink is running in Burp
+curl http://127.0.0.1:8090/health
+
+# Verify scope is set in Burp
+# Check BURP_ALLOW_ACTIVE_SCAN if scanning
+
+# Check bridge logs
+pm2 logs openclaw-bridge --lines 50
+```
+
+### LLDB Triage Not Working
+
+```bash
+# Verify triage_bridge.py is loaded
+lldb
+(lldb) target stop-hook list
+
+# Check bridge health
+curl http://127.0.0.1:8787/health
+
+# Check fallback logs
+ls ~/.openclaw/logs/lldb-triage/
+```
+
+---
+
+## Future Enhancements
+
+### Planned Features
+
+1. **Enhanced Skill Discovery**:
+   - Auto-suggest skills based on user queries
+   - Skill recommendation engine
+
+2. **Multi-Model Orchestration**:
+   - Dynamic model selection based on task complexity
+   - Cost/performance optimization
+
+3. **Advanced Security Controls**:
+   - Fine-grained permission system
+   - Audit logging for all operations
+   - Rate limiting and quotas
+
+4. **Improved Error Recovery**:
+   - Automatic retry with backoff
+   - Fallback strategies for failed tools
+   - Better error messages for users
+
+5. **Performance Monitoring**:
+   - Real-time metrics dashboard
+   - Job performance analytics
+   - Resource usage tracking
+
+---
+
+## Conclusion
+
+The AI-Agent-BountyHunt project represents a sophisticated integration of AI agents, security tools, and job orchestration. By combining GitHub Pro's reasoning capabilities with OpenClaw's execution power, it enables autonomous security research while maintaining strict safety controls.
+
+Key strengths:
+- **Modular Architecture**: Clear separation of concerns
+- **Safety First**: Multiple layers of security controls
+- **Extensible**: Skill-based system for adding capabilities
+- **Production Ready**: PM2 management, health checks, logging
+
+This architecture is designed for security researchers, bug bounty hunters, and developers who need intelligent automation with privileged access, all while maintaining defensive security practices.
+
+---
+
+**Document Version**: 1.0  
+**Last Updated**: February 22, 2026  
+**Maintained By**: Trevor Robey
