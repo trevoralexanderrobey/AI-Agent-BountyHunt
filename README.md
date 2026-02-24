@@ -1,10 +1,16 @@
 # AI-Agent-BountyHunt
 
-Bug hunting stuff and local AI agent runtime environment.
+Local AI agent runtime environment for autonomous security research and bug bounty hunting.
 
 ## Overview
 
 This repository contains local environments, integrations, and bridges for running various MCP (Model Context Protocol) servers and AI agent runtimes for bug hunting against targets like Burp Suite, local source code, and local LLMs.
+
+Key capabilities:
+- **OpenClaw Bridge** — Job queue, tool router, and Burp/LLDB integrations on port `8787`
+- **Skill Spawner** — Generate new tool skills from Kali tool names with `spawner.py`
+- **Skill Runtime v1** — Extracted runtime core with TSP v2/v3 (lossless storage, semantic analysis, anomaly detection, cross-job diff, baseline tagging)
+- **MCP Bridge** — Director → Executor pattern connecting GitHub Pro / Antigravity / Codex to OpenClaw
 
 ### OpenClaw Bridge Runtime
 
@@ -28,6 +34,18 @@ npm --prefix github-pro-mcp run build
 cd github-pro-mcp
 ./scripts/mcp-start-pm2.sh
 ```
+
+#### Skill Spawner (Generate New Skills)
+```bash
+# Generate a CLI skill for any Kali tool
+python3 openclaw-bridge/scripts/spawner.py nmap --flags "-sV -sC"
+python3 openclaw-bridge/scripts/spawner.py nikto --force
+
+# Preview without writing files
+python3 openclaw-bridge/scripts/spawner.py dirb --dry-run
+```
+
+Generated skills include the full TSP v2/v3 runtime: lossless output storage, semantic clustering, anomaly extraction, cross-job diff, and baseline tagging. See the [Skill Runtime v1 Spec](./openclaw-bridge/docs/skill-runtime-v1.md) for the complete interface contract.
 
 #### Health Checks
 ```bash
@@ -58,10 +76,12 @@ cd "AG for OC"
 ## Documentation
 
 - [Project Architecture](./PROJECT_ARCHITECTURE.md)
+- [Skill Runtime v1 Spec](./openclaw-bridge/docs/skill-runtime-v1.md) — Formal interface contract for generated skills
 - [Bridge Setup & Operations](./openclaw-bridge/SETUP.md)
 - [Bridge API Contract](./openclaw-bridge/docs/API.md)
 - [Burp Integration](./openclaw-bridge/docs/BURP_INTEGRATION.md)
 - [LLDB Triage Flow](./openclaw-bridge/docs/LLDB_TRIAGE.md)
+- [Operations Guide](./openclaw-bridge/docs/OPERATIONS.md)
 
 ## Safety Notes
 

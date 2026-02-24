@@ -35,6 +35,13 @@ npm -v
 # PM2
 pm2 -v
 
+# Python + Jinja2 (for Skill Spawner)
+python3 --version
+python3 -c "import jinja2; print(jinja2.__version__)"
+
+# Docker (for Kali skill execution)
+docker --version
+
 # Ollama
 ollama --version
 
@@ -46,6 +53,8 @@ If missing:
 
 ```bash
 npm install -g pm2
+pip3 install jinja2
+brew install --cask docker
 brew install anomalyco/tap/opencode
 ```
 
@@ -87,6 +96,30 @@ cd "/Users/trevorrobey/AI-Agent-BountyHunt/openclaw-bridge/github-pro-mcp"
 npm install
 npm run build
 ```
+
+## 5b) Generate Skills (Skill Spawner)
+
+Generate new tool skills from Kali tool names:
+
+```bash
+cd "/Users/trevorrobey/AI-Agent-BountyHunt/openclaw-bridge"
+
+# Generate a CLI skill (headless-kali mode)
+python3 scripts/spawner.py nmap --flags "-sV -sC"
+
+# Preview without writing files or running hooks
+python3 scripts/spawner.py dirb --dry-run
+
+# Overwrite an existing skill
+python3 scripts/spawner.py nmap --force
+
+# Skip bridge restart after generation
+python3 scripts/spawner.py nikto --no-restart-bridge
+```
+
+Generated skills include the full TSP v2/v3 runtime (lossless storage, semantic clustering, anomaly extraction, cross-job diff, baseline tagging).
+
+See: `/Users/trevorrobey/AI-Agent-BountyHunt/openclaw-bridge/docs/skill-runtime-v1.md`
 
 ## 6) Start/Restart (PM2 Recommended)
 

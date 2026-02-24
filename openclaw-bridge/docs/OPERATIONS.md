@@ -120,3 +120,30 @@ curl -N -H "Authorization: Bearer $BRIDGE_AUTH_TOKEN" http://127.0.0.1:8787/mcp/
 ## Workspace boundary
 
 Treat `/Users/trevorrobey/AI-Agent-BountyHunt` as the active runtime workspace root for this stack.
+
+## Skill Spawner (generate new skills)
+
+Generate new tool skills using the Master Skill Spawner:
+
+```bash
+cd "/Users/trevorrobey/AI-Agent-BountyHunt/openclaw-bridge"
+
+# Generate a CLI skill
+python3 scripts/spawner.py nmap --flags "-sV -sC"
+
+# Dry-run (preview only)
+python3 scripts/spawner.py dirb --dry-run
+
+# Overwrite existing skill
+python3 scripts/spawner.py nmap --force
+```
+
+Generated skills are placed in `skills/<slug>/` and auto-synced to `~/.openclaw/skills/`.
+
+Each generated skill includes the full Skill Runtime v1 interface:
+- **Execution**: `run()`, `health()` \u2014 Docker-wrapped tool execution with redaction
+- **Forensics**: `read_output_chunk()`, `search_output()` \u2014 lossless output retrieval
+- **Analysis**: `semantic_summary()`, `anomaly_summary()`, `anomaly_diff()` \u2014 automated analysis
+- **Baseline**: `tag_baseline()`, `list_baselines()`, `diff_against_baseline()` \u2014 golden image comparison
+
+Runtime spec: `/Users/trevorrobey/AI-Agent-BountyHunt/openclaw-bridge/docs/skill-runtime-v1.md`
