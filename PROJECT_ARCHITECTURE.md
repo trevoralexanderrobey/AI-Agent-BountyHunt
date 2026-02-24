@@ -308,7 +308,51 @@ python3 spawner.py <tool_name> [--flags "..."] [--gui] [--force] [--dry-run] [--
 
 ---
 
-### 8. Burp Suite Integration (BionicLink)
+### 8. MCP Skill Containers (Distributed Execution)
+
+**MCP Server**: `/Users/trevorrobey/AI-Agent-BountyHunt/openclaw-bridge/runtime/mcp-skill-server.js`  
+**Spawner v2**: `/Users/trevorrobey/AI-Agent-BountyHunt/openclaw-bridge/spawner/spawner-v2.js`  
+**Dockerfile**: `/Users/trevorrobey/AI-Agent-BountyHunt/openclaw-bridge/containers/nmap/Dockerfile`  
+**Specs**: `docs/mcp-skill-container-spec.md`, `docs/spawner-v2-spec.md`  
+**Purpose**: Run individual skills as isolated Docker containers with JSON-RPC 2.0 MCP transport
+
+#### Architecture
+```
+Bridge / Director Agent
+        │
+        ▼
+  Spawner v2 (host-side)
+  ├── initialize()         → Create Docker network, cleanup orphans
+  ├── spawnSkill(slug)     → Build, run, health-probe container
+  ├── terminateSkill(id)   → Graceful stop + remove
+  ├── getSkillState(id)    → Registry lookup
+  ├── listSkillStates()    → All active containers
+  └── cleanupOrphans()     → Remove stale openclaw-skill-* containers
+        │
+        ▼
+  MCP Skill Server (in-container, port 4000)
+  ├── POST /mcp            → JSON-RPC 2.0 endpoint
+  ├── Bearer auth           → MCP_SKILL_TOKEN
+  ├── Method whitelist      → Skill Runtime v1 methods only
+  └── Execution timeout     → 60s default
+```
+
+#### Container Security
+- `--cap-drop ALL`, `--memory 512m`, `--cpus 1`, `--pids-limit 128`
+- `--read-only`, `--security-opt no-new-privileges`
+- Non-root user (`openclaw`)
+- No host volume mounts, no Docker socket, no privileged mode
+- Static image allowlist (no arbitrary images)
+- Auto-generated per-container bearer tokens
+
+#### Docker Network
+- Network: `openclaw-net` (bridge driver)
+- No host port publishing; containers communicate via internal IPs
+- Health probing: direct IP probe with `docker exec` fallback (macOS compatibility)
+
+---
+
+### 9. Burp Suite Integration (BionicLink)
 
 **Extension**: BionicLink (custom Burp extension)  
 **Port**: 8090 (HTTP)  
@@ -518,7 +562,12 @@ User receives scan summary with findings
 │   ├── bridge/                    # Bridge server (TypeScript)
 │   │   └── server.ts              # Main HTTP server
 │   ├── runtime/                   # Skill Runtime Core
-│   │   └── skill-runtime-core.js  # Extracted runtime module (TSP v2/v3)
+│   │   ├── skill-runtime-core.js  # Extracted runtime module (TSP v2/v3)
+│   │   └── mcp-skill-server.js    # JSON-RPC MCP server for containers
+│   ├── spawner/                   # Container lifecycle management
+│   │   └── spawner-v2.js          # Spawner v2 control plane
+│   ├── containers/                # Dockerfiles for containerized skills
+│   │   └── nmap/Dockerfile        # Containerized nmap skill
 │   ├── github-pro-mcp/            # MCP bridge for GitHub Pro
 │   │   ├── src/                   # MCP server source
 │   │   │   ├── server.ts          # MCP server entry
@@ -553,6 +602,8 @@ User receives scan summary with findings
 │   │   └── triage_bridge.py       # LLDB stop-hook
 │   ├── docs/                      # Documentation
 │   │   ├── skill-runtime-v1.md    # Skill Runtime v1 interface spec
+│   │   ├── mcp-skill-container-spec.md  # MCP container boundary spec
+│   │   ├── spawner-v2-spec.md     # Spawner v2 lifecycle spec
 │   │   ├── API.md                 # API contract
 │   │   ├── BURP_INTEGRATION.md    # Burp setup guide
 │   │   ├── LLDB_TRIAGE.md         # LLDB setup guide
@@ -794,6 +845,6 @@ This architecture is designed for security researchers, bug bounty hunters, and 
 
 ---
 
-**Document Version**: 1.1  
+**Document Version**: 1.2  
 **Last Updated**: February 24, 2026  
 **Maintained By**: Trevor Robey

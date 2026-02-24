@@ -147,3 +147,39 @@ Each generated skill includes the full Skill Runtime v1 interface:
 - **Baseline**: `tag_baseline()`, `list_baselines()`, `diff_against_baseline()` \u2014 golden image comparison
 
 Runtime spec: `/Users/trevorrobey/AI-Agent-BountyHunt/openclaw-bridge/docs/skill-runtime-v1.md`
+
+## MCP Skill Containers (distributed execution)
+
+Build and run skills as isolated Docker containers with JSON-RPC MCP transport:
+
+```bash
+cd "/Users/trevorrobey/AI-Agent-BountyHunt/openclaw-bridge"
+
+# Build containerized nmap skill
+docker build -f containers/nmap/Dockerfile -t openclaw-nmap-skill .
+
+# Run with hardened security
+docker run -d -p 4000:4000 --cap-drop ALL --name nmap-skill \
+  -e MCP_SKILL_TOKEN=your_token -e TOOL_NAME=nmap -e SKILL_SLUG=nmap \
+  openclaw-nmap-skill
+
+# Health check
+curl -sS http://127.0.0.1:4000/mcp \
+  -H 'Authorization: Bearer your_token' \
+  -H 'Content-Type: application/json' \
+  -d '{"jsonrpc":"2.0","method":"health","params":{},"id":"h1"}'
+```
+
+Spawner v2 automates container lifecycle (network creation, spawn with health probing, terminate, orphan cleanup):
+
+```bash
+# Validate Spawner v2 API
+node -e "const { createSpawnerV2 } = require('./spawner/spawner-v2.js'); console.log(Object.keys(createSpawnerV2()));"
+
+# List running skill containers
+docker ps --filter name=openclaw-skill-
+```
+
+Specs:
+- Container spec: `/Users/trevorrobey/AI-Agent-BountyHunt/openclaw-bridge/docs/mcp-skill-container-spec.md`
+- Spawner v2 spec: `/Users/trevorrobey/AI-Agent-BountyHunt/openclaw-bridge/docs/spawner-v2-spec.md`

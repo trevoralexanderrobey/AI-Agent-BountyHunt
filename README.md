@@ -47,6 +47,21 @@ python3 openclaw-bridge/scripts/spawner.py dirb --dry-run
 
 Generated skills include the full TSP v2/v3 runtime: lossless output storage, semantic clustering, anomaly extraction, cross-job diff, and baseline tagging. See the [Skill Runtime v1 Spec](./openclaw-bridge/docs/skill-runtime-v1.md) for the complete interface contract.
 
+#### MCP Skill Containers (Distributed Execution)
+```bash
+# Build a containerized nmap skill
+cd openclaw-bridge
+docker build -f containers/nmap/Dockerfile -t openclaw-nmap-skill .
+
+# Run with hardened security
+docker run -d -p 4000:4000 --cap-drop ALL --name nmap-skill \
+  -e MCP_SKILL_TOKEN=your_token -e TOOL_NAME=nmap -e SKILL_SLUG=nmap \
+  openclaw-nmap-skill
+
+# Spawn via Spawner v2 (automated lifecycle)
+node -e "(async()=>{const {createSpawnerV2}=require('./spawner/spawner-v2.js');const s=createSpawnerV2();await s.initialize();console.log(await s.spawnSkill('nmap'))})().catch(console.error)"
+```
+
 #### Health Checks
 ```bash
 curl -sS http://127.0.0.1:8787/health | jq
@@ -77,6 +92,8 @@ cd "AG for OC"
 
 - [Project Architecture](./PROJECT_ARCHITECTURE.md)
 - [Skill Runtime v1 Spec](./openclaw-bridge/docs/skill-runtime-v1.md) — Formal interface contract for generated skills
+- [MCP Skill Container Spec](./openclaw-bridge/docs/mcp-skill-container-spec.md) — JSON-RPC container transport boundary
+- [Spawner v2 Spec](./openclaw-bridge/docs/spawner-v2-spec.md) — Container lifecycle control plane
 - [Bridge Setup & Operations](./openclaw-bridge/SETUP.md)
 - [Bridge API Contract](./openclaw-bridge/docs/API.md)
 - [Burp Integration](./openclaw-bridge/docs/BURP_INTEGRATION.md)
