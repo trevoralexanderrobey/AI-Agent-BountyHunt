@@ -1,0 +1,157 @@
+const DEFAULT_DAEMON_BASE_URL = {{ daemon_url_json }};
+
+const SENSITIVE_PATTERNS = [
+  /authorization:\s*.*/gi,
+  /cookie:\s*.*/gi,
+  /set-cookie:\s*.*/gi,
+  /x-api-key:\s*.*/gi,
+  /"authorization"\s*:\s*"[^"]*"/gi,
+  /"cookie"\s*:\s*"[^"]*"/gi,
+  /"set-cookie"\s*:\s*"[^"]*"/gi,
+  /"x-api-key"\s*:\s*"[^"]*"/gi,
+];
+
+function redactHeaders(input) {
+  const text = typeof input === "string" ? input : String(input || "");
+  let redacted = text;
+  for (const pattern of SENSITIVE_PATTERNS) {
+    redacted = redacted.replace(pattern, (match) => {
+      if (match.startsWith("\"")) {
+        const field = match.split(":")[0];
+        return `${field}: "<redacted>"`;
+      }
+      return `${match.split(":")[0]}: <redacted>`;
+    });
+  }
+  return redacted;
+}
+
+function truncate(input, maxChars = 4000) {
+  const text = typeof input === "string" ? input : String(input || "");
+  if (text.length <= maxChars) {
+    return text;
+  }
+  return `${text.slice(0, maxChars)}\n...<truncated>`;
+}
+
+function summarizePayload(payload) {
+  const raw = typeof payload === "string" ? payload : JSON.stringify(payload || {}, null, 2);
+  return truncate(redactHeaders(raw));
+}
+
+function normalizeBaseUrl(url) {
+  return String(url || "").trim().replace(/\/+$/, "");
+}
+
+function getBaseUrl(args = {}) {
+  const fromArgs = typeof args.daemon_url === "string" ? args.daemon_url : "";
+  const fromEnv = typeof process.env.OPENCLAW_GUI_DAEMON_URL === "string" ? process.env.OPENCLAW_GUI_DAEMON_URL : "";
+  return normalizeBaseUrl(fromArgs || fromEnv || DEFAULT_DAEMON_BASE_URL);
+}
+
+async function requestJson(baseUrl, method, route, body, timeoutMs = 15000) {
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), timeoutMs);
+  const url = `${baseUrl}${route}`;
+
+  try {
+    const response = await fetch(url, {
+      method,
+      headers: { "Content-Type": "application/json" },
+      body: body == null ? undefined : JSON.stringify(body),
+      signal: controller.signal,
+    });
+
+    const text = await response.text();
+    let data;
+    try {
+      data = text ? JSON.parse(text) : {};
+    } catch {
+      data = { raw: text };
+    }
+
+    if (!response.ok) {
+      const summary = summarizePayload(data);
+      throw new Error(`HTTP ${response.status} from ${route}: ${summary}`);
+    }
+
+    return {
+      ok: true,
+      status: response.status,
+      data,
+      summary: summarizePayload(data),
+    };
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    throw new Error(`Daemon request failed (${method} ${route}): ${message}`);
+  } finally {
+    clearTimeout(timeout);
+  }
+}
+
+function requireSessionId(args = {}) {
+  const sessionId = String(args.session_id || args.sessionId || "").trim();
+  if (!sessionId) {
+    throw new Error("session_id is required");
+  }
+  return sessionId;
+}
+
+module.exports = {
+  async {{ slug }}_health(args = {}) {
+    const baseUrl = getBaseUrl(args);
+    const result = await requestJson(baseUrl, "GET", "/health");
+    return {
+      ok: true,
+      mode: "gui-bridge",
+      tool: {{ tool_name_json }},
+      daemon_url: baseUrl,
+      result,
+    };
+  },
+
+  async {{ slug }}_session_start(args = {}) {
+    const baseUrl = getBaseUrl(args);
+    const payload = {
+      session_id: args.session_id || args.sessionId,
+      title: args.title || `{{ slug }} session`,
+      metadata: args.metadata || {},
+    };
+    const result = await requestJson(baseUrl, "POST", "/session", payload);
+    return {
+      ok: true,
+      mode: "gui-bridge",
+      tool: {{ tool_name_json }},
+      daemon_url: baseUrl,
+      result,
+    };
+  },
+
+  async {{ slug }}_session_status(args = {}) {
+    const baseUrl = getBaseUrl(args);
+    const sessionId = requireSessionId(args);
+    const result = await requestJson(baseUrl, "GET", `/session/${encodeURIComponent(sessionId)}/state`);
+    return {
+      ok: true,
+      mode: "gui-bridge",
+      tool: {{ tool_name_json }},
+      daemon_url: baseUrl,
+      session_id: sessionId,
+      result,
+    };
+  },
+
+  async {{ slug }}_session_close(args = {}) {
+    const baseUrl = getBaseUrl(args);
+    const sessionId = requireSessionId(args);
+    const result = await requestJson(baseUrl, "POST", `/session/${encodeURIComponent(sessionId)}/close`, {});
+    return {
+      ok: true,
+      mode: "gui-bridge",
+      tool: {{ tool_name_json }},
+      daemon_url: baseUrl,
+      session_id: sessionId,
+      result,
+    };
+  },
+};

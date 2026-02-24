@@ -1,0 +1,23 @@
+const { createSkillRuntime } = require("/Users/trevorrobey/AI-Agent-BountyHunt/openclaw-bridge/runtime/skill-runtime-core.js");
+
+const runtime = createSkillRuntime({
+  slug: {{ slug_json }},
+  toolName: {{ tool_name_json }},
+  defaultFlags: {{ default_flags_json }},
+  injectHostNet: {{ "true" if inject_host_net else "false" }},
+});
+
+module.exports = {
+  {{ slug }}_run: runtime.run,
+  {{ slug }}_health: runtime.health,
+  {{ slug }}_read_output_chunk: runtime.read_output_chunk,
+  {{ slug }}_search_output: runtime.search_output,
+  {{ slug }}_output_meta: runtime.output_meta,
+  {{ slug }}_semantic_summary: runtime.semantic_summary,
+  {{ slug }}_anomaly_summary: runtime.anomaly_summary,
+  {{ slug }}_tag_baseline: runtime.tag_baseline,
+  {{ slug }}_list_baselines: runtime.list_baselines,
+  {{ slug }}_diff_against_baseline: runtime.diff_against_baseline,
+  {{ slug }}_anomaly_diff: runtime.anomaly_diff,
+  {{ slug }}_semantic_diff: runtime.semantic_diff,
+};
