@@ -315,3 +315,24 @@ Specs:
 - Framework: `/Users/trevorrobey/AI-Agent-BountyHunt/openclaw-bridge/docs/tool-adapter-framework.md`
 - Batch 1: `/Users/trevorrobey/AI-Agent-BountyHunt/openclaw-bridge/docs/batch-1-tools.md`
 - Batch 2: `/Users/trevorrobey/AI-Agent-BountyHunt/openclaw-bridge/docs/batch-2-tools.md`
+
+## Persistent control plane state (Phase 14)
+
+File-backed persistence for supervisor metadata across restarts:
+
+```bash
+# Configure state file path (optional, default: ./data/control-plane-state.json)
+export STATE_STORE_PATH=/path/to/control-plane-state.json
+```
+
+Persists: idempotency store, request queue, circuit breaker state, peer registry metadata.
+
+Recovery on startup:
+1. Loads and prunes expired entries automatically
+2. Coerces `HALF_OPEN` circuits to `OPEN` for safety
+3. Restores peer metadata (tokenless) and triggers immediate heartbeat
+4. Never auto-retries incomplete executions
+
+Safety: atomic writes (temp + rename), debounced (1s), no tokens/secrets persisted.
+
+Spec: `/Users/trevorrobey/AI-Agent-BountyHunt/openclaw-bridge/docs/persistent-state-spec.md`

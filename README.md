@@ -18,6 +18,7 @@ Key capabilities:
 - **Production Hardening** — TLS/mTLS, HMAC request signing, audit logging, Prometheus exporter
 - **Tool Adapter Framework** — Direct CLI tool execution (curl, nslookup, whois, hashcat, sqlmap, nikto, aircrack, msfvenom, ffuf)
 - **Federation** — Multi-node peer registry, remote execution, heartbeat monitoring, deterministic overflow routing
+- **Persistent State** — File-backed control plane persistence (idempotency, queue, circuit breaker, peer metadata)
 - **MCP Bridge** — Director → Executor pattern connecting GitHub Pro / Antigravity / Codex to OpenClaw
 
 ### OpenClaw Bridge Runtime
@@ -112,6 +113,7 @@ cd "AG for OC"
 - [Batch 2 Tools](./openclaw-bridge/docs/batch-2-tools.md) — hashcat, sqlmap, nikto adapters
 - [Batch 3 Tools](./openclaw-bridge/docs/batch-3-tools.md) — aircrack, msfvenom, ffuf adapters
 - [Federation Spec](./openclaw-bridge/docs/federation-spec.md) — Multi-node peer registry and deterministic routing
+- [Persistent State Spec](./openclaw-bridge/docs/persistent-state-spec.md) — File-backed control plane persistence
 - [Bridge Setup & Operations](./openclaw-bridge/SETUP.md)
 - [Bridge API Contract](./openclaw-bridge/docs/API.md)
 - [Burp Integration](./openclaw-bridge/docs/BURP_INTEGRATION.md)

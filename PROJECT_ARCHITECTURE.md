@@ -555,7 +555,37 @@ Bridge / Director Agent
 
 ---
 
-### 16. Burp Suite Integration (BionicLink)
+### 16. Persistent Control Plane State (Phase 14)
+
+**Persistent Store**: `/Users/trevorrobey/AI-Agent-BountyHunt/openclaw-bridge/state/persistent-store.js`  
+**State Manager**: `/Users/trevorrobey/AI-Agent-BountyHunt/openclaw-bridge/state/state-manager.js`  
+**Spec**: `/Users/trevorrobey/AI-Agent-BountyHunt/openclaw-bridge/docs/persistent-state-spec.md`  
+**Purpose**: File-backed persistence for supervisor control plane metadata across process restarts
+
+#### Persisted Structures
+- Idempotency store (replay entries with TTL)
+- Request queue (pending retry entries)
+- Circuit breaker state (per-slug open/closed/half-open)
+- Peer registry metadata (no tokens ever persisted)
+
+#### Guarantees
+- Atomic writes via temp file + `rename`
+- Debounced (max once per second)
+- Graceful corruption handling (load failure is non-fatal)
+- Sensitive data exclusions enforced (no tokens, secrets, TLS keys)
+
+#### Recovery on Startup
+1. Load persisted envelope, prune expired idempotency/queue entries
+2. Coerce `HALF_OPEN` circuit states to `OPEN`
+3. Restore peer metadata (tokenless), trigger immediate heartbeat
+4. No auto-retry of incomplete executions
+
+#### Configuration
+- `STATE_STORE_PATH` env var (default: `./data/control-plane-state.json`)
+
+---
+
+### 17. Burp Suite Integration (BionicLink)
 
 **Extension**: BionicLink (custom Burp extension)  
 **Port**: 8090 (HTTP)  
@@ -806,6 +836,9 @@ User receives scan summary with findings
 │   │   ├── peer-registry.js       # Peer registry and health tracking
 │   │   ├── remote-client.js       # Remote execution client
 │   │   └── heartbeat.js           # Periodic peer health probing
+│   ├── state/                     # Persistent control plane state (Phase 14)
+│   │   ├── persistent-store.js    # Atomic file-backed JSON persistence
+│   │   └── state-manager.js       # State recovery orchestration
 │   ├── containers/                # Dockerfiles for containerized skills
 │   │   └── nmap/Dockerfile        # Containerized nmap skill
 │   ├── github-pro-mcp/            # MCP bridge for GitHub Pro
@@ -854,6 +887,7 @@ User receives scan summary with findings
 │   │   ├── batch-2-tools.md       # Batch 2 tool adapters (hashcat, sqlmap, nikto)
 │   │   ├── batch-3-tools.md       # Batch 3 tool adapters (aircrack, msfvenom, ffuf)
 │   │   ├── federation-spec.md     # Federation transport and routing spec
+│   │   ├── persistent-state-spec.md  # Persistent control plane state spec
 │   │   ├── API.md                 # API contract
 │   │   ├── BURP_INTEGRATION.md    # Burp setup guide
 │   │   ├── LLDB_TRIAGE.md         # LLDB setup guide
@@ -1095,6 +1129,6 @@ This architecture is designed for security researchers, bug bounty hunters, and 
 
 ---
 
-**Document Version**: 1.6  
+**Document Version**: 1.7  
 **Last Updated**: February 25, 2026  
 **Maintained By**: Trevor Robey
