@@ -352,7 +352,67 @@ Bridge / Director Agent
 
 ---
 
-### 9. Burp Suite Integration (BionicLink)
+### 9. Supervisor v1 (Routing & Pooling)
+
+**Module**: `/Users/trevorrobey/AI-Agent-BountyHunt/openclaw-bridge/supervisor/supervisor-v1.js`  
+**Spec**: `/Users/trevorrobey/AI-Agent-BountyHunt/openclaw-bridge/docs/supervisor-v1-spec.md`  
+**Purpose**: Deterministic routing and connection pooling layer over Spawner v2
+
+#### Public API
+- `initialize()` — Initialize Spawner v2 (no pre-spawning)
+- `execute(slug, method, params)` — Route request to a pooled container instance
+- `getStatus()` — Sanitized pool snapshot (no tokens exposed)
+- `reapIdle()` — Terminate idle instances beyond TTL
+- `shutdown()` — Gracefully terminate all instances
+
+#### Routing Logic
+1. Select oldest idle READY instance (deterministic: `lastUsedAt`, then `containerId`)
+2. If none available, spawn new instance (if under `maxInstances`)
+3. If at capacity, reject immediately (`SUPERVISOR_CAPACITY_EXCEEDED`)
+4. Mark instance BUSY during execution, return to READY on completion
+5. On transport failure: remove instance, terminate via Spawner, throw `INSTANCE_FAILED`
+
+#### Per-Skill Configuration
+- `maxInstances: 5` (default for nmap)
+- `idleTTLms: 60000` (1 minute idle timeout)
+
+#### Safety
+- Never executes Docker commands directly (delegates to Spawner v2)
+- Never exposes container tokens in status or errors
+- Per-slug mutex prevents race conditions
+- BUSY entries are never left stuck after timeout/failure
+
+---
+
+### 10. Observability (Telemetry)
+
+**Module**: `/Users/trevorrobey/AI-Agent-BountyHunt/openclaw-bridge/observability/metrics.js`  
+**Spec**: `/Users/trevorrobey/AI-Agent-BountyHunt/openclaw-bridge/docs/observability-spec.md`  
+**Purpose**: Deterministic in-memory telemetry for Supervisor and Spawner
+
+#### API
+- `increment(counterName, labels?)` — Increment a counter
+- `observe(histogramName, value, labels?)` — Record a histogram observation
+- `gauge(name, value, labels?)` — Set a gauge value
+- `snapshot()` — Deterministic sorted snapshot of all metrics
+- `reset()` — Clear all metrics
+
+#### Metric Namespaces
+
+| Namespace | Owner | Examples |
+|-----------|-------|----------|
+| `supervisor.*` | Supervisor v1 | `supervisor.executions.total`, `supervisor.spawn.duration_ms`, `supervisor.instances.ready` |
+| `spawner.*` | Spawner v2 | `spawner.spawn.attempt`, `spawner.spawn.duration_ms`, `spawner.health.timeout` |
+
+#### Guarantees
+- All metric operations are non-throwing
+- Labels are canonicalized with sorted keys
+- Histogram buckets: `[10, 50, 100, 250, 500, 1000, 2500, 5000, 10000, +Inf]`
+- No tokens, auth headers, or sensitive data in metric labels
+
+---
+
+### 11. Burp Suite Integration (BionicLink)
 
 **Extension**: BionicLink (custom Burp extension)  
 **Port**: 8090 (HTTP)  
@@ -566,6 +626,10 @@ User receives scan summary with findings
 │   │   └── mcp-skill-server.js    # JSON-RPC MCP server for containers
 │   ├── spawner/                   # Container lifecycle management
 │   │   └── spawner-v2.js          # Spawner v2 control plane
+│   ├── supervisor/                # Routing and pooling layer
+│   │   └── supervisor-v1.js       # Supervisor v1 (routing, pooling, lifecycle)
+│   ├── observability/              # Telemetry system
+│   │   └── metrics.js             # In-memory metrics (counters, histograms, gauges)
 │   ├── containers/                # Dockerfiles for containerized skills
 │   │   └── nmap/Dockerfile        # Containerized nmap skill
 │   ├── github-pro-mcp/            # MCP bridge for GitHub Pro
@@ -604,6 +668,8 @@ User receives scan summary with findings
 │   │   ├── skill-runtime-v1.md    # Skill Runtime v1 interface spec
 │   │   ├── mcp-skill-container-spec.md  # MCP container boundary spec
 │   │   ├── spawner-v2-spec.md     # Spawner v2 lifecycle spec
+│   │   ├── supervisor-v1-spec.md  # Supervisor v1 routing/pooling spec
+│   │   ├── observability-spec.md  # Observability telemetry spec
 │   │   ├── API.md                 # API contract
 │   │   ├── BURP_INTEGRATION.md    # Burp setup guide
 │   │   ├── LLDB_TRIAGE.md         # LLDB setup guide
@@ -845,6 +911,6 @@ This architecture is designed for security researchers, bug bounty hunters, and 
 
 ---
 
-**Document Version**: 1.2  
+**Document Version**: 1.3  
 **Last Updated**: February 24, 2026  
 **Maintained By**: Trevor Robey

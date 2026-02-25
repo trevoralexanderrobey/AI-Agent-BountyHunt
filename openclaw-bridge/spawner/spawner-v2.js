@@ -28,8 +28,63 @@ const NON_ZERO_RM_OK = /No such container|No such object/i;
 const NON_ZERO_INSPECT_OK = /No such container|No such object/i;
 const DOCKER_UNAVAILABLE_REGEX = /Cannot connect to the Docker daemon|Is the docker daemon running|error during connect|permission denied while trying to connect/i;
 
-function createSpawnerV2() {
+function createNoopMetrics() {
+  return {
+    increment: () => {},
+    observe: () => {},
+    gauge: () => {},
+    snapshot: () => ({ counters: [], histograms: [], gauges: [] }),
+    reset: () => {},
+  };
+}
+
+function createSafeMetrics(rawMetrics) {
+  const noop = createNoopMetrics();
+  const source = rawMetrics && typeof rawMetrics === "object" ? rawMetrics : noop;
+
+  return {
+    increment: (...args) => {
+      try {
+        if (typeof source.increment === "function") {
+          source.increment(...args);
+        }
+      } catch {}
+    },
+    observe: (...args) => {
+      try {
+        if (typeof source.observe === "function") {
+          source.observe(...args);
+        }
+      } catch {}
+    },
+    gauge: (...args) => {
+      try {
+        if (typeof source.gauge === "function") {
+          source.gauge(...args);
+        }
+      } catch {}
+    },
+    snapshot: () => {
+      try {
+        if (typeof source.snapshot === "function") {
+          return source.snapshot();
+        }
+      } catch {}
+      return { counters: [], histograms: [], gauges: [] };
+    },
+    reset: () => {
+      try {
+        if (typeof source.reset === "function") {
+          source.reset();
+        }
+      } catch {}
+    },
+  };
+}
+
+function createSpawnerV2(options = {}) {
   const registry = new Map();
+  const metrics = createSafeMetrics(options.metrics);
   let initialized = false;
 
   function makeFailure(code, message, details) {
@@ -488,7 +543,7 @@ function createSpawnerV2() {
     };
   }
 
-  async function waitForReady(containerId, containerName, token) {
+  async function waitForReady(containerId, containerName, token, slug) {
     const deadline = Date.now() + HEALTH_TIMEOUT_MS;
     let lastInspectError = null;
 
@@ -522,7 +577,8 @@ function createSpawnerV2() {
       });
     }
 
-      throw makeFailure("HEALTHCHECK_TIMEOUT", `Container did not become healthy within ${HEALTH_TIMEOUT_MS}ms`);
+    metrics.increment("spawner.health.timeout", { slug });
+    throw makeFailure("HEALTHCHECK_TIMEOUT", `Container did not become healthy within ${HEALTH_TIMEOUT_MS}ms`);
   }
 
   async function initializeInternal() {
@@ -557,6 +613,9 @@ function createSpawnerV2() {
     if (!initialized) {
       await initializeInternal();
     }
+
+    const spawnStartedAt = Date.now();
+    metrics.increment("spawner.spawn.attempt", { slug });
 
     const token = makeToken();
     const name = makeContainerName(slug);
@@ -619,12 +678,13 @@ function createSpawnerV2() {
     setRegistryState(containerId, STATES.STARTING);
 
     try {
-      const ipAddress = await waitForReady(containerId, name, token);
+      const ipAddress = await waitForReady(containerId, name, token, slug);
       const networkAddress = `http://${ipAddress}:${CONTAINER_HTTP_PORT}/mcp`;
       setRegistryState(containerId, STATES.READY, {
         networkAddress,
         lastError: null,
       });
+      metrics.increment("spawner.spawn.success", { slug });
       return {
         containerId,
         name,
@@ -634,6 +694,7 @@ function createSpawnerV2() {
         state: STATES.READY,
       };
     } catch (error) {
+      metrics.increment("spawner.spawn.failure", { slug });
       setRegistryState(containerId, STATES.FAILED, {
         lastError: error && error.message ? String(error.message) : "Health check failed",
       });
@@ -650,6 +711,8 @@ function createSpawnerV2() {
         });
       }
       throw error;
+    } finally {
+      metrics.observe("spawner.spawn.duration_ms", Date.now() - spawnStartedAt, { slug });
     }
   }
 
@@ -669,11 +732,13 @@ function createSpawnerV2() {
   async function terminateSkillInternal(containerId) {
     const key = typeof containerId === "string" ? containerId.trim() : "";
     if (!key) {
+      metrics.increment("spawner.terminate.failure", { slug: "unknown" });
       throw makeFailure("CONTAINER_NOT_FOUND", "containerId is required");
     }
 
     const entry = registry.get(key);
     if (!entry) {
+      metrics.increment("spawner.terminate.failure", { slug: "unknown" });
       throw makeFailure("CONTAINER_NOT_FOUND", "containerId is not tracked by spawner", {
         containerId: key,
       });
@@ -688,6 +753,7 @@ function createSpawnerV2() {
         networkAddress: null,
         lastError: null,
       });
+      metrics.increment("spawner.terminate.success", { slug: entry.slug });
       return {
         ok: true,
         containerId: key,
@@ -696,6 +762,7 @@ function createSpawnerV2() {
         state: updated ? updated.state : STATES.TERMINATED,
       };
     } catch (error) {
+      metrics.increment("spawner.terminate.failure", { slug: entry.slug });
       setRegistryState(key, STATES.FAILED, {
         lastError: error && error.message ? String(error.message) : "Termination failed",
       });

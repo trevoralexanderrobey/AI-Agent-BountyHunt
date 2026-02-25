@@ -10,6 +10,9 @@ Key capabilities:
 - **OpenClaw Bridge** — Job queue, tool router, and Burp/LLDB integrations on port `8787`
 - **Skill Spawner** — Generate new tool skills from Kali tool names with `spawner.py`
 - **Skill Runtime v1** — Extracted runtime core with TSP v2/v3 (lossless storage, semantic analysis, anomaly detection, cross-job diff, baseline tagging)
+- **MCP Skill Containers** — Isolated Docker containers with JSON-RPC 2.0 transport
+- **Supervisor v1** — Deterministic routing, connection pooling, and lifecycle management for skill containers
+- **Observability** — In-memory telemetry (counters, histograms, gauges) for Supervisor and Spawner
 - **MCP Bridge** — Director → Executor pattern connecting GitHub Pro / Antigravity / Codex to OpenClaw
 
 ### OpenClaw Bridge Runtime
@@ -94,6 +97,8 @@ cd "AG for OC"
 - [Skill Runtime v1 Spec](./openclaw-bridge/docs/skill-runtime-v1.md) — Formal interface contract for generated skills
 - [MCP Skill Container Spec](./openclaw-bridge/docs/mcp-skill-container-spec.md) — JSON-RPC container transport boundary
 - [Spawner v2 Spec](./openclaw-bridge/docs/spawner-v2-spec.md) — Container lifecycle control plane
+- [Supervisor v1 Spec](./openclaw-bridge/docs/supervisor-v1-spec.md) — Routing, pooling, and lifecycle management
+- [Observability Spec](./openclaw-bridge/docs/observability-spec.md) — In-memory telemetry system
 - [Bridge Setup & Operations](./openclaw-bridge/SETUP.md)
 - [Bridge API Contract](./openclaw-bridge/docs/API.md)
 - [Burp Integration](./openclaw-bridge/docs/BURP_INTEGRATION.md)

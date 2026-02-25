@@ -183,3 +183,51 @@ docker ps --filter name=openclaw-skill-
 Specs:
 - Container spec: `/Users/trevorrobey/AI-Agent-BountyHunt/openclaw-bridge/docs/mcp-skill-container-spec.md`
 - Spawner v2 spec: `/Users/trevorrobey/AI-Agent-BountyHunt/openclaw-bridge/docs/spawner-v2-spec.md`
+
+## Supervisor v1 (routing and pooling)
+
+Supervisor v1 provides deterministic routing and connection pooling over Spawner v2:
+
+```bash
+cd "/Users/trevorrobey/AI-Agent-BountyHunt/openclaw-bridge"
+
+# Validate Supervisor v1 API
+node -e "const { createSupervisorV1 } = require('./supervisor/supervisor-v1.js'); console.log(Object.keys(createSupervisorV1()));"
+
+# Initialize and execute
+node -e "(async()=>{
+  const { createSupervisorV1 } = require('./supervisor/supervisor-v1.js');
+  const sv = createSupervisorV1();
+  await sv.initialize();
+  console.log(await sv.execute('nmap', 'health', {}));
+  console.log(await sv.getStatus());
+  await sv.shutdown();
+})().catch(console.error)"
+```
+
+Key behaviors:
+- Routes to oldest idle READY instance, spawns on-demand if under `maxInstances`
+- Rejects at capacity (`SUPERVISOR_CAPACITY_EXCEEDED`)
+- `reapIdle()` terminates instances idle beyond `idleTTLms` (default 60s)
+- `shutdown()` gracefully terminates all pooled instances
+
+Spec: `/Users/trevorrobey/AI-Agent-BountyHunt/openclaw-bridge/docs/supervisor-v1-spec.md`
+
+## Observability (telemetry)
+
+In-memory metrics for Supervisor and Spawner. No external exporters or file I/O:
+
+```bash
+# Access metrics snapshot via Supervisor
+node -e "(async()=>{
+  const { createSupervisorV1 } = require('./supervisor/supervisor-v1.js');
+  const sv = createSupervisorV1();
+  await sv.initialize();
+  console.log(JSON.stringify(sv.getMetrics(), null, 2));
+  await sv.shutdown();
+})().catch(console.error)"
+```
+
+Namespaces: `supervisor.*` (routing/pool metrics) and `spawner.*` (container lifecycle metrics).
+
+Spec: `/Users/trevorrobey/AI-Agent-BountyHunt/openclaw-bridge/docs/observability-spec.md`
