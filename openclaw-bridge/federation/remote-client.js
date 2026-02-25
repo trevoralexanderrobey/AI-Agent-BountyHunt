@@ -15,6 +15,40 @@ function normalizeTimeoutMs(value) {
   return Math.floor(parsed);
 }
 
+function extractReplayResult(parsed) {
+  if (!isPlainObject(parsed)) {
+    return { ok: false };
+  }
+
+  if (isPlainObject(parsed.data) && Object.prototype.hasOwnProperty.call(parsed.data, "result")) {
+    return { ok: true, result: parsed.data.result };
+  }
+
+  if (Object.prototype.hasOwnProperty.call(parsed, "result")) {
+    return { ok: true, result: parsed.result };
+  }
+
+  const error = isPlainObject(parsed.error) ? parsed.error : null;
+  const details = error && isPlainObject(error.details) ? error.details : null;
+  if (details) {
+    if (Object.prototype.hasOwnProperty.call(details, "result")) {
+      return { ok: true, result: details.result };
+    }
+    if (Object.prototype.hasOwnProperty.call(details, "replayResult")) {
+      return { ok: true, result: details.replayResult };
+    }
+    if (Object.prototype.hasOwnProperty.call(details, "replay_result")) {
+      return { ok: true, result: details.replay_result };
+    }
+  }
+
+  if (error && Object.prototype.hasOwnProperty.call(error, "result")) {
+    return { ok: true, result: error.result };
+  }
+
+  return { ok: false };
+}
+
 function makeFailure(code, message, details = undefined) {
   const error = {
     code,
@@ -40,6 +74,7 @@ function createRemoteExecutionClient(options = {}) {
     const peerUrl = typeof peer.url === "string" ? peer.url.trim() : "";
     const authToken = typeof peer.authToken === "string" ? peer.authToken.trim() : "";
     const peerId = typeof peer.peerId === "string" ? peer.peerId : "";
+    const principalId = typeof payload.principalId === "string" ? payload.principalId.trim() : "";
 
     if (!peerUrl) {
       return makeFailure("INVALID_PEER", "peer.url is required");
@@ -107,6 +142,7 @@ function createRemoteExecutionClient(options = {}) {
             authorization: `Bearer ${authToken}`,
             "content-length": Buffer.byteLength(body, "utf8"),
             ...(requestId ? { "x-request-id": requestId } : {}),
+            ...(principalId ? { "x-principal-id": principalId } : {}),
           },
         },
         (res) => {
@@ -146,6 +182,36 @@ function createRemoteExecutionClient(options = {}) {
 
             const remoteCode = parsed && parsed.error && typeof parsed.error.code === "string" ? parsed.error.code : "REMOTE_ERROR";
             const remoteMessage = parsed && parsed.error && typeof parsed.error.message === "string" ? parsed.error.message : `Remote returned HTTP ${res.statusCode}`;
+
+            if (res.statusCode === 409 && remoteCode === "DUPLICATE_EXECUTION") {
+              const replay = extractReplayResult(parsed);
+              if (replay.ok) {
+                finalize({
+                  ok: true,
+                  peerId,
+                  statusCode: res.statusCode,
+                  latencyMs,
+                  replayed: true,
+                  idempotentReplay: true,
+                  response: {
+                    ok: true,
+                    data: {
+                      result: replay.result,
+                    },
+                  },
+                });
+                return;
+              }
+
+              finalize(
+                makeFailure("REMOTE_DUPLICATE_MISSING_RESULT", "Remote duplicate replay did not include a result payload", {
+                  peerId,
+                  statusCode: res.statusCode,
+                  latencyMs,
+                }),
+              );
+              return;
+            }
 
             finalize(
               makeFailure(remoteCode, remoteMessage, {

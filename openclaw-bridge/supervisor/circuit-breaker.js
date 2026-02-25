@@ -188,6 +188,58 @@ function createCircuitBreaker(options = {}) {
     return toSnapshot(entry);
   }
 
+  function exportState() {
+    return Array.from(stateBySlug.entries())
+      .sort((a, b) => a[0].localeCompare(b[0]))
+      .map(([slug, entry]) => ({
+        slug,
+        state: entry.state,
+        failureCount: entry.failureCount,
+        successCount: entry.successCount,
+        lastFailureAt: entry.lastFailureAt,
+        lastTransitionAt: entry.lastTransitionAt,
+        halfOpenInFlight: entry.halfOpenInFlight === true,
+      }));
+  }
+
+  function importState(rawState, options = {}) {
+    const entries = Array.isArray(rawState) ? rawState : [];
+    const now = Date.now();
+    const resetHalfOpenToOpen = options && options.resetHalfOpenToOpen === true;
+    stateBySlug.clear();
+
+    for (const item of entries) {
+      if (!item || typeof item !== "object") {
+        continue;
+      }
+      const slug = typeof item.slug === "string" ? item.slug.trim().toLowerCase() : "";
+      if (!slug) {
+        continue;
+      }
+
+      const state =
+        item.state === CIRCUIT_STATE.OPEN || item.state === CIRCUIT_STATE.HALF_OPEN || item.state === CIRCUIT_STATE.CLOSED
+          ? item.state
+          : CIRCUIT_STATE.CLOSED;
+      const normalizedState = resetHalfOpenToOpen && state === CIRCUIT_STATE.HALF_OPEN ? CIRCUIT_STATE.OPEN : state;
+      const failureCount = Number.isFinite(Number(item.failureCount)) ? Math.max(0, Math.floor(Number(item.failureCount))) : 0;
+      const successCount = Number.isFinite(Number(item.successCount)) ? Math.max(0, Math.floor(Number(item.successCount))) : 0;
+      const lastFailureAt = Number.isFinite(Number(item.lastFailureAt)) ? Math.max(0, Math.floor(Number(item.lastFailureAt))) : 0;
+      const lastTransitionAt = Number.isFinite(Number(item.lastTransitionAt))
+        ? Math.max(0, Math.floor(Number(item.lastTransitionAt)))
+        : now;
+
+      stateBySlug.set(slug, {
+        state: normalizedState,
+        failureCount,
+        successCount,
+        lastFailureAt,
+        lastTransitionAt,
+        halfOpenInFlight: false,
+      });
+    }
+  }
+
   return {
     enabled,
     checkBeforeRequest,
@@ -195,6 +247,8 @@ function createCircuitBreaker(options = {}) {
     recordFailure,
     releaseHalfOpenLease,
     getSnapshot,
+    exportState,
+    importState,
     constants: {
       failureThreshold,
       successThreshold,

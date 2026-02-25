@@ -69,8 +69,18 @@ function sanitizePeer(peerId, entry, includeSecret = false) {
   return base;
 }
 
-function createPeerRegistry() {
+function createPeerRegistry(options = {}) {
   const peers = new Map();
+  const onChange = options && typeof options.onChange === "function" ? options.onChange : null;
+
+  function emitChange() {
+    if (!onChange) {
+      return;
+    }
+    try {
+      onChange();
+    } catch {}
+  }
 
   function registerPeer(rawPeerId, config = {}) {
     const peerId = normalizePeerId(rawPeerId);
@@ -106,6 +116,7 @@ function createPeerRegistry() {
     };
 
     peers.set(peerId, entry);
+    emitChange();
     return sanitizePeer(peerId, entry, false);
   }
 
@@ -114,7 +125,11 @@ function createPeerRegistry() {
     if (!peerId) {
       return false;
     }
-    return peers.delete(peerId);
+    const removed = peers.delete(peerId);
+    if (removed) {
+      emitChange();
+    }
+    return removed;
   }
 
   function listPeers() {
@@ -174,7 +189,11 @@ function createPeerRegistry() {
     }
 
     if (health.status === STATUS_UP || health.status === STATUS_DOWN) {
-      entry.status = health.status;
+      if (!entry.authToken && health.status === STATUS_UP) {
+        entry.status = STATUS_DOWN;
+      } else {
+        entry.status = health.status;
+      }
     }
 
     if (Number.isFinite(Number(health.lastLatencyMs)) && Number(health.lastLatencyMs) >= 0) {
@@ -190,7 +209,90 @@ function createPeerRegistry() {
     }
 
     peers.set(peerId, entry);
+    emitChange();
     return true;
+  }
+
+  function exportMetadata() {
+    return Array.from(peers.entries())
+      .sort((a, b) => a[0].localeCompare(b[0]))
+      .map(([peerId, entry]) => ({
+        peerId,
+        url: entry.url,
+        status: entry.status,
+        capabilities: [...entry.capabilities],
+        lastLatencyMs: entry.lastLatencyMs,
+        lastHeartbeat: entry.lastHeartbeat,
+      }));
+  }
+
+  function importMetadata(rawMetadata) {
+    if (!Array.isArray(rawMetadata)) {
+      return {
+        applied: 0,
+        created: 0,
+        skipped: 0,
+      };
+    }
+
+    let applied = 0;
+    let created = 0;
+    let skipped = 0;
+
+    for (const item of rawMetadata) {
+      if (!isPlainObject(item)) {
+        skipped += 1;
+        continue;
+      }
+
+      const peerId = normalizePeerId(item.peerId);
+      const url = normalizeUrl(item.url);
+      if (!peerId || !url) {
+        skipped += 1;
+        continue;
+      }
+
+      const existing = peers.get(peerId);
+      const capabilities = normalizeCapabilities(item.capabilities);
+      const lastLatencyMs = Number.isFinite(Number(item.lastLatencyMs)) ? Math.max(0, Number(item.lastLatencyMs)) : 0;
+      const lastHeartbeat = Number.isFinite(Number(item.lastHeartbeat)) ? Math.max(0, Number(item.lastHeartbeat)) : 0;
+      const status = item.status === STATUS_UP || item.status === STATUS_DOWN ? item.status : STATUS_DOWN;
+
+      if (!existing) {
+        peers.set(peerId, {
+          url,
+          authToken: "",
+          status: STATUS_DOWN,
+          capabilities,
+          lastLatencyMs,
+          lastHeartbeat,
+        });
+        created += 1;
+        continue;
+      }
+
+      existing.url = url;
+      existing.capabilities = capabilities;
+      existing.lastLatencyMs = lastLatencyMs;
+      existing.lastHeartbeat = lastHeartbeat;
+      if (existing.authToken) {
+        existing.status = status;
+      } else {
+        existing.status = STATUS_DOWN;
+      }
+      peers.set(peerId, existing);
+      applied += 1;
+    }
+
+    if (applied > 0 || created > 0) {
+      emitChange();
+    }
+
+    return {
+      applied,
+      created,
+      skipped,
+    };
   }
 
   return {
@@ -200,6 +302,8 @@ function createPeerRegistry() {
     getPeer,
     getHealthyPeersForSlug,
     updatePeerHealth,
+    exportMetadata,
+    importMetadata,
     STATUS_UP,
     STATUS_DOWN,
   };

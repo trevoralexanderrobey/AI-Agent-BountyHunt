@@ -220,3 +220,57 @@ Remote path does not increment local execution counters, tool counters, instance
 4. No queue mutation for federation attempts.
 5. No circuit breaker state mutation caused by federation transport outcomes.
 6. No dual execution: remote success returns immediately and skips local execution.
+
+## Global Idempotency and Distributed Consistency Guard (Phase 13)
+
+Phase 13 extends federation behavior for cross-supervisor replay safety while preserving existing lock, queue, and circuit-breaker semantics.
+
+### Global Idempotency Contract
+
+1. When `idempotencyKey` is present, federation treats it as authoritative replay identity.
+2. Delegated requests forward:
+   1. `idempotencyKey`
+   2. `request_id`
+   3. `principalId` via `X-Principal-Id` header
+3. Remote timeout behavior remains:
+   1. no key: no cross-peer retry
+   2. key present: retry to next healthy peer is allowed
+
+### Strengthened Idempotency Store Key
+
+Supervisor local idempotency store keys are now derived from a SHA-256 digest of:
+
+1. `principalId`
+2. `slug`
+3. `method`
+4. `paramsHash` (stable-stringified params)
+5. `idempotencyKey`
+
+`request_id` is never included.
+
+Federated success/replay outcomes are also persisted in the same local idempotency store, so subsequent same-key requests can replay locally without re-delegating.
+
+### Remote Replay Guard
+
+Remote execution client replay rules:
+
+1. `HTTP 409` with `error.code === "DUPLICATE_EXECUTION"` is treated as replay success.
+2. Replay payload is extracted from remote response body and converted to normal success shape.
+3. Supervisor returns replay result directly and does not execute locally after replay success.
+
+### Conflict Resolution Policy
+
+For concurrent duplicate federation requests with the same principal/slug/method/idempotency key:
+
+1. First peer executes.
+2. Second peer may return `DUPLICATE_EXECUTION`.
+3. Caller receives a consistent success payload through replay mapping.
+
+### Phase 13 Federation Metrics
+
+Additional federation counters:
+
+1. `supervisor.federation.idempotent_replay`
+2. `supervisor.federation.duplicate_prevented`
+
+These counters do not add `request_id` labels.

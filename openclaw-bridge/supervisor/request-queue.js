@@ -54,6 +54,40 @@ class RequestQueue {
     this._tail = 0;
     this._size = 0;
   }
+
+  toArray() {
+    if (this._size === 0) {
+      return [];
+    }
+    const items = [];
+    for (let index = this._head; index < this._tail; index += 1) {
+      if (!this._store.has(index)) {
+        continue;
+      }
+      items.push(this._store.get(index));
+    }
+    return items;
+  }
+
+  fromArray(items) {
+    if (!Array.isArray(items)) {
+      this.clear();
+      return 0;
+    }
+
+    this.clear();
+    let loaded = 0;
+    for (const item of items) {
+      if (loaded >= this.maxLength) {
+        break;
+      }
+      this._store.set(this._tail, item);
+      this._tail += 1;
+      this._size += 1;
+      loaded += 1;
+    }
+    return loaded;
+  }
 }
 
 module.exports = {

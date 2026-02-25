@@ -5,6 +5,8 @@ const { createMetrics } = require("../observability/metrics.js");
 const { createAuthGuard } = require("../security/auth.js");
 const { createAuditLogger } = require("../security/audit-logger.js");
 const { createRateLimiter } = require("../security/rate-limit.js");
+const { CONTROL_PLANE_STATE_VERSION } = require("../state/persistent-store.js");
+const { createStateManager } = require("../state/state-manager.js");
 const { createSpawnerV2 } = require("../spawner/spawner-v2.js");
 const { createPeerRegistry, STATUS_DOWN, STATUS_UP } = require("../federation/peer-registry.js");
 const { createRemoteExecutionClient } = require("../federation/remote-client.js");
@@ -138,6 +140,11 @@ function createSupervisorV1(options = {}) {
   const queueEnabled = Boolean(options.queue && options.queue.enabled);
   const queueMaxLength = parsePositiveInt(options.queue && options.queue.maxLength, 100);
   const queuePollIntervalMs = parsePositiveInt(options.queue && options.queue.pollIntervalMs, 250);
+  const stateOptions = options.state && typeof options.state === "object" ? options.state : {};
+  const stateEnabled = stateOptions.enabled !== false;
+  const stateQueueItemTtlMs = parsePositiveInt(stateOptions.queueItemTtlMs, 300000);
+  const stateDebounceMs = parsePositiveInt(stateOptions.debounceMs, 1000);
+  const stateStorePath = typeof stateOptions.path === "string" && stateOptions.path.trim() ? stateOptions.path.trim() : undefined;
   const circuitBreaker = createCircuitBreaker({
     enabled: Boolean(options.circuitBreaker && options.circuitBreaker.enabled),
     failureThreshold:
@@ -193,7 +200,11 @@ function createSupervisorV1(options = {}) {
         ) {
           return candidate;
         }
-        return createPeerRegistry();
+        return createPeerRegistry({
+          onChange: () => {
+            scheduleStatePersist("peer_registry_change");
+          },
+        });
       })()
     : null;
   const federationRemoteClient = federationEnabled
@@ -258,6 +269,33 @@ function createSupervisorV1(options = {}) {
   let isShuttingDown = false;
   let queueTimer = null;
   let queueProcessorActive = false;
+  let statePersistenceInitialized = false;
+  let suspendStatePersistence = false;
+  const stateManager = stateEnabled
+    ? createStateManager({
+        version: CONTROL_PLANE_STATE_VERSION,
+        path: stateStorePath,
+        debounceMs: stateDebounceMs,
+        buildState: buildPersistentStatePayload,
+        applyState: restorePersistentState,
+        onError: (error) => {
+          const code = error && typeof error.code === "string" ? error.code : "STATE_PERSISTENCE_ERROR";
+          const message = error && typeof error.message === "string" ? error.message : "State persistence failure";
+          metrics.increment("supervisor.state.persistence.error", { code });
+          safeAudit({
+            event: "state_persistence_error",
+            principal_id: "system",
+            slug: "",
+            request_id: "",
+            status: "failure",
+            details: {
+              code,
+              message,
+            },
+          });
+        },
+      })
+    : null;
 
   function parsePositiveInt(value, fallback) {
     const parsed = Number.parseInt(String(value ?? "").trim(), 10);
@@ -325,6 +363,207 @@ function createSupervisorV1(options = {}) {
     try {
       auditLogger.log(event);
     } catch {}
+  }
+
+  function scheduleStatePersist(reason = "update") {
+    if (!stateManager || !statePersistenceInitialized || suspendStatePersistence) {
+      return;
+    }
+    stateManager.schedulePersist(reason);
+  }
+
+  function sanitizeRetryPolicyForPersistence(policy) {
+    if (!policy || typeof policy !== "object") {
+      return null;
+    }
+    return {
+      retries: parseNonNegativeInt(policy.retries, 0),
+      delayMs: parsePositiveInt(policy.delayMs, DEFAULT_RETRY_POLICY.delayMs),
+      backoffFactor: Number.isFinite(Number(policy.backoffFactor)) && Number(policy.backoffFactor) > 0 ? Number(policy.backoffFactor) : DEFAULT_RETRY_POLICY.backoffFactor,
+    };
+  }
+
+  function sanitizeQueueContextForPersistence(context) {
+    if (!context || typeof context !== "object") {
+      return {
+        __queueRetryExecution: true,
+      };
+    }
+
+    const persisted = {
+      __queueRetryExecution: true,
+    };
+
+    if (typeof context.requestId === "string" && context.requestId.trim()) {
+      persisted.requestId = context.requestId.trim().slice(0, 128);
+    }
+    if (typeof context.principalId === "string" && context.principalId.trim()) {
+      persisted.principalId = context.principalId.trim();
+    }
+    if (typeof context.idempotencyKey === "string" && context.idempotencyKey.trim()) {
+      persisted.idempotencyKey = context.idempotencyKey.trim().slice(0, 128);
+    }
+
+    const retryPolicy = sanitizeRetryPolicyForPersistence(context.retryPolicy);
+    if (retryPolicy) {
+      persisted.retryPolicy = retryPolicy;
+    }
+
+    return persisted;
+  }
+
+  function sanitizeQueueContextForRecovery(context) {
+    const recovered = sanitizeQueueContextForPersistence(context);
+    if (!recovered.principalId) {
+      recovered.principalId = "anonymous";
+    }
+    return recovered;
+  }
+
+  function buildPersistentStatePayload() {
+    const idempotencyEntries = Array.from(idempotencyStore.entries())
+      .map(([key, entry]) => ({
+        key,
+        createdAt: entry && Number.isFinite(Number(entry.createdAt)) ? Number(entry.createdAt) : 0,
+        paramsHash: entry && typeof entry.paramsHash === "string" ? entry.paramsHash : "",
+        result: entry ? cloneForIdempotency(entry.result) : null,
+        error: entry ? cloneForIdempotency(entry.error) : null,
+      }))
+      .sort((a, b) => {
+        if (a.createdAt !== b.createdAt) {
+          return a.createdAt - b.createdAt;
+        }
+        return String(a.key || "").localeCompare(String(b.key || ""));
+      });
+
+    const queueItems = requestQueue.toArray().map((item) => ({
+      slug: item && typeof item.slug === "string" ? item.slug : "",
+      method: item && typeof item.method === "string" ? item.method : "",
+      params: item ? cloneForIdempotency(item.params) : {},
+      requestContext: sanitizeQueueContextForPersistence(item && item.requestContext),
+      nextExecutionTime: item && Number.isFinite(Number(item.nextExecutionTime)) ? Number(item.nextExecutionTime) : Date.now(),
+      enqueuedAt: item && Number.isFinite(Number(item.enqueuedAt)) ? Number(item.enqueuedAt) : Date.now(),
+    }));
+
+    const circuitBreakerState =
+      circuitBreaker && typeof circuitBreaker.exportState === "function" ? circuitBreaker.exportState() : [];
+    const peerRegistryMetadata =
+      federationPeerRegistry && typeof federationPeerRegistry.exportMetadata === "function" ? federationPeerRegistry.exportMetadata() : [];
+
+    return {
+      idempotencyStore: idempotencyEntries,
+      requestQueue: {
+        maxLength: queueMaxLength,
+        items: queueItems,
+      },
+      circuitBreakerState,
+      peerRegistryMetadata,
+    };
+  }
+
+  async function restorePersistentState(rawPayload) {
+    if (!rawPayload || typeof rawPayload !== "object") {
+      return;
+    }
+
+    const now = Date.now();
+
+    if (idempotencyEnabled) {
+      idempotencyStore.clear();
+      const idempotencyEntries = Array.isArray(rawPayload.idempotencyStore) ? rawPayload.idempotencyStore : [];
+      idempotencyEntries
+        .filter((item) => item && typeof item === "object")
+        .sort((a, b) => {
+          const createdAtA = Number.isFinite(Number(a.createdAt)) ? Number(a.createdAt) : 0;
+          const createdAtB = Number.isFinite(Number(b.createdAt)) ? Number(b.createdAt) : 0;
+          if (createdAtA !== createdAtB) {
+            return createdAtA - createdAtB;
+          }
+          return String(a.key || "").localeCompare(String(b.key || ""));
+        })
+        .forEach((item) => {
+          const key = typeof item.key === "string" ? item.key : "";
+          const paramsHash = typeof item.paramsHash === "string" ? item.paramsHash : "";
+          const createdAt = Number.isFinite(Number(item.createdAt)) ? Math.max(0, Number(item.createdAt)) : 0;
+          if (!key || !paramsHash) {
+            return;
+          }
+          if (now - createdAt > idempotencyTtlMs) {
+            return;
+          }
+          idempotencyStore.set(key, {
+            createdAt,
+            paramsHash,
+            result: Object.prototype.hasOwnProperty.call(item, "result") ? cloneForIdempotency(item.result) : null,
+            error: Object.prototype.hasOwnProperty.call(item, "error") ? cloneForIdempotency(item.error) : null,
+          });
+        });
+      pruneIdempotencyStore(now);
+    }
+
+    if (queueEnabled) {
+      const queueItems = Array.isArray(rawPayload.requestQueue && rawPayload.requestQueue.items)
+        ? rawPayload.requestQueue.items
+        : [];
+      const recoveredQueue = [];
+      for (const item of queueItems) {
+        if (!item || typeof item !== "object") {
+          continue;
+        }
+        const slug = typeof item.slug === "string" ? item.slug : "";
+        const method = typeof item.method === "string" ? item.method : "";
+        if (!slug || !method) {
+          continue;
+        }
+        if (item.inFlight === true || (item.requestContext && item.requestContext.__inFlightExecution === true)) {
+          continue;
+        }
+
+        const enqueuedAt = Number.isFinite(Number(item.enqueuedAt)) ? Math.max(0, Number(item.enqueuedAt)) : now;
+        const nextExecutionTime = Number.isFinite(Number(item.nextExecutionTime)) ? Math.max(0, Number(item.nextExecutionTime)) : now;
+        const queueAge = now - Math.max(enqueuedAt, nextExecutionTime);
+        if (queueAge > stateQueueItemTtlMs) {
+          continue;
+        }
+
+        recoveredQueue.push({
+          slug,
+          method,
+          params: cloneForIdempotency(item.params),
+          requestContext: sanitizeQueueContextForRecovery(item.requestContext),
+          nextExecutionTime: Math.max(now, nextExecutionTime),
+          enqueuedAt,
+        });
+      }
+      requestQueue.fromArray(recoveredQueue);
+      publishQueueGauge();
+    }
+
+    if (circuitBreaker && typeof circuitBreaker.importState === "function") {
+      circuitBreaker.importState(rawPayload.circuitBreakerState, {
+        resetHalfOpenToOpen: true,
+      });
+
+      const circuitSlugs = new Set(Object.keys(SKILL_CONFIG));
+      if (Array.isArray(rawPayload.circuitBreakerState)) {
+        for (const item of rawPayload.circuitBreakerState) {
+          if (!item || typeof item !== "object" || typeof item.slug !== "string") {
+            continue;
+          }
+          const slug = item.slug.trim().toLowerCase();
+          if (slug) {
+            circuitSlugs.add(slug);
+          }
+        }
+      }
+      for (const slug of Array.from(circuitSlugs).sort((a, b) => a.localeCompare(b))) {
+        publishCircuitGauges(slug, circuitBreaker.getSnapshot(slug));
+      }
+    }
+
+    if (federationEnabled && federationPeerRegistry && typeof federationPeerRegistry.importMetadata === "function") {
+      federationPeerRegistry.importMetadata(rawPayload.peerRegistryMetadata);
+    }
   }
 
   function isSpawnerError(value) {
@@ -443,14 +682,23 @@ function createSupervisorV1(options = {}) {
     }
   }
 
-  function makeIdempotencyStoreKey(principalId, slug, method, idempotencyKey) {
-    return `${principalId}::${slug}::${method}::${idempotencyKey}`;
+  function makeIdempotencyStoreKey(principalId, slug, method, paramsHash, idempotencyKey) {
+    const keyMaterial = stableStringify({
+      principalId,
+      slug,
+      method,
+      paramsHash,
+      idempotencyKey,
+    });
+    const digest = crypto.createHash("sha256").update(keyMaterial, "utf8").digest("hex");
+    return `idem:v2:${digest}`;
   }
 
   function pruneIdempotencyStore(now) {
     if (!idempotencyEnabled) {
       return;
     }
+    let changed = false;
 
     while (idempotencyStore.size > 0) {
       const oldestKey = idempotencyStore.keys().next().value;
@@ -460,6 +708,7 @@ function createSupervisorV1(options = {}) {
       const oldestEntry = idempotencyStore.get(oldestKey);
       if (!oldestEntry || now - oldestEntry.createdAt > idempotencyTtlMs) {
         idempotencyStore.delete(oldestKey);
+        changed = true;
         continue;
       }
       break;
@@ -471,6 +720,11 @@ function createSupervisorV1(options = {}) {
         break;
       }
       idempotencyStore.delete(oldestKey);
+      changed = true;
+    }
+
+    if (changed) {
+      scheduleStatePersist("idempotency_prune");
     }
   }
 
@@ -484,6 +738,7 @@ function createSupervisorV1(options = {}) {
     }
     if (now - entry.createdAt > idempotencyTtlMs) {
       idempotencyStore.delete(storeKey);
+      scheduleStatePersist("idempotency_expired");
       return null;
     }
     if (entry.paramsHash !== paramsHash) {
@@ -522,6 +777,7 @@ function createSupervisorV1(options = {}) {
     });
 
     pruneIdempotencyStore(now);
+    scheduleStatePersist("idempotency_store");
   }
 
   function publishQueueGauge() {
@@ -551,6 +807,7 @@ function createSupervisorV1(options = {}) {
       return;
     }
 
+    scheduleStatePersist("circuit_transition");
     publishCircuitGauges(slug, transition.snapshot);
     if (transition.to === "OPEN") {
       metrics.increment("supervisor.circuit_breaker.trips", { slug });
@@ -640,6 +897,7 @@ function createSupervisorV1(options = {}) {
 
     metrics.increment("supervisor.retries.count", { slug, method, request_id: requestId });
     publishQueueGauge();
+    scheduleStatePersist("queue_enqueue");
 
     return {
       queued: true,
@@ -791,6 +1049,7 @@ function createSupervisorV1(options = {}) {
       method,
       params,
       request_id: requestId,
+      principalId,
     };
 
     if (idempotencyKey) {
@@ -812,6 +1071,7 @@ function createSupervisorV1(options = {}) {
           lastLatencyMs: latencyMs,
           lastHeartbeat: Date.now(),
         });
+        scheduleStatePersist("peer_registry_health");
       }
 
       if (remoteResult && remoteResult.ok === true) {
@@ -824,6 +1084,11 @@ function createSupervisorV1(options = {}) {
           status: STATUS_UP,
           lastHeartbeat: Date.now(),
         });
+        scheduleStatePersist("peer_registry_up");
+        if (remoteResult.replayed === true || remoteResult.idempotentReplay === true) {
+          metrics.increment("supervisor.federation.idempotent_replay", { slug });
+          metrics.increment("supervisor.federation.duplicate_prevented", { slug });
+        }
         metrics.increment("supervisor.federation.success", { slug });
         safeAudit({
           event: "execute",
@@ -854,6 +1119,7 @@ function createSupervisorV1(options = {}) {
           status: STATUS_DOWN,
           lastHeartbeat: Date.now(),
         });
+        scheduleStatePersist("peer_registry_down");
         metrics.increment("supervisor.federation.peer_down", { slug });
         metrics.increment("supervisor.federation.failure", { slug, reason: "timeout" });
         if (!idempotencyKey) {
@@ -930,6 +1196,7 @@ function createSupervisorV1(options = {}) {
 
       const dequeued = requestQueue.dequeue();
       publishQueueGauge();
+      scheduleStatePersist("queue_dequeue");
       if (!dequeued) {
         return;
       }
@@ -1297,6 +1564,20 @@ function createSupervisorV1(options = {}) {
 
   async function initialize() {
     await ensureInitialized();
+    if (stateManager && !statePersistenceInitialized) {
+      const loadResult = await stateManager.initialize();
+      statePersistenceInitialized = true;
+      if (loadResult && loadResult.loaded) {
+        scheduleStatePersist("startup_recovery");
+      }
+    }
+
+    if (federationEnabled && federationHeartbeat && typeof federationHeartbeat.runOnce === "function") {
+      try {
+        await federationHeartbeat.runOnce();
+      } catch {}
+    }
+
     initializeCircuitMetrics();
     startQueueProcessor();
     if (federationEnabled && federationHeartbeat && typeof federationHeartbeat.start === "function") {
@@ -1359,7 +1640,7 @@ function createSupervisorV1(options = {}) {
 
       if (idempotencyEnabled && idempotencyKey) {
         idempotencyParamsHash = stableStringify(params);
-        idempotencyStoreKey = makeIdempotencyStoreKey(principalId, slug, method, idempotencyKey);
+        idempotencyStoreKey = makeIdempotencyStoreKey(principalId, slug, method, idempotencyParamsHash, idempotencyKey);
         const replay = readIdempotencyReplay(idempotencyStoreKey, idempotencyParamsHash, Date.now());
         if (replay) {
           if (replay.kind === "runtime_error") {
@@ -1513,7 +1794,18 @@ function createSupervisorV1(options = {}) {
         });
 
         if (federationResult && federationResult.success) {
-          return federationResult.payload;
+          const federatedPayload = federationResult.payload;
+          const federatedRuntimeError =
+            Boolean(federatedPayload && typeof federatedPayload === "object") &&
+            federatedPayload.ok === false &&
+            Boolean(federatedPayload.error && typeof federatedPayload.error === "object");
+          storeIdempotencyOutcome(
+            idempotencyStoreKey,
+            idempotencyParamsHash,
+            federatedRuntimeError ? "runtime_error" : "result",
+            federatedPayload,
+          );
+          return federatedPayload;
         }
 
         if (federationResult && federationResult.attempted) {
@@ -1706,7 +1998,9 @@ function createSupervisorV1(options = {}) {
 
       if (!meta || !token) {
         if (circuitBreaker.enabled) {
-          applyCircuitTransitionMetrics(slug, circuitBreaker.recordFailure(slug), { requestId, principalId });
+          const transition = circuitBreaker.recordFailure(slug);
+          scheduleStatePersist("circuit_failure");
+          applyCircuitTransitionMetrics(slug, transition, { requestId, principalId });
         }
         await handleInstanceTransportFailure(slug, acquiredContainerId, {
           reason: "missing_instance_metadata",
@@ -1729,7 +2023,9 @@ function createSupervisorV1(options = {}) {
           entry.lastUsedAt = Date.now();
         });
         if (circuitBreaker.enabled) {
-          applyCircuitTransitionMetrics(slug, circuitBreaker.recordSuccess(slug), { requestId, principalId });
+          const transition = circuitBreaker.recordSuccess(slug);
+          scheduleStatePersist("circuit_success");
+          applyCircuitTransitionMetrics(slug, transition, { requestId, principalId });
         }
         storeIdempotencyOutcome(idempotencyStoreKey, idempotencyParamsHash, "result", rpcResult.result);
         metrics.increment("supervisor.executions.success", { slug, method });
@@ -1761,7 +2057,9 @@ function createSupervisorV1(options = {}) {
           entry.lastUsedAt = Date.now();
         });
         if (circuitBreaker.enabled) {
-          applyCircuitTransitionMetrics(slug, circuitBreaker.recordSuccess(slug), { requestId, principalId });
+          const transition = circuitBreaker.recordSuccess(slug);
+          scheduleStatePersist("circuit_success");
+          applyCircuitTransitionMetrics(slug, transition, { requestId, principalId });
         }
         const runtimeStyleError = buildRuntimeStyleErrorFromJsonRpc(rpcResult.error);
         storeIdempotencyOutcome(idempotencyStoreKey, idempotencyParamsHash, "runtime_error", runtimeStyleError);
@@ -1782,7 +2080,9 @@ function createSupervisorV1(options = {}) {
       }
 
       if (circuitBreaker.enabled) {
-        applyCircuitTransitionMetrics(slug, circuitBreaker.recordFailure(slug), { requestId, principalId });
+        const transition = circuitBreaker.recordFailure(slug);
+        scheduleStatePersist("circuit_failure");
+        applyCircuitTransitionMetrics(slug, transition, { requestId, principalId });
       }
       await handleInstanceTransportFailure(slug, acquiredContainerId, rpcResult, requestId, principalId);
     } catch (error) {
@@ -2012,6 +2312,7 @@ function createSupervisorV1(options = {}) {
 
   async function shutdown() {
     isShuttingDown = true;
+    suspendStatePersistence = true;
     stopQueueProcessor();
     if (federationEnabled && federationHeartbeat && typeof federationHeartbeat.stop === "function") {
       federationHeartbeat.stop();
@@ -2115,6 +2416,10 @@ function createSupervisorV1(options = {}) {
         failed,
       },
     });
+
+    if (stateManager) {
+      await stateManager.shutdown();
+    }
 
     return {
       ok: true,
