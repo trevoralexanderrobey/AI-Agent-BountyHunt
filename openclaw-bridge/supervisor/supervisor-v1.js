@@ -6,10 +6,14 @@ const { createAuthGuard } = require("../security/auth.js");
 const { createAuditLogger } = require("../security/audit-logger.js");
 const { createRateLimiter } = require("../security/rate-limit.js");
 const { createSpawnerV2 } = require("../spawner/spawner-v2.js");
+const { createPeerRegistry, STATUS_DOWN, STATUS_UP } = require("../federation/peer-registry.js");
+const { createRemoteExecutionClient } = require("../federation/remote-client.js");
+const { createPeerHeartbeat } = require("../federation/heartbeat.js");
 const { createCircuitBreaker } = require("./circuit-breaker.js");
 const { RequestQueue } = require("./request-queue.js");
 const { registerBatch1Tools } = require("../tools/adapters/index.js");
 const { registerBatch2Tools } = require("../tools/adapters/batch-2-index.js");
+const { registerBatch3Tools } = require("../tools/adapters/batch-3-index.js");
 const { createToolRegistry } = require("../tools/tool-registry.js");
 const { createToolValidator } = require("../tools/tool-validator.js");
 
@@ -125,6 +129,8 @@ class Mutex {
 
 function createSupervisorV1(options = {}) {
   const spawnerFactory = typeof options.spawnerFactory === "function" ? options.spawnerFactory : createSpawnerV2;
+  const federationOptions = options.federation && typeof options.federation === "object" ? options.federation : {};
+  const federationEnabled = Boolean(federationOptions.enabled);
   const requestTimeoutMs = parsePositiveInt(options.requestTimeoutMs, DEFAULT_REQUEST_TIMEOUT_MS);
   const idempotencyEnabled = Boolean(options.idempotency && options.idempotency.enabled);
   const idempotencyTtlMs = parsePositiveInt(options.idempotency && options.idempotency.ttlMs, 300000);
@@ -168,11 +174,69 @@ function createSupervisorV1(options = {}) {
   const toolRegistry = externalToolRegistry || createToolRegistry({ strict: false });
   registerBatch1Tools(toolRegistry);
   registerBatch2Tools(toolRegistry);
+  registerBatch3Tools(toolRegistry);
   registerConfiguredToolAdapters(toolRegistry, options.toolAdapters);
   if (!externalToolRegistry && typeof toolRegistry.seal === "function") {
     toolRegistry.seal();
   }
   const toolValidator = createToolValidator(toolRegistry);
+  const federationPeerRegistry = federationEnabled
+    ? (() => {
+        const candidate = federationOptions.peerRegistry;
+        if (
+          candidate &&
+          typeof candidate.registerPeer === "function" &&
+          typeof candidate.removePeer === "function" &&
+          typeof candidate.listPeers === "function" &&
+          typeof candidate.getHealthyPeersForSlug === "function" &&
+          typeof candidate.updatePeerHealth === "function"
+        ) {
+          return candidate;
+        }
+        return createPeerRegistry();
+      })()
+    : null;
+  const federationRemoteClient = federationEnabled
+    ? (() => {
+        const candidate = federationOptions.remoteClient;
+        if (candidate && typeof candidate.executeRemote === "function") {
+          return candidate;
+        }
+        return createRemoteExecutionClient({
+          timeoutMs: parsePositiveInt(federationOptions.timeoutMs, 30000),
+        });
+      })()
+    : null;
+  const federationHeartbeat = federationEnabled
+    ? (() => {
+        const candidate = federationOptions.heartbeat;
+        if (candidate && typeof candidate.start === "function" && typeof candidate.stop === "function" && typeof candidate.runOnce === "function") {
+          return candidate;
+        }
+        return createPeerHeartbeat({
+          peerRegistry: federationPeerRegistry,
+          intervalMs: parsePositiveInt(federationOptions.heartbeatIntervalMs, 60000),
+          timeoutMs: parsePositiveInt(federationOptions.heartbeatTimeoutMs, 5000),
+        });
+      })()
+    : null;
+
+  if (federationEnabled && Array.isArray(federationOptions.peers)) {
+    for (const peer of federationOptions.peers) {
+      if (!peer || typeof peer !== "object") {
+        continue;
+      }
+      const peerId = typeof peer.peerId === "string" ? peer.peerId : "";
+      federationPeerRegistry.registerPeer(peerId, {
+        url: peer.url,
+        authToken: peer.authToken,
+        status: peer.status,
+        capabilities: peer.capabilities,
+        lastLatencyMs: peer.lastLatencyMs,
+        lastHeartbeat: peer.lastHeartbeat,
+      });
+    }
+  }
 
   const spawner = spawnerFactory({ metrics });
   const pools = new Map();
@@ -311,9 +375,6 @@ function createSupervisorV1(options = {}) {
   }
 
   function normalizeIdempotencyKey(requestContext) {
-    if (!idempotencyEnabled) {
-      return "";
-    }
     if (!requestContext || typeof requestContext !== "object" || typeof requestContext.idempotencyKey !== "string") {
       return "";
     }
@@ -540,6 +601,7 @@ function createSupervisorV1(options = {}) {
       ...baseContext,
       principalId,
       retryPolicy: nextRetryPolicy,
+      __queueRetryExecution: true,
     };
   }
 
@@ -626,6 +688,196 @@ function createSupervisorV1(options = {}) {
 
   function getPendingSpawns(slug) {
     return pendingSpawnsBySlug.get(slug) || 0;
+  }
+
+  function isQueueRetryExecution(requestContext) {
+    return Boolean(requestContext && requestContext.__queueRetryExecution === true);
+  }
+
+  function isLocalCapacityExhausted(slug) {
+    const config = getConfig(slug);
+    if (!config) {
+      return false;
+    }
+    const pool = getExistingPool(slug);
+    const instanceCount = pool ? pool.instances.size : 0;
+    const pending = getPendingSpawns(slug);
+    return instanceCount + pending >= config.maxInstances;
+  }
+
+  function resolveRemoteExecutionPayload(remoteResponse) {
+    if (!remoteResponse || typeof remoteResponse !== "object") {
+      return { ok: false };
+    }
+
+    if (Object.prototype.hasOwnProperty.call(remoteResponse, "result")) {
+      return {
+        ok: true,
+        payload: remoteResponse.result,
+      };
+    }
+
+    if (remoteResponse.ok === true && remoteResponse.data && typeof remoteResponse.data === "object" && Object.prototype.hasOwnProperty.call(remoteResponse.data, "result")) {
+      return {
+        ok: true,
+        payload: remoteResponse.data.result,
+      };
+    }
+
+    if (remoteResponse.ok === false && remoteResponse.error && typeof remoteResponse.error === "object") {
+      return {
+        ok: true,
+        payload: {
+          ok: false,
+          error: remoteResponse.error,
+        },
+      };
+    }
+
+    return { ok: false };
+  }
+
+  function isRemoteTimeoutFailure(remoteResult) {
+    if (!remoteResult || remoteResult.ok !== false || !remoteResult.error) {
+      return false;
+    }
+    const code = typeof remoteResult.error.code === "string" ? remoteResult.error.code : "";
+    if (code !== "REMOTE_TRANSPORT_ERROR") {
+      return false;
+    }
+    const message =
+      remoteResult.error.details && typeof remoteResult.error.details.message === "string"
+        ? remoteResult.error.details.message
+        : typeof remoteResult.error.message === "string"
+        ? remoteResult.error.message
+        : "";
+    return /timeout/i.test(message);
+  }
+
+  function getRemoteStatusCode(remoteResult) {
+    if (!remoteResult || remoteResult.ok !== false || !remoteResult.error || !remoteResult.error.details) {
+      return 0;
+    }
+    const statusCode = Number(remoteResult.error.details.statusCode);
+    if (!Number.isFinite(statusCode)) {
+      return 0;
+    }
+    return Math.floor(statusCode);
+  }
+
+  function getRemoteLatencyMs(remoteResult) {
+    if (remoteResult && remoteResult.ok === true && Number.isFinite(Number(remoteResult.latencyMs))) {
+      return Number(remoteResult.latencyMs);
+    }
+    if (remoteResult && remoteResult.ok === false && remoteResult.error && remoteResult.error.details && Number.isFinite(Number(remoteResult.error.details.latencyMs))) {
+      return Number(remoteResult.error.details.latencyMs);
+    }
+    return 0;
+  }
+
+  async function attemptFederatedExecution({ slug, method, params, requestId, idempotencyKey, retryPolicy, principalId }) {
+    if (!federationEnabled || !federationPeerRegistry || !federationRemoteClient) {
+      return { attempted: false, success: false };
+    }
+
+    const peers = federationPeerRegistry.getHealthyPeersForSlug(slug);
+    if (!Array.isArray(peers) || peers.length === 0) {
+      return { attempted: false, success: false };
+    }
+
+    metrics.increment("supervisor.federation.attempt", { slug });
+    const remotePayload = {
+      slug,
+      method,
+      params,
+      request_id: requestId,
+    };
+
+    if (idempotencyKey) {
+      remotePayload.idempotencyKey = idempotencyKey;
+    }
+    if (retryPolicy) {
+      remotePayload.retryPolicy = retryPolicy;
+    }
+
+    let attempted = false;
+
+    for (const peer of peers) {
+      attempted = true;
+      const remoteResult = await federationRemoteClient.executeRemote(peer, remotePayload);
+      const latencyMs = getRemoteLatencyMs(remoteResult);
+      if (latencyMs > 0) {
+        metrics.observe("supervisor.federation.latency_ms", latencyMs, { slug });
+        federationPeerRegistry.updatePeerHealth(peer.peerId, {
+          lastLatencyMs: latencyMs,
+          lastHeartbeat: Date.now(),
+        });
+      }
+
+      if (remoteResult && remoteResult.ok === true) {
+        const resolved = resolveRemoteExecutionPayload(remoteResult.response);
+        if (!resolved.ok) {
+          metrics.increment("supervisor.federation.failure", { slug, reason: "invalid_remote_response" });
+          continue;
+        }
+        federationPeerRegistry.updatePeerHealth(peer.peerId, {
+          status: STATUS_UP,
+          lastHeartbeat: Date.now(),
+        });
+        metrics.increment("supervisor.federation.success", { slug });
+        safeAudit({
+          event: "execute",
+          principal_id: principalId,
+          slug,
+          request_id: requestId,
+          status: "success",
+          details: {
+            phase: "federation_success",
+            method,
+            peerId: peer.peerId,
+          },
+        });
+        return {
+          attempted: true,
+          success: true,
+          payload: resolved.payload,
+        };
+      }
+
+      const statusCode = getRemoteStatusCode(remoteResult);
+      const timeoutFailure = isRemoteTimeoutFailure(remoteResult);
+      const reasonCode =
+        remoteResult && remoteResult.error && typeof remoteResult.error.code === "string" ? remoteResult.error.code : "remote_error";
+
+      if (timeoutFailure) {
+        federationPeerRegistry.updatePeerHealth(peer.peerId, {
+          status: STATUS_DOWN,
+          lastHeartbeat: Date.now(),
+        });
+        metrics.increment("supervisor.federation.peer_down", { slug });
+        metrics.increment("supervisor.federation.failure", { slug, reason: "timeout" });
+        if (!idempotencyKey) {
+          return {
+            attempted: true,
+            success: false,
+            timeoutBlockedFailover: true,
+          };
+        }
+        continue;
+      }
+
+      if (statusCode === 429 || statusCode === 503) {
+        metrics.increment("supervisor.federation.failure", { slug, reason: String(statusCode) });
+        continue;
+      }
+
+      metrics.increment("supervisor.federation.failure", { slug, reason: reasonCode });
+    }
+
+    return {
+      attempted,
+      success: false,
+    };
   }
 
   function hasQueueDispatchCapacity(slug) {
@@ -1047,6 +1299,9 @@ function createSupervisorV1(options = {}) {
     await ensureInitialized();
     initializeCircuitMetrics();
     startQueueProcessor();
+    if (federationEnabled && federationHeartbeat && typeof federationHeartbeat.start === "function") {
+      federationHeartbeat.start();
+    }
     publishQueueGauge();
     return {
       ok: true,
@@ -1063,6 +1318,7 @@ function createSupervisorV1(options = {}) {
     const slug = normalizeSlug(rawSlug);
     const method = normalizeMethod(rawMethod);
     const params = typeof rawParams === "undefined" ? {} : rawParams;
+    const queueRetryExecution = isQueueRetryExecution(context);
     let idempotencyStoreKey = "";
     let idempotencyParamsHash = "";
     let circuitLeaseAcquired = false;
@@ -1101,10 +1357,6 @@ function createSupervisorV1(options = {}) {
         throw makeFailure("INVALID_TOOL_REQUEST", `Tool '${slug || ""}' is not registered`);
       }
 
-      executionStartedAt = Date.now();
-      shouldObserveExecution = true;
-      metrics.increment("supervisor.executions.total", { slug, method });
-
       if (idempotencyEnabled && idempotencyKey) {
         idempotencyParamsHash = stableStringify(params);
         idempotencyStoreKey = makeIdempotencyStoreKey(principalId, slug, method, idempotencyKey);
@@ -1120,6 +1372,10 @@ function createSupervisorV1(options = {}) {
       }
 
       if (toolAdapter) {
+        executionStartedAt = Date.now();
+        shouldObserveExecution = true;
+        metrics.increment("supervisor.executions.total", { slug, method });
+
         if (method !== "run") {
           metrics.increment("supervisor.executions.error", { slug, reason: "invalid_tool_method", request_id: requestId });
           throw makeFailure("INVALID_TOOL_REQUEST", "Tool adapters only support method 'run'", {
@@ -1244,6 +1500,33 @@ function createSupervisorV1(options = {}) {
         }
         circuitLeaseAcquired = gate.leaseAcquired;
       }
+
+      if (federationEnabled && !queueRetryExecution && !circuitLeaseAcquired && isLocalCapacityExhausted(slug)) {
+        const federationResult = await attemptFederatedExecution({
+          slug,
+          method,
+          params,
+          requestId,
+          idempotencyKey,
+          retryPolicy,
+          principalId,
+        });
+
+        if (federationResult && federationResult.success) {
+          return federationResult.payload;
+        }
+
+        if (federationResult && federationResult.attempted) {
+          throw makeFailure("SUPERVISOR_CAPACITY_EXCEEDED", `Skill '${slug}' is at capacity`, {
+            slug,
+            maxInstances: getConfig(slug).maxInstances,
+          });
+        }
+      }
+
+      executionStartedAt = Date.now();
+      shouldObserveExecution = true;
+      metrics.increment("supervisor.executions.total", { slug, method });
 
       let acquiredContainerId = null;
       let shouldSpawn = false;
@@ -1730,6 +2013,9 @@ function createSupervisorV1(options = {}) {
   async function shutdown() {
     isShuttingDown = true;
     stopQueueProcessor();
+    if (federationEnabled && federationHeartbeat && typeof federationHeartbeat.stop === "function") {
+      federationHeartbeat.stop();
+    }
     safeAudit({
       event: "shutdown",
       principal_id: "system",

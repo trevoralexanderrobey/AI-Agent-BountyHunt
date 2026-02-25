@@ -512,6 +512,9 @@ Bridge / Director Agent
 | `hashcat` | 2 | 300s | 1MB |
 | `sqlmap` | 2 | 300s | 5MB |
 | `nikto` | 2 | 600s | 10MB |
+| `aircrack` | 3 | 600s | 5MB |
+| `msfvenom` | 3 | 60s | 10MB |
+| `ffuf` | 3 | 600s | 10MB |
 
 #### Security
 - All tools use `spawn()` with argument arrays (`shell: false`)
@@ -526,7 +529,33 @@ Bridge / Director Agent
 
 ---
 
-### 15. Burp Suite Integration (BionicLink)
+### 15. Federation (Phase 12A–12B)
+
+**Peer Registry**: `/Users/trevorrobey/AI-Agent-BountyHunt/openclaw-bridge/federation/peer-registry.js`  
+**Remote Client**: `/Users/trevorrobey/AI-Agent-BountyHunt/openclaw-bridge/federation/remote-client.js`  
+**Heartbeat**: `/Users/trevorrobey/AI-Agent-BountyHunt/openclaw-bridge/federation/heartbeat.js`  
+**Spec**: `/Users/trevorrobey/AI-Agent-BountyHunt/openclaw-bridge/docs/federation-spec.md`  
+**Purpose**: Multi-node capacity-overflow delegation with deterministic peer selection
+
+#### Architecture
+- **Peer Registry** — `registerPeer()`, `removePeer()`, `listPeers()`, `getHealthyPeersForSlug()`
+- **Remote Client** — `executeRemote(peer, payload)` via `POST /api/v1/execute` on remote nodes
+- **Heartbeat** — Periodic `GET /health` probes, updates peer UP/DOWN status and latency
+
+#### Deterministic Routing (Phase 12B)
+1. Federation triggers only when local capacity is exhausted and peers support the slug
+2. Peers selected by latency then peerId (deterministic, no randomization)
+3. 429/503 responses trigger failover to next healthy peer
+4. Transport timeout marks peer DOWN; stops failover without idempotency key
+5. Remote success returns immediately, skips local execution
+
+#### Metrics
+- `supervisor.federation.attempt`, `success`, `failure`, `latency_ms`, `peer_down`
+- Remote path does not increment local execution/spawn/instance metrics
+
+---
+
+### 16. Burp Suite Integration (BionicLink)
 
 **Extension**: BionicLink (custom Burp extension)  
 **Port**: 8090 (HTTP)  
@@ -768,7 +797,15 @@ User receives scan summary with findings
 │   │       ├── whois-adapter.js   # WHOIS query adapter
 │   │       ├── hashcat-adapter.js # Password cracking adapter
 │   │       ├── sqlmap-adapter.js  # SQL injection testing adapter
-│   │       └── nikto-adapter.js   # Web server scanner adapter
+│   │       ├── nikto-adapter.js   # Web server scanner adapter
+│   │       ├── batch-3-index.js   # Batch 3 registration
+│   │       ├── aircrack-adapter.js # Wireless cracking adapter
+│   │       ├── msfvenom-adapter.js # Payload generation adapter
+│   │       └── ffuf-adapter.js    # Web fuzzer adapter
+│   ├── federation/                # Multi-node federation (Phase 12)
+│   │   ├── peer-registry.js       # Peer registry and health tracking
+│   │   ├── remote-client.js       # Remote execution client
+│   │   └── heartbeat.js           # Periodic peer health probing
 │   ├── containers/                # Dockerfiles for containerized skills
 │   │   └── nmap/Dockerfile        # Containerized nmap skill
 │   ├── github-pro-mcp/            # MCP bridge for GitHub Pro
@@ -815,6 +852,8 @@ User receives scan summary with findings
 │   │   ├── tool-adapter-framework.md  # Tool adapter framework spec
 │   │   ├── batch-1-tools.md       # Batch 1 tool adapters (curl, nslookup, whois)
 │   │   ├── batch-2-tools.md       # Batch 2 tool adapters (hashcat, sqlmap, nikto)
+│   │   ├── batch-3-tools.md       # Batch 3 tool adapters (aircrack, msfvenom, ffuf)
+│   │   ├── federation-spec.md     # Federation transport and routing spec
 │   │   ├── API.md                 # API contract
 │   │   ├── BURP_INTEGRATION.md    # Burp setup guide
 │   │   ├── LLDB_TRIAGE.md         # LLDB setup guide
@@ -1056,6 +1095,6 @@ This architecture is designed for security researchers, bug bounty hunters, and 
 
 ---
 
-**Document Version**: 1.5  
+**Document Version**: 1.6  
 **Last Updated**: February 25, 2026  
 **Maintained By**: Trevor Robey

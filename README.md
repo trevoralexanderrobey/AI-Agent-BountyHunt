@@ -16,7 +16,8 @@ Key capabilities:
 - **Security Baseline** — Auth guard (constant-time bearer), per-caller rate limiting, `request_id` propagation
 - **HTTP API** — External ingress layer (`POST /api/v1/execute`, `/health`, `/metrics`) with graceful shutdown
 - **Production Hardening** — TLS/mTLS, HMAC request signing, audit logging, Prometheus exporter
-- **Tool Adapter Framework** — Direct CLI tool execution (curl, nslookup, whois, hashcat, sqlmap, nikto)
+- **Tool Adapter Framework** — Direct CLI tool execution (curl, nslookup, whois, hashcat, sqlmap, nikto, aircrack, msfvenom, ffuf)
+- **Federation** — Multi-node peer registry, remote execution, heartbeat monitoring, deterministic overflow routing
 - **MCP Bridge** — Director → Executor pattern connecting GitHub Pro / Antigravity / Codex to OpenClaw
 
 ### OpenClaw Bridge Runtime
@@ -109,6 +110,8 @@ cd "AG for OC"
 - [Tool Adapter Framework](./openclaw-bridge/docs/tool-adapter-framework.md) — Phase 11A adapter pattern
 - [Batch 1 Tools](./openclaw-bridge/docs/batch-1-tools.md) — curl, nslookup, whois adapters
 - [Batch 2 Tools](./openclaw-bridge/docs/batch-2-tools.md) — hashcat, sqlmap, nikto adapters
+- [Batch 3 Tools](./openclaw-bridge/docs/batch-3-tools.md) — aircrack, msfvenom, ffuf adapters
+- [Federation Spec](./openclaw-bridge/docs/federation-spec.md) — Multi-node peer registry and deterministic routing
 - [Bridge Setup & Operations](./openclaw-bridge/SETUP.md)
 - [Bridge API Contract](./openclaw-bridge/docs/API.md)
 - [Burp Integration](./openclaw-bridge/docs/BURP_INTEGRATION.md)
