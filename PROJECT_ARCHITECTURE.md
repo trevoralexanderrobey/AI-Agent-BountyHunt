@@ -412,7 +412,37 @@ Bridge / Director Agent
 
 ---
 
-### 11. Burp Suite Integration (BionicLink)
+### 11. Security Baseline (Phase 9)
+
+**Auth Guard**: `/Users/trevorrobey/AI-Agent-BountyHunt/openclaw-bridge/security/auth.js`  
+**Rate Limiter**: `/Users/trevorrobey/AI-Agent-BountyHunt/openclaw-bridge/security/rate-limit.js`  
+**Spec**: `/Users/trevorrobey/AI-Agent-BountyHunt/openclaw-bridge/docs/phase-9-security-baseline.md`  
+**Purpose**: Authentication, rate limiting, and request tracing for the Supervisor ingress
+
+#### Auth Guard (`createAuthGuard`)
+- Config-driven enablement: `SUPERVISOR_AUTH_ENABLED`, `SUPERVISOR_AUTH_MODE`
+- Bearer token validation with constant-time comparison (`crypto.timingSafeEqual`)
+- Env-first token resolution (`SUPERVISOR_AUTH_TOKEN`) with constructor fallback
+- Structured `UNAUTHORIZED` errors with `request_id` propagation
+
+#### Rate Limiter (`createRateLimiter`)
+- In-memory per-principal token bucket (O(1) check, no locks, no timers)
+- Config: `SUPERVISOR_RATE_LIMIT_ENABLED`, `SUPERVISOR_RATE_LIMIT_RPS`, `SUPERVISOR_RATE_LIMIT_BURST`
+- Bounded state: max 10,000 principals with overflow bucket
+- Structured `SUPERVISOR_RATE_LIMIT_EXCEEDED` errors
+
+#### Request ID Propagation
+- Generated at `execute()` entry if not provided by caller
+- Forwarded through: MCP JSON-RPC `id`, Spawner context, metrics labels, error responses
+- Collision-resistant format, never contains token-derived material
+
+#### STRIDE Threat Mapping
+- Covers: Spoofing, Tampering, Repudiation, DoS, Elevation of Privilege
+- Full acceptance checklist with measurable validation criteria
+
+---
+
+### 12. Burp Suite Integration (BionicLink)
 
 **Extension**: BionicLink (custom Burp extension)  
 **Port**: 8090 (HTTP)  
@@ -630,6 +660,9 @@ User receives scan summary with findings
 │   │   └── supervisor-v1.js       # Supervisor v1 (routing, pooling, lifecycle)
 │   ├── observability/              # Telemetry system
 │   │   └── metrics.js             # In-memory metrics (counters, histograms, gauges)
+│   ├── security/                  # Security controls
+│   │   ├── auth.js                # Auth guard (constant-time bearer validation)
+│   │   └── rate-limit.js          # Per-caller token bucket rate limiter
 │   ├── containers/                # Dockerfiles for containerized skills
 │   │   └── nmap/Dockerfile        # Containerized nmap skill
 │   ├── github-pro-mcp/            # MCP bridge for GitHub Pro
@@ -670,6 +703,7 @@ User receives scan summary with findings
 │   │   ├── spawner-v2-spec.md     # Spawner v2 lifecycle spec
 │   │   ├── supervisor-v1-spec.md  # Supervisor v1 routing/pooling spec
 │   │   ├── observability-spec.md  # Observability telemetry spec
+│   │   ├── phase-9-security-baseline.md  # Security baseline and acceptance checklist
 │   │   ├── API.md                 # API contract
 │   │   ├── BURP_INTEGRATION.md    # Burp setup guide
 │   │   ├── LLDB_TRIAGE.md         # LLDB setup guide
@@ -911,6 +945,6 @@ This architecture is designed for security researchers, bug bounty hunters, and 
 
 ---
 
-**Document Version**: 1.3  
+**Document Version**: 1.4  
 **Last Updated**: February 24, 2026  
 **Maintained By**: Trevor Robey

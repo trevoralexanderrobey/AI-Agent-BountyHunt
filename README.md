@@ -13,6 +13,7 @@ Key capabilities:
 - **MCP Skill Containers** — Isolated Docker containers with JSON-RPC 2.0 transport
 - **Supervisor v1** — Deterministic routing, connection pooling, and lifecycle management for skill containers
 - **Observability** — In-memory telemetry (counters, histograms, gauges) for Supervisor and Spawner
+- **Security Baseline** — Auth guard (constant-time bearer), per-caller rate limiting, `request_id` propagation
 - **MCP Bridge** — Director → Executor pattern connecting GitHub Pro / Antigravity / Codex to OpenClaw
 
 ### OpenClaw Bridge Runtime
@@ -99,6 +100,7 @@ cd "AG for OC"
 - [Spawner v2 Spec](./openclaw-bridge/docs/spawner-v2-spec.md) — Container lifecycle control plane
 - [Supervisor v1 Spec](./openclaw-bridge/docs/supervisor-v1-spec.md) — Routing, pooling, and lifecycle management
 - [Observability Spec](./openclaw-bridge/docs/observability-spec.md) — In-memory telemetry system
+- [Phase 9 Security Baseline](./openclaw-bridge/docs/phase-9-security-baseline.md) — Auth, rate limiting, request tracing, threat model
 - [Bridge Setup & Operations](./openclaw-bridge/SETUP.md)
 - [Bridge API Contract](./openclaw-bridge/docs/API.md)
 - [Burp Integration](./openclaw-bridge/docs/BURP_INTEGRATION.md)

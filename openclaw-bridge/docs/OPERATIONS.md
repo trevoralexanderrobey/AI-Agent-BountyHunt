@@ -231,3 +231,26 @@ node -e "(async()=>{
 Namespaces: `supervisor.*` (routing/pool metrics) and `spawner.*` (container lifecycle metrics).
 
 Spec: `/Users/trevorrobey/AI-Agent-BountyHunt/openclaw-bridge/docs/observability-spec.md`
+
+## Security baseline (Phase 9)
+
+Auth and rate limiting for the Supervisor ingress:
+
+```bash
+# Enable auth (set token via env)
+export SUPERVISOR_AUTH_ENABLED=true
+export SUPERVISOR_AUTH_TOKEN=your_secure_token
+
+# Enable rate limiting
+export SUPERVISOR_RATE_LIMIT_ENABLED=true
+export SUPERVISOR_RATE_LIMIT_RPS=10
+export SUPERVISOR_RATE_LIMIT_BURST=20
+```
+
+Key controls:
+- **Auth guard**: Constant-time bearer token validation (`crypto.timingSafeEqual`)
+- **Rate limiter**: Per-caller in-memory token bucket (O(1), no locks)
+- **Request ID**: Auto-generated at `execute()`, propagated through MCP, Spawner, metrics, and errors
+- No hardcoded credentials; env-first configuration
+
+Spec: `/Users/trevorrobey/AI-Agent-BountyHunt/openclaw-bridge/docs/phase-9-security-baseline.md`

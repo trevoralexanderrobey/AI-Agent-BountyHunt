@@ -2,6 +2,8 @@ const crypto = require("node:crypto");
 const http = require("node:http");
 
 const { createMetrics } = require("../observability/metrics.js");
+const { createAuthGuard } = require("../security/auth.js");
+const { createRateLimiter } = require("../security/rate-limit.js");
 const { createSpawnerV2 } = require("../spawner/spawner-v2.js");
 
 const SKILL_CONFIG = Object.freeze({
@@ -113,6 +115,16 @@ function createSupervisorV1(options = {}) {
   const requestTimeoutMs = parsePositiveInt(options.requestTimeoutMs, DEFAULT_REQUEST_TIMEOUT_MS);
   const baseMetrics = options.metrics && typeof options.metrics === "object" ? options.metrics : createMetrics();
   const metrics = createSafeMetrics(baseMetrics);
+  const authGuard = createAuthGuard({
+    enabled: Boolean(options.auth && options.auth.enabled),
+    mode: options.auth && typeof options.auth.mode === "string" ? options.auth.mode : "bearer",
+    bearerToken: options.auth && typeof options.auth.bearerToken === "string" ? options.auth.bearerToken : "",
+  });
+  const rateLimiter = createRateLimiter({
+    enabled: Boolean(options.rateLimit && options.rateLimit.enabled),
+    rps: options.rateLimit && typeof options.rateLimit.rps !== "undefined" ? options.rateLimit.rps : undefined,
+    burst: options.rateLimit && typeof options.rateLimit.burst !== "undefined" ? options.rateLimit.burst : undefined,
+  });
 
   const spawner = spawnerFactory({ metrics });
   const pools = new Map();
@@ -177,6 +189,34 @@ function createSupervisorV1(options = {}) {
 
   function normalizeMethod(rawMethod) {
     return typeof rawMethod === "string" ? rawMethod.trim() : "";
+  }
+
+  function resolveRequestId(requestContext) {
+    const explicit = requestContext && typeof requestContext.requestId === "string" ? requestContext.requestId.trim() : "";
+    if (explicit && explicit.length <= 128) {
+      return explicit;
+    }
+    if (typeof crypto.randomUUID === "function") {
+      return crypto.randomUUID();
+    }
+    return crypto.randomBytes(16).toString("hex");
+  }
+
+  function resolvePrincipalId(requestContext) {
+    const explicit = requestContext && typeof requestContext.principalId === "string" ? requestContext.principalId.trim() : "";
+    return explicit || "anonymous";
+  }
+
+  function attachRequestId(error, requestId) {
+    if (!error || typeof error !== "object" || !requestId) {
+      return error;
+    }
+    error.request_id = requestId;
+    if (!error.details || typeof error.details !== "object") {
+      error.details = {};
+    }
+    error.details.request_id = requestId;
+    return error;
   }
 
   function getConfig(slug) {
@@ -376,13 +416,13 @@ function createSupervisorV1(options = {}) {
     );
   }
 
-  async function callInstanceJsonRpc(meta, token, method, params) {
+  async function callInstanceJsonRpc(meta, token, method, params, requestId) {
     const url = new URL(meta.networkAddress);
     const payload = JSON.stringify({
       jsonrpc: "2.0",
       method,
       params,
-      id: `supervisor-${crypto.randomBytes(6).toString("hex")}`,
+      id: requestId,
     });
 
     return new Promise((resolve) => {
@@ -479,19 +519,23 @@ function createSupervisorV1(options = {}) {
     });
   }
 
-  async function handleInstanceTransportFailure(slug, containerId, reasonPayload) {
+  async function handleInstanceTransportFailure(slug, containerId, reasonPayload, requestId, principalId) {
     const failureReason = reasonPayload && reasonPayload.reason ? reasonPayload.reason : "transport_failure";
-    metrics.increment("supervisor.instance.failed", { slug, reason: failureReason });
-    metrics.increment("supervisor.executions.error", { slug, reason: failureReason });
+    metrics.increment("supervisor.instance.failed", { slug, reason: failureReason, request_id: requestId });
+    metrics.increment("supervisor.executions.error", { slug, reason: failureReason, request_id: requestId });
 
     await withSlugLock(slug, async () => {
       removeInstanceLocked(slug, containerId);
     });
 
-    const terminateResult = await spawner.terminateSkill(containerId);
+    const terminateResult = await spawner.terminateSkill(containerId, {
+      requestId,
+      principalId,
+    });
     const details = {
       containerId,
       reason: reasonPayload && reasonPayload.reason ? reasonPayload.reason : "transport_failure",
+      request_id: requestId,
     };
 
     if (reasonPayload && Object.prototype.hasOwnProperty.call(reasonPayload, "statusCode")) {
@@ -507,7 +551,7 @@ function createSupervisorV1(options = {}) {
       metrics.increment("supervisor.instance.terminated", { slug, source: "failure_cleanup" });
     }
 
-    throw makeFailure("INSTANCE_FAILED", "Instance execution failed", details);
+    throw attachRequestId(makeFailure("INSTANCE_FAILED", "Instance execution failed", details), requestId);
   }
 
   async function initialize() {
@@ -518,26 +562,35 @@ function createSupervisorV1(options = {}) {
     };
   }
 
-  async function execute(rawSlug, rawMethod, rawParams) {
-    if (isShuttingDown) {
-      throw makeFailure("SUPERVISOR_SHUTTING_DOWN", "Supervisor is shutting down");
-    }
-
-    await ensureInitialized();
-
-    if (isShuttingDown) {
-      throw makeFailure("SUPERVISOR_SHUTTING_DOWN", "Supervisor is shutting down");
-    }
-
+  async function execute(rawSlug, rawMethod, rawParams, requestContext = {}) {
+    const context = requestContext && typeof requestContext === "object" ? requestContext : {};
+    const requestId = resolveRequestId(context);
+    const principalId = resolvePrincipalId(context);
     const slug = normalizeSlug(rawSlug);
     const method = normalizeMethod(rawMethod);
     const params = typeof rawParams === "undefined" ? {} : rawParams;
-
-    ensureSkillAndMethod(slug, method);
-    const executionStartedAt = Date.now();
-    metrics.increment("supervisor.executions.total", { slug, method });
+    let executionStartedAt = 0;
+    let shouldObserveExecution = false;
 
     try {
+      authGuard.validate(context, requestId);
+      rateLimiter.check(principalId, requestId);
+
+      if (isShuttingDown) {
+        throw makeFailure("SUPERVISOR_SHUTTING_DOWN", "Supervisor is shutting down");
+      }
+
+      await ensureInitialized();
+
+      if (isShuttingDown) {
+        throw makeFailure("SUPERVISOR_SHUTTING_DOWN", "Supervisor is shutting down");
+      }
+
+      ensureSkillAndMethod(slug, method);
+      executionStartedAt = Date.now();
+      shouldObserveExecution = true;
+      metrics.increment("supervisor.executions.total", { slug, method });
+
       let acquiredContainerId = null;
       let shouldSpawn = false;
 
@@ -570,20 +623,23 @@ function createSupervisorV1(options = {}) {
         });
       } catch (error) {
         if (error && error.code === "SUPERVISOR_CAPACITY_EXCEEDED") {
-          metrics.increment("supervisor.executions.capacity_rejected", { slug });
-          metrics.increment("supervisor.executions.error", { slug, reason: "capacity_rejected" });
+          metrics.increment("supervisor.executions.capacity_rejected", { slug, request_id: requestId });
+          metrics.increment("supervisor.executions.error", { slug, reason: "capacity_rejected", request_id: requestId });
         }
         throw error;
       }
 
       if (shouldSpawn) {
         const spawnStartedAt = Date.now();
-        const spawnResult = await spawner.spawnSkill(slug);
+        const spawnResult = await spawner.spawnSkill(slug, {
+          requestId,
+          principalId,
+        });
         metrics.observe("supervisor.spawn.duration_ms", Date.now() - spawnStartedAt, { slug });
 
         if (isSpawnerError(spawnResult)) {
-          metrics.increment("supervisor.spawn.failure", { slug });
-          metrics.increment("supervisor.executions.error", { slug, reason: "spawn_failed" });
+          metrics.increment("supervisor.spawn.failure", { slug, request_id: requestId });
+          metrics.increment("supervisor.executions.error", { slug, reason: "spawn_failed", request_id: requestId });
           await withSlugLock(slug, async () => {
             setPendingSpawns(slug, getPendingSpawns(slug) - 1);
           });
@@ -595,8 +651,8 @@ function createSupervisorV1(options = {}) {
         }
 
         if (!spawnResult || typeof spawnResult.containerId !== "string" || typeof spawnResult.networkAddress !== "string" || typeof spawnResult.token !== "string") {
-          metrics.increment("supervisor.spawn.failure", { slug });
-          metrics.increment("supervisor.executions.error", { slug, reason: "invalid_spawn_payload" });
+          metrics.increment("supervisor.spawn.failure", { slug, request_id: requestId });
+          metrics.increment("supervisor.executions.error", { slug, reason: "invalid_spawn_payload", request_id: requestId });
           await withSlugLock(slug, async () => {
             setPendingSpawns(slug, getPendingSpawns(slug) - 1);
           });
@@ -627,17 +683,20 @@ function createSupervisorV1(options = {}) {
         });
 
         if (shutdownAfterSpawn) {
-          const terminateResult = await spawner.terminateSkill(spawnResult.containerId);
+          const terminateResult = await spawner.terminateSkill(spawnResult.containerId, {
+            requestId,
+            principalId,
+          });
           if (!isSpawnerError(terminateResult)) {
             metrics.increment("supervisor.instance.terminated", { slug, source: "shutdown_after_spawn" });
           }
-          metrics.increment("supervisor.executions.error", { slug, reason: "shutting_down" });
+          metrics.increment("supervisor.executions.error", { slug, reason: "shutting_down", request_id: requestId });
           throw makeFailure("SUPERVISOR_SHUTTING_DOWN", "Supervisor is shutting down");
         }
       }
 
       if (!acquiredContainerId) {
-        metrics.increment("supervisor.executions.error", { slug, reason: "instance_unavailable" });
+        metrics.increment("supervisor.executions.error", { slug, reason: "instance_unavailable", request_id: requestId });
         throw makeFailure("INSTANCE_FAILED", "Unable to acquire an instance");
       }
 
@@ -647,10 +706,10 @@ function createSupervisorV1(options = {}) {
       if (!meta || !token) {
         await handleInstanceTransportFailure(slug, acquiredContainerId, {
           reason: "missing_instance_metadata",
-        });
+        }, requestId, principalId);
       }
 
-      const rpcResult = await callInstanceJsonRpc(meta, token, method, params);
+      const rpcResult = await callInstanceJsonRpc(meta, token, method, params, requestId);
 
       if (rpcResult.kind === "result") {
         await withSlugLock(slug, async () => {
@@ -682,13 +741,17 @@ function createSupervisorV1(options = {}) {
           setInstanceStateLocked(slug, acquiredContainerId, "READY");
           entry.lastUsedAt = Date.now();
         });
-        metrics.increment("supervisor.executions.error", { slug, reason: "jsonrpc_error" });
+        metrics.increment("supervisor.executions.error", { slug, reason: "jsonrpc_error", request_id: requestId });
         return buildRuntimeStyleErrorFromJsonRpc(rpcResult.error);
       }
 
-      await handleInstanceTransportFailure(slug, acquiredContainerId, rpcResult);
+      await handleInstanceTransportFailure(slug, acquiredContainerId, rpcResult, requestId, principalId);
+    } catch (error) {
+      throw attachRequestId(error, requestId);
     } finally {
-      metrics.observe("supervisor.execution.duration_ms", Date.now() - executionStartedAt, { slug, method });
+      if (shouldObserveExecution) {
+        metrics.observe("supervisor.execution.duration_ms", Date.now() - executionStartedAt, { slug, method });
+      }
     }
   }
 
