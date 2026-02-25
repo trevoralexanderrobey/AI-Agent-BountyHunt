@@ -336,3 +336,24 @@ Recovery on startup:
 Safety: atomic writes (temp + rename), debounced (1s), no tokens/secrets persisted.
 
 Spec: `/Users/trevorrobey/AI-Agent-BountyHunt/openclaw-bridge/docs/persistent-state-spec.md`
+
+## Cluster coordination (Phase 15)
+
+Multi-supervisor clustering with leader election and shard-based routing:
+
+```bash
+# Enable cluster mode (requires federation enabled)
+export SUPERVISOR_NODE_ID=node-1
+
+# In supervisor options:
+# { federation: { enabled: true }, cluster: { enabled: true, shardCount: 16 } }
+```
+
+Key behaviors:
+- Leader: lexicographically smallest healthy nodeId
+- Sharding: `hash(slug) % shardCount` with rendezvous hashing
+- Owner executes locally; non-owners forward via federation remote client
+- 5-second reconciliation tick: heartbeat \u2192 config validation \u2192 frozen snapshot
+- Config mismatches (shardCount, timeouts) mark peers `DOWN`
+
+Spec: `/Users/trevorrobey/AI-Agent-BountyHunt/openclaw-bridge/docs/cluster-spec.md`

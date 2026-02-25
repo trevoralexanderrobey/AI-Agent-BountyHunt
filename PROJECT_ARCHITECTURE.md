@@ -585,7 +585,37 @@ Bridge / Director Agent
 
 ---
 
-### 17. Burp Suite Integration (BionicLink)
+### 17. Cluster Coordination (Phase 15)
+
+**Leader Election**: `/Users/trevorrobey/AI-Agent-BountyHunt/openclaw-bridge/cluster/leader-election.js`  
+**Cluster Manager**: `/Users/trevorrobey/AI-Agent-BountyHunt/openclaw-bridge/cluster/cluster-manager.js`  
+**Spec**: `/Users/trevorrobey/AI-Agent-BountyHunt/openclaw-bridge/docs/cluster-spec.md`  
+**Purpose**: Deterministic multi-supervisor coordination with shard-based routing
+
+#### Leader Election
+- Lexicographically smallest healthy `nodeId` becomes leader
+- API: `isLeader()`, `getCurrentLeader()`, `onLeadershipChange(callback)`
+
+#### Shard Ownership
+- `shardId = hash(slug) % shardCount` (default 16 shards)
+- Rendezvous hashing over healthy, slug-capable nodes
+- Only shard owner executes locally; non-owners forward via federation
+
+#### Reconciliation
+- 5-second tick: heartbeat → peer config validation → immutable membership snapshot
+- Routing/election decisions use only the frozen snapshot (no request-time registry reads)
+- Config mismatches mark peer `DOWN` and increment `cluster.config_mismatch`
+
+#### Failover
+- Timed-out owner marked `DOWN`; retry allowed with `idempotencyKey`
+- Without idempotency key: cross-peer retry blocked (duplicate execution prevention)
+
+#### Metrics
+- `cluster.leader_elected`, `cluster.shard_rebalance`, `cluster.node_status`, `cluster.config_mismatch`
+
+---
+
+### 18. Burp Suite Integration (BionicLink)
 
 **Extension**: BionicLink (custom Burp extension)  
 **Port**: 8090 (HTTP)  
@@ -839,6 +869,9 @@ User receives scan summary with findings
 │   ├── state/                     # Persistent control plane state (Phase 14)
 │   │   ├── persistent-store.js    # Atomic file-backed JSON persistence
 │   │   └── state-manager.js       # State recovery orchestration
+│   ├── cluster/                   # Multi-supervisor coordination (Phase 15)
+│   │   ├── leader-election.js     # Deterministic leader election
+│   │   └── cluster-manager.js     # Shard ownership, reconciliation, heartbeat
 │   ├── containers/                # Dockerfiles for containerized skills
 │   │   └── nmap/Dockerfile        # Containerized nmap skill
 │   ├── github-pro-mcp/            # MCP bridge for GitHub Pro
@@ -888,6 +921,7 @@ User receives scan summary with findings
 │   │   ├── batch-3-tools.md       # Batch 3 tool adapters (aircrack, msfvenom, ffuf)
 │   │   ├── federation-spec.md     # Federation transport and routing spec
 │   │   ├── persistent-state-spec.md  # Persistent control plane state spec
+│   │   ├── cluster-spec.md        # Cluster coordination and leader election spec
 │   │   ├── API.md                 # API contract
 │   │   ├── BURP_INTEGRATION.md    # Burp setup guide
 │   │   ├── LLDB_TRIAGE.md         # LLDB setup guide
@@ -1129,6 +1163,6 @@ This architecture is designed for security researchers, bug bounty hunters, and 
 
 ---
 
-**Document Version**: 1.7  
+**Document Version**: 1.8  
 **Last Updated**: February 25, 2026  
 **Maintained By**: Trevor Robey

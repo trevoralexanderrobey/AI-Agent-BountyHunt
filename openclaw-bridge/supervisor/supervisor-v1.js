@@ -11,6 +11,7 @@ const { createSpawnerV2 } = require("../spawner/spawner-v2.js");
 const { createPeerRegistry, STATUS_DOWN, STATUS_UP } = require("../federation/peer-registry.js");
 const { createRemoteExecutionClient } = require("../federation/remote-client.js");
 const { createPeerHeartbeat } = require("../federation/heartbeat.js");
+const { createClusterManager } = require("../cluster/cluster-manager.js");
 const { createCircuitBreaker } = require("./circuit-breaker.js");
 const { RequestQueue } = require("./request-queue.js");
 const { registerBatch1Tools } = require("../tools/adapters/index.js");
@@ -133,6 +134,25 @@ function createSupervisorV1(options = {}) {
   const spawnerFactory = typeof options.spawnerFactory === "function" ? options.spawnerFactory : createSpawnerV2;
   const federationOptions = options.federation && typeof options.federation === "object" ? options.federation : {};
   const federationEnabled = Boolean(federationOptions.enabled);
+  const clusterOptions = options.cluster && typeof options.cluster === "object" ? options.cluster : {};
+  const clusterEnabled = Boolean(clusterOptions.enabled);
+  const clusterNodeIdCandidate =
+    typeof clusterOptions.nodeId === "string" && clusterOptions.nodeId.trim()
+      ? clusterOptions.nodeId.trim()
+      : typeof process.env.SUPERVISOR_NODE_ID === "string" && process.env.SUPERVISOR_NODE_ID.trim()
+      ? process.env.SUPERVISOR_NODE_ID.trim()
+      : "";
+  const clusterShardCount = parsePositiveInt(clusterOptions.shardCount, 16);
+  const clusterHeartbeatIntervalMs = parsePositiveInt(clusterOptions.heartbeatIntervalMs, 5000);
+  const clusterLeaderTimeoutMs = parsePositiveInt(clusterOptions.leaderTimeoutMs, 15000);
+
+  if (clusterEnabled && !federationEnabled) {
+    throw new Error("cluster.enabled requires federation.enabled=true");
+  }
+  if (clusterEnabled && !clusterNodeIdCandidate) {
+    throw new Error("cluster.nodeId is required when cluster.enabled=true");
+  }
+
   const requestTimeoutMs = parsePositiveInt(options.requestTimeoutMs, DEFAULT_REQUEST_TIMEOUT_MS);
   const idempotencyEnabled = Boolean(options.idempotency && options.idempotency.enabled);
   const idempotencyTtlMs = parsePositiveInt(options.idempotency && options.idempotency.ttlMs, 300000);
@@ -230,6 +250,19 @@ function createSupervisorV1(options = {}) {
           timeoutMs: parsePositiveInt(federationOptions.heartbeatTimeoutMs, 5000),
         });
       })()
+    : null;
+
+  const clusterManager = clusterEnabled
+    ? createClusterManager({
+        nodeId: clusterNodeIdCandidate,
+        shardCount: clusterShardCount,
+        heartbeatIntervalMs: clusterHeartbeatIntervalMs,
+        leaderTimeoutMs: clusterLeaderTimeoutMs,
+        peerRegistry: federationPeerRegistry,
+        heartbeat: federationHeartbeat,
+        metrics,
+        localCapabilities: Object.keys(SKILL_CONFIG).map((slug) => String(slug || "").trim().toLowerCase()),
+      })
     : null;
 
   if (federationEnabled && Array.isArray(federationOptions.peers)) {
@@ -1033,17 +1066,7 @@ function createSupervisorV1(options = {}) {
     return 0;
   }
 
-  async function attemptFederatedExecution({ slug, method, params, requestId, idempotencyKey, retryPolicy, principalId }) {
-    if (!federationEnabled || !federationPeerRegistry || !federationRemoteClient) {
-      return { attempted: false, success: false };
-    }
-
-    const peers = federationPeerRegistry.getHealthyPeersForSlug(slug);
-    if (!Array.isArray(peers) || peers.length === 0) {
-      return { attempted: false, success: false };
-    }
-
-    metrics.increment("supervisor.federation.attempt", { slug });
+  function buildFederationRemotePayload({ slug, method, params, requestId, idempotencyKey, retryPolicy, principalId }) {
     const remotePayload = {
       slug,
       method,
@@ -1059,69 +1082,160 @@ function createSupervisorV1(options = {}) {
       remotePayload.retryPolicy = retryPolicy;
     }
 
+    return remotePayload;
+  }
+
+  async function executeRemotePeerAttempt({
+    peer,
+    slug,
+    method,
+    params,
+    requestId,
+    idempotencyKey,
+    retryPolicy,
+    principalId,
+    auditPhase = "federation_success",
+  }) {
+    const remotePayload = buildFederationRemotePayload({
+      slug,
+      method,
+      params,
+      requestId,
+      idempotencyKey,
+      retryPolicy,
+      principalId,
+    });
+
+    const remoteResult = await federationRemoteClient.executeRemote(peer, remotePayload);
+    const latencyMs = getRemoteLatencyMs(remoteResult);
+    if (latencyMs > 0) {
+      metrics.observe("supervisor.federation.latency_ms", latencyMs, { slug });
+      federationPeerRegistry.updatePeerHealth(peer.peerId, {
+        lastLatencyMs: latencyMs,
+        lastHeartbeat: Date.now(),
+      });
+      scheduleStatePersist("peer_registry_health");
+    }
+
+    if (remoteResult && remoteResult.ok === true) {
+      const resolved = resolveRemoteExecutionPayload(remoteResult.response);
+      if (!resolved.ok) {
+        metrics.increment("supervisor.federation.failure", { slug, reason: "invalid_remote_response" });
+        return {
+          success: false,
+          invalidResponse: true,
+          timeoutFailure: false,
+          statusCode: 0,
+        };
+      }
+
+      federationPeerRegistry.updatePeerHealth(peer.peerId, {
+        status: STATUS_UP,
+        lastHeartbeat: Date.now(),
+      });
+      scheduleStatePersist("peer_registry_up");
+
+      if (remoteResult.replayed === true || remoteResult.idempotentReplay === true) {
+        metrics.increment("supervisor.federation.idempotent_replay", { slug });
+        metrics.increment("supervisor.federation.duplicate_prevented", { slug });
+      }
+
+      metrics.increment("supervisor.federation.success", { slug });
+      safeAudit({
+        event: "execute",
+        principal_id: principalId,
+        slug,
+        request_id: requestId,
+        status: "success",
+        details: {
+          phase: auditPhase,
+          method,
+          peerId: peer.peerId,
+        },
+      });
+
+      return {
+        success: true,
+        payload: resolved.payload,
+        timeoutFailure: false,
+        statusCode: Number.isFinite(Number(remoteResult.statusCode)) ? Number(remoteResult.statusCode) : 0,
+      };
+    }
+
+    const statusCode = getRemoteStatusCode(remoteResult);
+    const timeoutFailure = isRemoteTimeoutFailure(remoteResult);
+    const reasonCode =
+      remoteResult && remoteResult.error && typeof remoteResult.error.code === "string" ? remoteResult.error.code : "remote_error";
+
+    if (timeoutFailure) {
+      federationPeerRegistry.updatePeerHealth(peer.peerId, {
+        status: STATUS_DOWN,
+        lastHeartbeat: Date.now(),
+      });
+      scheduleStatePersist("peer_registry_down");
+      metrics.increment("supervisor.federation.peer_down", { slug });
+      metrics.increment("supervisor.federation.failure", { slug, reason: "timeout" });
+      return {
+        success: false,
+        timeoutFailure: true,
+        statusCode,
+        reasonCode,
+      };
+    }
+
+    if (statusCode === 429 || statusCode === 503) {
+      metrics.increment("supervisor.federation.failure", { slug, reason: String(statusCode) });
+    } else {
+      metrics.increment("supervisor.federation.failure", { slug, reason: reasonCode });
+    }
+
+    return {
+      success: false,
+      timeoutFailure: false,
+      statusCode,
+      reasonCode,
+    };
+  }
+
+  async function attemptFederatedExecution({ slug, method, params, requestId, idempotencyKey, retryPolicy, principalId }) {
+    if (!federationEnabled || !federationPeerRegistry || !federationRemoteClient) {
+      return { attempted: false, success: false };
+    }
+
+    const peers = federationPeerRegistry.getHealthyPeersForSlug(slug);
+    if (!Array.isArray(peers) || peers.length === 0) {
+      return { attempted: false, success: false };
+    }
+
+    metrics.increment("supervisor.federation.attempt", { slug });
     let attempted = false;
 
     for (const peer of peers) {
       attempted = true;
-      const remoteResult = await federationRemoteClient.executeRemote(peer, remotePayload);
-      const latencyMs = getRemoteLatencyMs(remoteResult);
-      if (latencyMs > 0) {
-        metrics.observe("supervisor.federation.latency_ms", latencyMs, { slug });
-        federationPeerRegistry.updatePeerHealth(peer.peerId, {
-          lastLatencyMs: latencyMs,
-          lastHeartbeat: Date.now(),
-        });
-        scheduleStatePersist("peer_registry_health");
-      }
+      const attempt = await executeRemotePeerAttempt({
+        peer,
+        slug,
+        method,
+        params,
+        requestId,
+        idempotencyKey,
+        retryPolicy,
+        principalId,
+        auditPhase: "federation_success",
+      });
 
-      if (remoteResult && remoteResult.ok === true) {
-        const resolved = resolveRemoteExecutionPayload(remoteResult.response);
-        if (!resolved.ok) {
-          metrics.increment("supervisor.federation.failure", { slug, reason: "invalid_remote_response" });
-          continue;
-        }
-        federationPeerRegistry.updatePeerHealth(peer.peerId, {
-          status: STATUS_UP,
-          lastHeartbeat: Date.now(),
-        });
-        scheduleStatePersist("peer_registry_up");
-        if (remoteResult.replayed === true || remoteResult.idempotentReplay === true) {
-          metrics.increment("supervisor.federation.idempotent_replay", { slug });
-          metrics.increment("supervisor.federation.duplicate_prevented", { slug });
-        }
-        metrics.increment("supervisor.federation.success", { slug });
-        safeAudit({
-          event: "execute",
-          principal_id: principalId,
-          slug,
-          request_id: requestId,
-          status: "success",
-          details: {
-            phase: "federation_success",
-            method,
-            peerId: peer.peerId,
-          },
-        });
+      if (attempt && attempt.success) {
         return {
           attempted: true,
           success: true,
-          payload: resolved.payload,
+          payload: attempt.payload,
         };
       }
 
-      const statusCode = getRemoteStatusCode(remoteResult);
-      const timeoutFailure = isRemoteTimeoutFailure(remoteResult);
-      const reasonCode =
-        remoteResult && remoteResult.error && typeof remoteResult.error.code === "string" ? remoteResult.error.code : "remote_error";
+      const timeoutFailure = Boolean(attempt && attempt.timeoutFailure);
+      const statusCode = Number.isFinite(Number(attempt && attempt.statusCode)) ? Number(attempt.statusCode) : 0;
 
       if (timeoutFailure) {
-        federationPeerRegistry.updatePeerHealth(peer.peerId, {
-          status: STATUS_DOWN,
-          lastHeartbeat: Date.now(),
-        });
-        scheduleStatePersist("peer_registry_down");
-        metrics.increment("supervisor.federation.peer_down", { slug });
-        metrics.increment("supervisor.federation.failure", { slug, reason: "timeout" });
         if (!idempotencyKey) {
           return {
             attempted: true,
@@ -1133,17 +1247,135 @@ function createSupervisorV1(options = {}) {
       }
 
       if (statusCode === 429 || statusCode === 503) {
-        metrics.increment("supervisor.federation.failure", { slug, reason: String(statusCode) });
         continue;
       }
-
-      metrics.increment("supervisor.federation.failure", { slug, reason: reasonCode });
     }
 
     return {
       attempted,
       success: false,
     };
+  }
+
+  async function attemptClusterShardExecution({
+    slug,
+    method,
+    params,
+    requestId,
+    idempotencyKey,
+    retryPolicy,
+    principalId,
+    snapshot,
+  }) {
+    if (!clusterEnabled || !clusterManager || !federationEnabled || !federationRemoteClient) {
+      return {
+        attempted: false,
+        success: false,
+        localOwner: true,
+      };
+    }
+
+    const excludedNodeIds = new Set();
+    let recordedFederationAttempt = false;
+
+    while (true) {
+      const selection = clusterManager.resolveOwnerForSlug(slug, {
+        snapshot,
+        excludeNodeIds: Array.from(excludedNodeIds),
+      });
+      const ownerNodeId = selection && typeof selection.ownerNodeId === "string" ? selection.ownerNodeId : "";
+      const ownerIsLocal = Boolean(selection && selection.ownerIsLocal);
+
+      if (!ownerNodeId) {
+        return {
+          attempted: recordedFederationAttempt,
+          success: false,
+          localOwner: false,
+          noOwner: true,
+          shardId: selection ? selection.shardId : null,
+        };
+      }
+
+      if (ownerIsLocal) {
+        return {
+          attempted: recordedFederationAttempt,
+          success: false,
+          localOwner: true,
+          ownerNodeId,
+          shardId: selection.shardId,
+        };
+      }
+
+      const peer = clusterManager.getPeerForNode(ownerNodeId);
+      if (!peer) {
+        excludedNodeIds.add(ownerNodeId);
+        if (!idempotencyKey) {
+          return {
+            attempted: recordedFederationAttempt,
+            success: false,
+            localOwner: false,
+            ownerNodeId,
+            missingPeer: true,
+            shardId: selection.shardId,
+            timeoutBlockedFailover: true,
+          };
+        }
+        continue;
+      }
+
+      if (!recordedFederationAttempt) {
+        metrics.increment("supervisor.federation.attempt", { slug });
+        recordedFederationAttempt = true;
+      }
+
+      const attempt = await executeRemotePeerAttempt({
+        peer,
+        slug,
+        method,
+        params,
+        requestId,
+        idempotencyKey,
+        retryPolicy,
+        principalId,
+        auditPhase: "cluster_shard_forward_success",
+      });
+
+      if (attempt && attempt.success) {
+        return {
+          attempted: true,
+          success: true,
+          payload: attempt.payload,
+          ownerNodeId,
+          shardId: selection.shardId,
+          localOwner: false,
+        };
+      }
+
+      if (attempt && attempt.timeoutFailure) {
+        clusterManager.markNodeDown(ownerNodeId, Date.now());
+        scheduleStatePersist("peer_registry_down");
+        excludedNodeIds.add(ownerNodeId);
+        if (!idempotencyKey) {
+          return {
+            attempted: true,
+            success: false,
+            timeoutBlockedFailover: true,
+            ownerNodeId,
+            shardId: selection.shardId,
+            localOwner: false,
+          };
+        }
+        continue;
+      }
+
+      return {
+        attempted: true,
+        success: false,
+        localOwner: false,
+        ownerNodeId,
+        shardId: selection.shardId,
+      };
+    }
   }
 
   function hasQueueDispatchCapacity(slug) {
@@ -1572,7 +1804,9 @@ function createSupervisorV1(options = {}) {
       }
     }
 
-    if (federationEnabled && federationHeartbeat && typeof federationHeartbeat.runOnce === "function") {
+    if (clusterEnabled && clusterManager) {
+      await clusterManager.start();
+    } else if (federationEnabled && federationHeartbeat && typeof federationHeartbeat.runOnce === "function") {
       try {
         await federationHeartbeat.runOnce();
       } catch {}
@@ -1580,7 +1814,7 @@ function createSupervisorV1(options = {}) {
 
     initializeCircuitMetrics();
     startQueueProcessor();
-    if (federationEnabled && federationHeartbeat && typeof federationHeartbeat.start === "function") {
+    if (!clusterEnabled && federationEnabled && federationHeartbeat && typeof federationHeartbeat.start === "function") {
       federationHeartbeat.start();
     }
     publishQueueGauge();
@@ -1605,6 +1839,7 @@ function createSupervisorV1(options = {}) {
     let circuitLeaseAcquired = false;
     let executionStartedAt = 0;
     let shouldObserveExecution = false;
+    let clusterRoutingSnapshot = null;
 
     try {
       authGuard.validate(context, requestId);
@@ -1759,6 +1994,44 @@ function createSupervisorV1(options = {}) {
 
       ensureSkillAndMethod(slug, method);
 
+      if (clusterEnabled && clusterManager) {
+        clusterRoutingSnapshot = clusterManager.getSnapshot();
+        const clusterResult = await attemptClusterShardExecution({
+          slug,
+          method,
+          params,
+          requestId,
+          idempotencyKey,
+          retryPolicy,
+          principalId,
+          snapshot: clusterRoutingSnapshot,
+        });
+
+        if (clusterResult && clusterResult.success) {
+          const clusterPayload = clusterResult.payload;
+          const clusterRuntimeError =
+            Boolean(clusterPayload && typeof clusterPayload === "object") &&
+            clusterPayload.ok === false &&
+            Boolean(clusterPayload.error && typeof clusterPayload.error === "object");
+          storeIdempotencyOutcome(
+            idempotencyStoreKey,
+            idempotencyParamsHash,
+            clusterRuntimeError ? "runtime_error" : "result",
+            clusterPayload,
+          );
+          return clusterPayload;
+        }
+
+        if (clusterResult && clusterResult.localOwner !== true) {
+          throw makeFailure("SUPERVISOR_CAPACITY_EXCEEDED", `Skill '${slug}' is at capacity`, {
+            slug,
+            maxInstances: getConfig(slug).maxInstances,
+            shardId: Object.prototype.hasOwnProperty.call(clusterResult, "shardId") ? clusterResult.shardId : null,
+            ownerNodeId: clusterResult.ownerNodeId || null,
+          });
+        }
+      }
+
       if (circuitBreaker.enabled) {
         const gate = circuitBreaker.checkBeforeRequest(slug);
         applyCircuitTransitionMetrics(slug, gate, { requestId, principalId });
@@ -1782,7 +2055,7 @@ function createSupervisorV1(options = {}) {
         circuitLeaseAcquired = gate.leaseAcquired;
       }
 
-      if (federationEnabled && !queueRetryExecution && !circuitLeaseAcquired && isLocalCapacityExhausted(slug)) {
+      if (!clusterEnabled && federationEnabled && !queueRetryExecution && !circuitLeaseAcquired && isLocalCapacityExhausted(slug)) {
         const federationResult = await attemptFederatedExecution({
           slug,
           method,
@@ -2314,6 +2587,9 @@ function createSupervisorV1(options = {}) {
     isShuttingDown = true;
     suspendStatePersistence = true;
     stopQueueProcessor();
+    if (clusterEnabled && clusterManager && typeof clusterManager.stop === "function") {
+      clusterManager.stop();
+    }
     if (federationEnabled && federationHeartbeat && typeof federationHeartbeat.stop === "function") {
       federationHeartbeat.stop();
     }

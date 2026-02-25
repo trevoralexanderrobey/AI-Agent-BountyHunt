@@ -19,6 +19,7 @@ Key capabilities:
 - **Tool Adapter Framework** — Direct CLI tool execution (curl, nslookup, whois, hashcat, sqlmap, nikto, aircrack, msfvenom, ffuf)
 - **Federation** — Multi-node peer registry, remote execution, heartbeat monitoring, deterministic overflow routing
 - **Persistent State** — File-backed control plane persistence (idempotency, queue, circuit breaker, peer metadata)
+- **Cluster Coordination** — Leader election, shard ownership, rendezvous hashing, multi-supervisor routing
 - **MCP Bridge** — Director → Executor pattern connecting GitHub Pro / Antigravity / Codex to OpenClaw
 
 ### OpenClaw Bridge Runtime
@@ -114,6 +115,7 @@ cd "AG for OC"
 - [Batch 3 Tools](./openclaw-bridge/docs/batch-3-tools.md) — aircrack, msfvenom, ffuf adapters
 - [Federation Spec](./openclaw-bridge/docs/federation-spec.md) — Multi-node peer registry and deterministic routing
 - [Persistent State Spec](./openclaw-bridge/docs/persistent-state-spec.md) — File-backed control plane persistence
+- [Cluster Spec](./openclaw-bridge/docs/cluster-spec.md) — Leader election and shard-based multi-supervisor routing
 - [Bridge Setup & Operations](./openclaw-bridge/SETUP.md)
 - [Bridge API Contract](./openclaw-bridge/docs/API.md)
 - [Burp Integration](./openclaw-bridge/docs/BURP_INTEGRATION.md)
