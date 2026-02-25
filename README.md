@@ -14,6 +14,9 @@ Key capabilities:
 - **Supervisor v1** — Deterministic routing, connection pooling, and lifecycle management for skill containers
 - **Observability** — In-memory telemetry (counters, histograms, gauges) for Supervisor and Spawner
 - **Security Baseline** — Auth guard (constant-time bearer), per-caller rate limiting, `request_id` propagation
+- **HTTP API** — External ingress layer (`POST /api/v1/execute`, `/health`, `/metrics`) with graceful shutdown
+- **Production Hardening** — TLS/mTLS, HMAC request signing, audit logging, Prometheus exporter
+- **Tool Adapter Framework** — Direct CLI tool execution (curl, nslookup, whois, hashcat, sqlmap, nikto)
 - **MCP Bridge** — Director → Executor pattern connecting GitHub Pro / Antigravity / Codex to OpenClaw
 
 ### OpenClaw Bridge Runtime
@@ -101,6 +104,11 @@ cd "AG for OC"
 - [Supervisor v1 Spec](./openclaw-bridge/docs/supervisor-v1-spec.md) — Routing, pooling, and lifecycle management
 - [Observability Spec](./openclaw-bridge/docs/observability-spec.md) — In-memory telemetry system
 - [Phase 9 Security Baseline](./openclaw-bridge/docs/phase-9-security-baseline.md) — Auth, rate limiting, request tracing, threat model
+- [HTTP API Spec](./openclaw-bridge/docs/http-api-spec.md) — Phase 10 external HTTP ingress
+- [Phase 11 Production Hardening](./openclaw-bridge/docs/phase-11-production-hardening.md) — TLS, signing, audit, Prometheus
+- [Tool Adapter Framework](./openclaw-bridge/docs/tool-adapter-framework.md) — Phase 11A adapter pattern
+- [Batch 1 Tools](./openclaw-bridge/docs/batch-1-tools.md) — curl, nslookup, whois adapters
+- [Batch 2 Tools](./openclaw-bridge/docs/batch-2-tools.md) — hashcat, sqlmap, nikto adapters
 - [Bridge Setup & Operations](./openclaw-bridge/SETUP.md)
 - [Bridge API Contract](./openclaw-bridge/docs/API.md)
 - [Burp Integration](./openclaw-bridge/docs/BURP_INTEGRATION.md)

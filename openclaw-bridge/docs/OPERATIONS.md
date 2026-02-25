@@ -254,3 +254,64 @@ Key controls:
 - No hardcoded credentials; env-first configuration
 
 Spec: `/Users/trevorrobey/AI-Agent-BountyHunt/openclaw-bridge/docs/phase-9-security-baseline.md`
+
+## HTTP API ingress (Phase 10)
+
+External HTTP layer wrapping Supervisor v1:
+
+```bash
+# Start with HTTP ingress enabled
+HTTP_SERVER_ENABLED=true HTTP_SERVER_PORT=8080 node http/server.js
+
+# Execute a skill via API
+curl -X POST http://127.0.0.1:8080/api/v1/execute \
+  -H 'Content-Type: application/json' \
+  -H 'Authorization: Bearer your_token' \
+  -d '{"slug":"nmap","method":"health","params":{}}'
+
+# Health and metrics
+curl http://127.0.0.1:8080/health
+curl http://127.0.0.1:8080/metrics
+```
+
+Spec: `/Users/trevorrobey/AI-Agent-BountyHunt/openclaw-bridge/docs/http-api-spec.md`
+
+## Production hardening (Phase 11)
+
+TLS, request signing, audit logging, and Prometheus:
+
+```bash
+# TLS/mTLS
+export TLS_ENABLED=true TLS_CERT_PATH=/path/fullchain.pem TLS_KEY_PATH=/path/privkey.pem
+export MTLS_ENABLED=true MTLS_CA_PATH=/path/client-ca.pem
+
+# Request signing
+export REQUEST_SIGNING_ENABLED=true REQUEST_SIGNING_SECRET=your_hmac_secret
+
+# Audit logging
+export AUDIT_LOG_ENABLED=true AUDIT_LOG_PATH=./logs/audit.log
+
+# Prometheus exporter
+export PROMETHEUS_EXPORTER_ENABLED=true
+curl http://127.0.0.1:8080/metrics/prometheus
+```
+
+Spec: `/Users/trevorrobey/AI-Agent-BountyHunt/openclaw-bridge/docs/phase-11-production-hardening.md`
+
+## Tool adapters (Phase 11A–11C)
+
+Direct CLI tool execution via standardized adapters (bypass container lifecycle):
+
+Available tools: `curl`, `nslookup`, `whois`, `hashcat`, `sqlmap`, `nikto`
+
+```bash
+# Execute a tool adapter via HTTP API
+curl -X POST http://127.0.0.1:8080/api/v1/execute \
+  -H 'Content-Type: application/json' \
+  -d '{"slug":"curl","method":"execute","params":{"url":"https://example.com"}}'
+```
+
+Specs:
+- Framework: `/Users/trevorrobey/AI-Agent-BountyHunt/openclaw-bridge/docs/tool-adapter-framework.md`
+- Batch 1: `/Users/trevorrobey/AI-Agent-BountyHunt/openclaw-bridge/docs/batch-1-tools.md`
+- Batch 2: `/Users/trevorrobey/AI-Agent-BountyHunt/openclaw-bridge/docs/batch-2-tools.md`

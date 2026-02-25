@@ -3,8 +3,15 @@ const http = require("node:http");
 
 const { createMetrics } = require("../observability/metrics.js");
 const { createAuthGuard } = require("../security/auth.js");
+const { createAuditLogger } = require("../security/audit-logger.js");
 const { createRateLimiter } = require("../security/rate-limit.js");
 const { createSpawnerV2 } = require("../spawner/spawner-v2.js");
+const { createCircuitBreaker } = require("./circuit-breaker.js");
+const { RequestQueue } = require("./request-queue.js");
+const { registerBatch1Tools } = require("../tools/adapters/index.js");
+const { registerBatch2Tools } = require("../tools/adapters/batch-2-index.js");
+const { createToolRegistry } = require("../tools/tool-registry.js");
+const { createToolValidator } = require("../tools/tool-validator.js");
 
 const SKILL_CONFIG = Object.freeze({
   nmap: Object.freeze({
@@ -28,6 +35,12 @@ const ALLOWED_METHODS = Object.freeze([
 
 const METHOD_SET = new Set(ALLOWED_METHODS);
 const DEFAULT_REQUEST_TIMEOUT_MS = 60000;
+const DEFAULT_RETRY_POLICY = Object.freeze({
+  retries: 3,
+  delayMs: 1000,
+  backoffFactor: 2,
+});
+const NON_IDEMPOTENT_METHODS = new Set(["run", "tag_baseline"]);
 
 function createNoopMetrics() {
   return {
@@ -113,6 +126,24 @@ class Mutex {
 function createSupervisorV1(options = {}) {
   const spawnerFactory = typeof options.spawnerFactory === "function" ? options.spawnerFactory : createSpawnerV2;
   const requestTimeoutMs = parsePositiveInt(options.requestTimeoutMs, DEFAULT_REQUEST_TIMEOUT_MS);
+  const idempotencyEnabled = Boolean(options.idempotency && options.idempotency.enabled);
+  const idempotencyTtlMs = parsePositiveInt(options.idempotency && options.idempotency.ttlMs, 300000);
+  const idempotencyMaxEntries = parsePositiveInt(options.idempotency && options.idempotency.maxEntries, 1000);
+  const queueEnabled = Boolean(options.queue && options.queue.enabled);
+  const queueMaxLength = parsePositiveInt(options.queue && options.queue.maxLength, 100);
+  const queuePollIntervalMs = parsePositiveInt(options.queue && options.queue.pollIntervalMs, 250);
+  const circuitBreaker = createCircuitBreaker({
+    enabled: Boolean(options.circuitBreaker && options.circuitBreaker.enabled),
+    failureThreshold:
+      options.circuitBreaker && typeof options.circuitBreaker.failureThreshold !== "undefined"
+        ? options.circuitBreaker.failureThreshold
+        : undefined,
+    successThreshold:
+      options.circuitBreaker && typeof options.circuitBreaker.successThreshold !== "undefined"
+        ? options.circuitBreaker.successThreshold
+        : undefined,
+    timeout: options.circuitBreaker && typeof options.circuitBreaker.timeout !== "undefined" ? options.circuitBreaker.timeout : undefined,
+  });
   const baseMetrics = options.metrics && typeof options.metrics === "object" ? options.metrics : createMetrics();
   const metrics = createSafeMetrics(baseMetrics);
   const authGuard = createAuthGuard({
@@ -125,6 +156,23 @@ function createSupervisorV1(options = {}) {
     rps: options.rateLimit && typeof options.rateLimit.rps !== "undefined" ? options.rateLimit.rps : undefined,
     burst: options.rateLimit && typeof options.rateLimit.burst !== "undefined" ? options.rateLimit.burst : undefined,
   });
+  const auditLogger = createAuditLogger({
+    enabled: options.auditLog && typeof options.auditLog.enabled !== "undefined" ? options.auditLog.enabled : true,
+    path: options.auditLog && typeof options.auditLog.path === "string" ? options.auditLog.path : undefined,
+    rotationPolicy:
+      options.auditLog && options.auditLog.rotationPolicy && typeof options.auditLog.rotationPolicy === "object"
+        ? options.auditLog.rotationPolicy
+        : undefined,
+  });
+  const externalToolRegistry = options.toolRegistry && typeof options.toolRegistry.get === "function" ? options.toolRegistry : null;
+  const toolRegistry = externalToolRegistry || createToolRegistry({ strict: false });
+  registerBatch1Tools(toolRegistry);
+  registerBatch2Tools(toolRegistry);
+  registerConfiguredToolAdapters(toolRegistry, options.toolAdapters);
+  if (!externalToolRegistry && typeof toolRegistry.seal === "function") {
+    toolRegistry.seal();
+  }
+  const toolValidator = createToolValidator(toolRegistry);
 
   const spawner = spawnerFactory({ metrics });
   const pools = new Map();
@@ -132,6 +180,8 @@ function createSupervisorV1(options = {}) {
   const instanceTokenById = new Map();
   const pendingSpawnsBySlug = new Map();
   const reapReservationsBySlug = new Map();
+  const idempotencyStore = new Map();
+  const requestQueue = new RequestQueue(queueMaxLength);
   const slugLocks = new Map();
   const aggregateCounts = {
     total: 0,
@@ -142,6 +192,8 @@ function createSupervisorV1(options = {}) {
 
   let initialized = false;
   let isShuttingDown = false;
+  let queueTimer = null;
+  let queueProcessorActive = false;
 
   function parsePositiveInt(value, fallback) {
     const parsed = Number.parseInt(String(value ?? "").trim(), 10);
@@ -151,6 +203,51 @@ function createSupervisorV1(options = {}) {
     return parsed;
   }
 
+  function parseNonNegativeInt(value, fallback) {
+    const parsed = Number.parseInt(String(value ?? "").trim(), 10);
+    if (!Number.isFinite(parsed) || parsed < 0) {
+      return fallback;
+    }
+    return parsed;
+  }
+
+  function registerConfiguredToolAdapters(registry, toolAdapters) {
+    if (!registry || typeof registry.register !== "function" || !toolAdapters) {
+      return;
+    }
+
+    const registerOne = (slug, adapter, enabled = true) => {
+      if (!slug || !adapter) {
+        return;
+      }
+      registry.register(slug, adapter, { enabled });
+    };
+
+    if (Array.isArray(toolAdapters)) {
+      for (const item of toolAdapters) {
+        if (!item || typeof item !== "object") {
+          continue;
+        }
+        registerOne(item.slug, item.adapter, item.enabled !== false);
+      }
+      return;
+    }
+
+    if (toolAdapters && typeof toolAdapters === "object") {
+      for (const slug of Object.keys(toolAdapters)) {
+        const entry = toolAdapters[slug];
+        if (!entry) {
+          continue;
+        }
+        if (entry && typeof entry === "object" && entry.adapter) {
+          registerOne(slug, entry.adapter, entry.enabled !== false);
+        } else {
+          registerOne(slug, entry, true);
+        }
+      }
+    }
+  }
+
   function makeFailure(code, message, details) {
     const error = new Error(String(message || "Unexpected error"));
     error.code = String(code || "SUPERVISOR_ERROR");
@@ -158,6 +255,12 @@ function createSupervisorV1(options = {}) {
       error.details = details;
     }
     return error;
+  }
+
+  function safeAudit(event) {
+    try {
+      auditLogger.log(event);
+    } catch {}
   }
 
   function isSpawnerError(value) {
@@ -207,6 +310,281 @@ function createSupervisorV1(options = {}) {
     return explicit || "anonymous";
   }
 
+  function normalizeIdempotencyKey(requestContext) {
+    if (!idempotencyEnabled) {
+      return "";
+    }
+    if (!requestContext || typeof requestContext !== "object" || typeof requestContext.idempotencyKey !== "string") {
+      return "";
+    }
+    const key = requestContext.idempotencyKey.trim();
+    if (!key || key.length > 128) {
+      return "";
+    }
+    return key;
+  }
+
+  function normalizeRetryPolicy(requestContext) {
+    if (!requestContext || typeof requestContext !== "object" || !requestContext.retryPolicy || typeof requestContext.retryPolicy !== "object") {
+      return null;
+    }
+    const source = requestContext.retryPolicy;
+    const retries = parseNonNegativeInt(source.retries, DEFAULT_RETRY_POLICY.retries);
+    const delayMs = parsePositiveInt(source.delayMs, DEFAULT_RETRY_POLICY.delayMs);
+    const rawBackoff = Number(source.backoffFactor);
+    const backoffFactor = Number.isFinite(rawBackoff) && rawBackoff > 0 ? rawBackoff : DEFAULT_RETRY_POLICY.backoffFactor;
+    return {
+      retries,
+      delayMs,
+      backoffFactor,
+    };
+  }
+
+  function isRetryEligibleMethod(method) {
+    return NON_IDEMPOTENT_METHODS.has(method);
+  }
+
+  function stableStringify(value) {
+    const seen = new WeakSet();
+    const encoded = JSON.stringify(value, (key, input) => {
+      if (typeof input === "bigint") {
+        return input.toString();
+      }
+      if (input && typeof input === "object") {
+        if (seen.has(input)) {
+          return "[Circular]";
+        }
+        seen.add(input);
+        if (Array.isArray(input)) {
+          return input;
+        }
+        const ordered = {};
+        for (const childKey of Object.keys(input).sort()) {
+          ordered[childKey] = input[childKey];
+        }
+        return ordered;
+      }
+      return input;
+    });
+    return typeof encoded === "string" ? encoded : String(encoded);
+  }
+
+  function cloneForIdempotency(value) {
+    try {
+      if (typeof globalThis.structuredClone === "function") {
+        return globalThis.structuredClone(value);
+      }
+    } catch {}
+    try {
+      return JSON.parse(JSON.stringify(value));
+    } catch {
+      return value;
+    }
+  }
+
+  function makeIdempotencyStoreKey(principalId, slug, method, idempotencyKey) {
+    return `${principalId}::${slug}::${method}::${idempotencyKey}`;
+  }
+
+  function pruneIdempotencyStore(now) {
+    if (!idempotencyEnabled) {
+      return;
+    }
+
+    while (idempotencyStore.size > 0) {
+      const oldestKey = idempotencyStore.keys().next().value;
+      if (typeof oldestKey === "undefined") {
+        break;
+      }
+      const oldestEntry = idempotencyStore.get(oldestKey);
+      if (!oldestEntry || now - oldestEntry.createdAt > idempotencyTtlMs) {
+        idempotencyStore.delete(oldestKey);
+        continue;
+      }
+      break;
+    }
+
+    while (idempotencyStore.size > idempotencyMaxEntries) {
+      const oldestKey = idempotencyStore.keys().next().value;
+      if (typeof oldestKey === "undefined") {
+        break;
+      }
+      idempotencyStore.delete(oldestKey);
+    }
+  }
+
+  function readIdempotencyReplay(storeKey, paramsHash, now) {
+    if (!idempotencyEnabled || !storeKey) {
+      return null;
+    }
+    const entry = idempotencyStore.get(storeKey);
+    if (!entry) {
+      return null;
+    }
+    if (now - entry.createdAt > idempotencyTtlMs) {
+      idempotencyStore.delete(storeKey);
+      return null;
+    }
+    if (entry.paramsHash !== paramsHash) {
+      return null;
+    }
+
+    if (entry.error !== null) {
+      return {
+        kind: "runtime_error",
+        payload: cloneForIdempotency(entry.error),
+      };
+    }
+
+    return {
+      kind: "result",
+      payload: cloneForIdempotency(entry.result),
+    };
+  }
+
+  function storeIdempotencyOutcome(storeKey, paramsHash, outcomeKind, payload) {
+    if (!idempotencyEnabled || !storeKey) {
+      return;
+    }
+    const now = Date.now();
+    pruneIdempotencyStore(now);
+
+    if (idempotencyStore.has(storeKey)) {
+      idempotencyStore.delete(storeKey);
+    }
+
+    idempotencyStore.set(storeKey, {
+      createdAt: now,
+      paramsHash,
+      result: outcomeKind === "result" ? cloneForIdempotency(payload) : null,
+      error: outcomeKind === "runtime_error" ? cloneForIdempotency(payload) : null,
+    });
+
+    pruneIdempotencyStore(now);
+  }
+
+  function publishQueueGauge() {
+    metrics.gauge("supervisor.queue.length", requestQueue.length);
+  }
+
+  function circuitStateMetricValue(state) {
+    if (state === "OPEN") {
+      return 0;
+    }
+    if (state === "HALF_OPEN") {
+      return 1;
+    }
+    return 2;
+  }
+
+  function publishCircuitGauges(slug, snapshot) {
+    if (!circuitBreaker.enabled || !snapshot) {
+      return;
+    }
+    metrics.gauge("supervisor.circuit_breaker.state", circuitStateMetricValue(snapshot.state), { slug });
+    metrics.gauge("supervisor.skill.health", snapshot.healthScore, { slug });
+  }
+
+  function applyCircuitTransitionMetrics(slug, transition, context = {}) {
+    if (!circuitBreaker.enabled || !transition || !transition.transitioned) {
+      return;
+    }
+
+    publishCircuitGauges(slug, transition.snapshot);
+    if (transition.to === "OPEN") {
+      metrics.increment("supervisor.circuit_breaker.trips", { slug });
+      safeAudit({
+        event: "circuit_trip",
+        principal_id: typeof context.principalId === "string" ? context.principalId : "system",
+        slug,
+        request_id: typeof context.requestId === "string" ? context.requestId : "",
+        status: "failure",
+        details: {
+          from: transition.from,
+          to: transition.to,
+          failureCount: transition.snapshot.failureCount,
+        },
+      });
+      return;
+    }
+    if (transition.to === "CLOSED") {
+      metrics.increment("supervisor.circuit_breaker.recoveries", { slug });
+      safeAudit({
+        event: "circuit_recovery",
+        principal_id: typeof context.principalId === "string" ? context.principalId : "system",
+        slug,
+        request_id: typeof context.requestId === "string" ? context.requestId : "",
+        status: "success",
+        details: {
+          from: transition.from,
+          to: transition.to,
+          successCount: transition.snapshot.successCount,
+        },
+      });
+    }
+  }
+
+  function buildCircuitOpenDetails(slug) {
+    const snapshot = circuitBreaker.getSnapshot(slug);
+    const nextRetryAt = snapshot.state === "OPEN" ? snapshot.lastTransitionAt + circuitBreaker.constants.timeoutMs : Date.now();
+    return {
+      slug,
+      state: snapshot.state,
+      failureCount: snapshot.failureCount,
+      nextRetryAt,
+    };
+  }
+
+  function buildRetryContext(baseContext, principalId, nextRetryPolicy) {
+    return {
+      ...baseContext,
+      principalId,
+      retryPolicy: nextRetryPolicy,
+    };
+  }
+
+  function enqueueRetryRequest({ slug, method, params, requestContext, principalId, retryPolicy, requestId }) {
+    if (!queueEnabled || !retryPolicy || retryPolicy.retries <= 0 || !isRetryEligibleMethod(method)) {
+      return { queued: false, reason: "not_eligible" };
+    }
+
+    if (requestQueue.length >= queueMaxLength) {
+      metrics.increment("supervisor.capacity.rejection.due.to.queue", { slug, method, request_id: requestId });
+      metrics.increment("supervisor.retry.failure", { slug, reason: "queue_full", request_id: requestId });
+      return { queued: false, reason: "queue_full" };
+    }
+
+    const remainingRetries = retryPolicy.retries - 1;
+    const nextRetryPolicy = {
+      retries: Math.max(remainingRetries, 0),
+      delayMs: Math.max(1, Math.floor(retryPolicy.delayMs * retryPolicy.backoffFactor)),
+      backoffFactor: retryPolicy.backoffFactor,
+    };
+    const now = Date.now();
+    const queued = requestQueue.enqueue({
+      slug,
+      method,
+      params,
+      requestContext: buildRetryContext(requestContext, principalId, nextRetryPolicy),
+      nextExecutionTime: now + retryPolicy.delayMs,
+      enqueuedAt: now,
+    });
+
+    if (!queued) {
+      metrics.increment("supervisor.capacity.rejection.due.to.queue", { slug, method, request_id: requestId });
+      metrics.increment("supervisor.retry.failure", { slug, reason: "queue_full", request_id: requestId });
+      return { queued: false, reason: "queue_full" };
+    }
+
+    metrics.increment("supervisor.retries.count", { slug, method, request_id: requestId });
+    publishQueueGauge();
+
+    return {
+      queued: true,
+      remainingRetries,
+    };
+  }
+
   function attachRequestId(error, requestId) {
     if (!error || typeof error !== "object" || !requestId) {
       return error;
@@ -221,6 +599,16 @@ function createSupervisorV1(options = {}) {
 
   function getConfig(slug) {
     return SKILL_CONFIG[slug] || null;
+  }
+
+  function initializeCircuitMetrics() {
+    if (!circuitBreaker.enabled) {
+      return;
+    }
+    const slugs = Object.keys(SKILL_CONFIG).sort();
+    for (const slug of slugs) {
+      publishCircuitGauges(slug, circuitBreaker.getSnapshot(slug));
+    }
   }
 
   function getOrCreatePool(slug) {
@@ -240,11 +628,91 @@ function createSupervisorV1(options = {}) {
     return pendingSpawnsBySlug.get(slug) || 0;
   }
 
+  function hasQueueDispatchCapacity(slug) {
+    const config = getConfig(slug);
+    if (!config) {
+      return false;
+    }
+
+    const pool = getExistingPool(slug);
+    if (!pool || pool.instances.size === 0) {
+      return true;
+    }
+
+    for (const instance of pool.instances.values()) {
+      if (instance.state === "READY") {
+        return true;
+      }
+    }
+
+    return pool.instances.size + getPendingSpawns(slug) < config.maxInstances;
+  }
+
   function publishGaugeSnapshot() {
     metrics.gauge("supervisor.instances.total", aggregateCounts.total);
     metrics.gauge("supervisor.instances.ready", aggregateCounts.ready);
     metrics.gauge("supervisor.instances.busy", aggregateCounts.busy);
     metrics.gauge("supervisor.pending_spawns", aggregateCounts.pending);
+  }
+
+  async function processQueue() {
+    if (!queueEnabled || isShuttingDown || queueProcessorActive) {
+      return;
+    }
+    queueProcessorActive = true;
+    try {
+      const queued = requestQueue.peek();
+      if (!queued) {
+        return;
+      }
+
+      const now = Date.now();
+      if (now < queued.nextExecutionTime) {
+        return;
+      }
+
+      if (!hasQueueDispatchCapacity(queued.slug)) {
+        metrics.increment("supervisor.capacity.rejection.due.to.queue", { slug: queued.slug, method: queued.method });
+        return;
+      }
+
+      const dequeued = requestQueue.dequeue();
+      publishQueueGauge();
+      if (!dequeued) {
+        return;
+      }
+
+      metrics.observe("supervisor.queue.execution.delay.histogram", Math.max(0, now - dequeued.enqueuedAt), {
+        slug: dequeued.slug,
+        method: dequeued.method,
+      });
+
+      try {
+        await execute(dequeued.slug, dequeued.method, dequeued.params, dequeued.requestContext);
+      } catch {}
+    } finally {
+      queueProcessorActive = false;
+    }
+  }
+
+  function startQueueProcessor() {
+    if (!queueEnabled || queueTimer) {
+      return;
+    }
+    queueTimer = setInterval(() => {
+      processQueue().catch(() => {});
+    }, queuePollIntervalMs);
+    if (queueTimer && typeof queueTimer.unref === "function") {
+      queueTimer.unref();
+    }
+  }
+
+  function stopQueueProcessor() {
+    if (!queueTimer) {
+      return;
+    }
+    clearInterval(queueTimer);
+    queueTimer = null;
   }
 
   function setPendingSpawns(slug, count) {
@@ -543,11 +1011,32 @@ function createSupervisorV1(options = {}) {
     }
 
     if (isSpawnerError(terminateResult)) {
+      safeAudit({
+        event: "terminate",
+        principal_id: principalId,
+        slug,
+        request_id: requestId,
+        status: "failure",
+        details: {
+          code: terminateResult.error.code,
+          message: terminateResult.error.message,
+        },
+      });
       details.terminateError = {
         code: terminateResult.error.code,
         message: terminateResult.error.message,
       };
     } else {
+      safeAudit({
+        event: "terminate",
+        principal_id: principalId,
+        slug,
+        request_id: requestId,
+        status: "success",
+        details: {
+          source: "failure_cleanup",
+        },
+      });
       metrics.increment("supervisor.instance.terminated", { slug, source: "failure_cleanup" });
     }
 
@@ -556,6 +1045,9 @@ function createSupervisorV1(options = {}) {
 
   async function initialize() {
     await ensureInitialized();
+    initializeCircuitMetrics();
+    startQueueProcessor();
+    publishQueueGauge();
     return {
       ok: true,
       initialized: true,
@@ -566,30 +1058,192 @@ function createSupervisorV1(options = {}) {
     const context = requestContext && typeof requestContext === "object" ? requestContext : {};
     const requestId = resolveRequestId(context);
     const principalId = resolvePrincipalId(context);
+    const idempotencyKey = normalizeIdempotencyKey(context);
+    const retryPolicy = normalizeRetryPolicy(context);
     const slug = normalizeSlug(rawSlug);
     const method = normalizeMethod(rawMethod);
     const params = typeof rawParams === "undefined" ? {} : rawParams;
+    let idempotencyStoreKey = "";
+    let idempotencyParamsHash = "";
+    let circuitLeaseAcquired = false;
     let executionStartedAt = 0;
     let shouldObserveExecution = false;
 
     try {
       authGuard.validate(context, requestId);
       rateLimiter.check(principalId, requestId);
+      safeAudit({
+        event: "execute",
+        principal_id: principalId,
+        slug,
+        request_id: requestId,
+        status: "success",
+        details: {
+          phase: "entry",
+          method,
+        },
+      });
 
       if (isShuttingDown) {
         throw makeFailure("SUPERVISOR_SHUTTING_DOWN", "Supervisor is shutting down");
       }
 
       await ensureInitialized();
+      startQueueProcessor();
 
       if (isShuttingDown) {
         throw makeFailure("SUPERVISOR_SHUTTING_DOWN", "Supervisor is shutting down");
       }
 
-      ensureSkillAndMethod(slug, method);
+      const skillConfig = getConfig(slug);
+      const toolAdapter = toolRegistry.get(slug);
+      if (!skillConfig && !toolAdapter) {
+        throw makeFailure("INVALID_TOOL_REQUEST", `Tool '${slug || ""}' is not registered`);
+      }
+
       executionStartedAt = Date.now();
       shouldObserveExecution = true;
       metrics.increment("supervisor.executions.total", { slug, method });
+
+      if (idempotencyEnabled && idempotencyKey) {
+        idempotencyParamsHash = stableStringify(params);
+        idempotencyStoreKey = makeIdempotencyStoreKey(principalId, slug, method, idempotencyKey);
+        const replay = readIdempotencyReplay(idempotencyStoreKey, idempotencyParamsHash, Date.now());
+        if (replay) {
+          if (replay.kind === "runtime_error") {
+            metrics.increment("supervisor.executions.error", { slug, reason: "idempotency_replay", request_id: requestId });
+          } else {
+            metrics.increment("supervisor.executions.success", { slug, method });
+          }
+          return replay.payload;
+        }
+      }
+
+      if (toolAdapter) {
+        if (method !== "run") {
+          metrics.increment("supervisor.executions.error", { slug, reason: "invalid_tool_method", request_id: requestId });
+          throw makeFailure("INVALID_TOOL_REQUEST", "Tool adapters only support method 'run'", {
+            slug,
+            method,
+          });
+        }
+
+        const validation = await toolValidator.validateExecutionRequest(slug, params);
+        if (!validation.valid || !validation.adapter) {
+          metrics.increment("supervisor.executions.error", { slug, reason: "invalid_tool_request", request_id: requestId });
+          throw makeFailure("INVALID_TOOL_REQUEST", "Tool request validation failed", {
+            slug,
+            errors: validation.errors || [],
+          });
+        }
+
+        metrics.increment("tool.executions.total", { slug });
+        const toolStartedAt = Date.now();
+        const toolResult = await validation.adapter.execute({
+          params,
+          timeout: requestTimeoutMs,
+          requestId,
+        });
+        const toolDuration = Math.max(
+          0,
+          toolResult &&
+            toolResult.metadata &&
+            Number.isFinite(Number(toolResult.metadata.executionTimeMs))
+            ? Number(toolResult.metadata.executionTimeMs)
+            : Date.now() - toolStartedAt,
+        );
+        const outputBytes = Math.max(
+          0,
+          toolResult &&
+            toolResult.metadata &&
+            Number.isFinite(Number(toolResult.metadata.outputBytes))
+            ? Number(toolResult.metadata.outputBytes)
+            : (() => {
+                try {
+                  return Buffer.byteLength(JSON.stringify(toolResult && toolResult.result ? toolResult.result : {}), "utf8");
+                } catch {
+                  return 0;
+                }
+              })(),
+        );
+        metrics.observe("tool.execution.duration_ms", toolDuration, { slug });
+        metrics.observe("tool.output_size_bytes", outputBytes, { slug });
+
+        if (toolResult && toolResult.ok === true) {
+          metrics.increment("tool.executions.success", { slug });
+          metrics.increment("supervisor.executions.success", { slug, method });
+          storeIdempotencyOutcome(idempotencyStoreKey, idempotencyParamsHash, "result", toolResult);
+          safeAudit({
+            event: "execute",
+            principal_id: principalId,
+            slug,
+            request_id: requestId,
+            status: "success",
+            details: {
+              phase: "tool_result",
+              method,
+            },
+          });
+          return toolResult;
+        }
+
+        const toolErrorResult =
+          toolResult && toolResult.ok === false
+            ? toolResult
+            : {
+                ok: false,
+                error: {
+                  code: "TOOL_EXECUTION_ERROR",
+                  message: "Tool execution failed",
+                },
+                metadata: {
+                  executionTimeMs: toolDuration,
+                  outputBytes,
+                  requestId,
+                },
+              };
+        metrics.increment("tool.executions.error", { slug });
+        metrics.increment("supervisor.executions.error", { slug, reason: "tool_execution_error", request_id: requestId });
+        storeIdempotencyOutcome(idempotencyStoreKey, idempotencyParamsHash, "runtime_error", toolErrorResult);
+        safeAudit({
+          event: "execute",
+          principal_id: principalId,
+          slug,
+          request_id: requestId,
+          status: "failure",
+          details: {
+            phase: "tool_execution_error",
+            method,
+            code: toolErrorResult.error && toolErrorResult.error.code ? toolErrorResult.error.code : "TOOL_EXECUTION_ERROR",
+          },
+        });
+        return toolErrorResult;
+      }
+
+      ensureSkillAndMethod(slug, method);
+
+      if (circuitBreaker.enabled) {
+        const gate = circuitBreaker.checkBeforeRequest(slug);
+        applyCircuitTransitionMetrics(slug, gate, { requestId, principalId });
+        if (!gate.allowed) {
+          const snapshot = gate.snapshot || circuitBreaker.getSnapshot(slug);
+          const nextRetryAt =
+            snapshot.state === "OPEN" ? snapshot.lastTransitionAt + circuitBreaker.constants.timeoutMs : Date.now();
+          const reason = snapshot.state === "OPEN" ? "circuit_open" : "circuit_half_open_busy";
+          metrics.increment("supervisor.executions.error", { slug, reason, request_id: requestId });
+          throw makeFailure(
+            "CIRCUIT_BREAKER_OPEN",
+            snapshot.state === "OPEN" ? "Skill circuit breaker is open" : "Skill circuit breaker is half-open",
+            {
+              slug,
+              state: snapshot.state,
+              failureCount: snapshot.failureCount,
+              nextRetryAt,
+            },
+          );
+        }
+        circuitLeaseAcquired = gate.leaseAcquired;
+      }
 
       let acquiredContainerId = null;
       let shouldSpawn = false;
@@ -631,6 +1285,16 @@ function createSupervisorV1(options = {}) {
 
       if (shouldSpawn) {
         const spawnStartedAt = Date.now();
+        safeAudit({
+          event: "spawn",
+          principal_id: principalId,
+          slug,
+          request_id: requestId,
+          status: "success",
+          details: {
+            phase: "attempt",
+          },
+        });
         const spawnResult = await spawner.spawnSkill(slug, {
           requestId,
           principalId,
@@ -638,6 +1302,17 @@ function createSupervisorV1(options = {}) {
         metrics.observe("supervisor.spawn.duration_ms", Date.now() - spawnStartedAt, { slug });
 
         if (isSpawnerError(spawnResult)) {
+          safeAudit({
+            event: "spawn",
+            principal_id: principalId,
+            slug,
+            request_id: requestId,
+            status: "failure",
+            details: {
+              code: spawnResult.error.code,
+              message: spawnResult.error.message,
+            },
+          });
           metrics.increment("supervisor.spawn.failure", { slug, request_id: requestId });
           metrics.increment("supervisor.executions.error", { slug, reason: "spawn_failed", request_id: requestId });
           await withSlugLock(slug, async () => {
@@ -651,6 +1326,16 @@ function createSupervisorV1(options = {}) {
         }
 
         if (!spawnResult || typeof spawnResult.containerId !== "string" || typeof spawnResult.networkAddress !== "string" || typeof spawnResult.token !== "string") {
+          safeAudit({
+            event: "spawn",
+            principal_id: principalId,
+            slug,
+            request_id: requestId,
+            status: "failure",
+            details: {
+              code: "INVALID_SPAWN_PAYLOAD",
+            },
+          });
           metrics.increment("supervisor.spawn.failure", { slug, request_id: requestId });
           metrics.increment("supervisor.executions.error", { slug, reason: "invalid_spawn_payload", request_id: requestId });
           await withSlugLock(slug, async () => {
@@ -660,6 +1345,16 @@ function createSupervisorV1(options = {}) {
         }
 
         metrics.increment("supervisor.spawn.success", { slug });
+        safeAudit({
+          event: "spawn",
+          principal_id: principalId,
+          slug,
+          request_id: requestId,
+          status: "success",
+          details: {
+            phase: "success",
+          },
+        });
         let shutdownAfterSpawn = false;
 
         await withSlugLock(slug, async () => {
@@ -688,7 +1383,30 @@ function createSupervisorV1(options = {}) {
             principalId,
           });
           if (!isSpawnerError(terminateResult)) {
+            safeAudit({
+              event: "terminate",
+              principal_id: principalId,
+              slug,
+              request_id: requestId,
+              status: "success",
+              details: {
+                source: "shutdown_after_spawn",
+              },
+            });
             metrics.increment("supervisor.instance.terminated", { slug, source: "shutdown_after_spawn" });
+          } else {
+            safeAudit({
+              event: "terminate",
+              principal_id: principalId,
+              slug,
+              request_id: requestId,
+              status: "failure",
+              details: {
+                source: "shutdown_after_spawn",
+                code: terminateResult.error.code,
+                message: terminateResult.error.message,
+              },
+            });
           }
           metrics.increment("supervisor.executions.error", { slug, reason: "shutting_down", request_id: requestId });
           throw makeFailure("SUPERVISOR_SHUTTING_DOWN", "Supervisor is shutting down");
@@ -704,6 +1422,9 @@ function createSupervisorV1(options = {}) {
       const token = instanceTokenById.get(acquiredContainerId);
 
       if (!meta || !token) {
+        if (circuitBreaker.enabled) {
+          applyCircuitTransitionMetrics(slug, circuitBreaker.recordFailure(slug), { requestId, principalId });
+        }
         await handleInstanceTransportFailure(slug, acquiredContainerId, {
           reason: "missing_instance_metadata",
         }, requestId, principalId);
@@ -724,7 +1445,22 @@ function createSupervisorV1(options = {}) {
           setInstanceStateLocked(slug, acquiredContainerId, "READY");
           entry.lastUsedAt = Date.now();
         });
+        if (circuitBreaker.enabled) {
+          applyCircuitTransitionMetrics(slug, circuitBreaker.recordSuccess(slug), { requestId, principalId });
+        }
+        storeIdempotencyOutcome(idempotencyStoreKey, idempotencyParamsHash, "result", rpcResult.result);
         metrics.increment("supervisor.executions.success", { slug, method });
+        safeAudit({
+          event: "execute",
+          principal_id: principalId,
+          slug,
+          request_id: requestId,
+          status: "success",
+          details: {
+            phase: "result",
+            method,
+          },
+        });
         return rpcResult.result;
       }
 
@@ -741,13 +1477,116 @@ function createSupervisorV1(options = {}) {
           setInstanceStateLocked(slug, acquiredContainerId, "READY");
           entry.lastUsedAt = Date.now();
         });
+        if (circuitBreaker.enabled) {
+          applyCircuitTransitionMetrics(slug, circuitBreaker.recordSuccess(slug), { requestId, principalId });
+        }
+        const runtimeStyleError = buildRuntimeStyleErrorFromJsonRpc(rpcResult.error);
+        storeIdempotencyOutcome(idempotencyStoreKey, idempotencyParamsHash, "runtime_error", runtimeStyleError);
         metrics.increment("supervisor.executions.error", { slug, reason: "jsonrpc_error", request_id: requestId });
-        return buildRuntimeStyleErrorFromJsonRpc(rpcResult.error);
+        safeAudit({
+          event: "execute",
+          principal_id: principalId,
+          slug,
+          request_id: requestId,
+          status: "failure",
+          details: {
+            phase: "runtime_error",
+            method,
+            code: runtimeStyleError.error.code,
+          },
+        });
+        return runtimeStyleError;
       }
 
+      if (circuitBreaker.enabled) {
+        applyCircuitTransitionMetrics(slug, circuitBreaker.recordFailure(slug), { requestId, principalId });
+      }
       await handleInstanceTransportFailure(slug, acquiredContainerId, rpcResult, requestId, principalId);
     } catch (error) {
-      throw attachRequestId(error, requestId);
+      const normalizedError = attachRequestId(error, requestId);
+      const normalizedCode = normalizedError && typeof normalizedError.code === "string" ? normalizedError.code : "INTERNAL_ERROR";
+      if (normalizedCode === "UNAUTHORIZED") {
+        safeAudit({
+          event: "auth_failure",
+          principal_id: principalId,
+          slug,
+          request_id: requestId,
+          status: "failure",
+          details: {
+            method,
+          },
+        });
+      }
+      safeAudit({
+        event: "execute",
+        principal_id: principalId,
+        slug,
+        request_id: requestId,
+        status: "failure",
+        details: {
+          phase: "exception",
+          method,
+          code: normalizedCode,
+        },
+      });
+      if (circuitBreaker.enabled && normalizedError && normalizedError.code !== "INSTANCE_FAILED" && circuitLeaseAcquired) {
+        circuitBreaker.releaseHalfOpenLease(slug);
+      }
+      if (
+        normalizedError &&
+        normalizedError.code === "INSTANCE_FAILED" &&
+        retryPolicy &&
+        retryPolicy.retries > 0 &&
+        isRetryEligibleMethod(method)
+      ) {
+        if (circuitBreaker.enabled) {
+          const snapshot = circuitBreaker.getSnapshot(slug);
+          if (snapshot.state === "OPEN") {
+            metrics.increment("supervisor.executions.error", { slug, reason: "circuit_open", request_id: requestId });
+            throw attachRequestId(makeFailure("CIRCUIT_BREAKER_OPEN", "Skill circuit breaker is open", buildCircuitOpenDetails(slug)), requestId);
+          }
+        }
+        const enqueueResult = enqueueRetryRequest({
+          slug,
+          method,
+          params,
+          requestContext: context,
+          principalId,
+          retryPolicy,
+          requestId,
+        });
+        if (enqueueResult.queued) {
+          if (!normalizedError.details || typeof normalizedError.details !== "object") {
+            normalizedError.details = {};
+          }
+          normalizedError.details.retry_enqueued = true;
+          normalizedError.details.remaining_retries = enqueueResult.remainingRetries;
+          normalizedError.details.queue_length = requestQueue.length;
+          throw normalizedError;
+        }
+        if (enqueueResult.reason === "queue_full") {
+          safeAudit({
+            event: "queue_overflow",
+            principal_id: principalId,
+            slug,
+            request_id: requestId,
+            status: "failure",
+            details: {
+              method,
+              maxLength: queueMaxLength,
+            },
+          });
+          metrics.increment("supervisor.executions.error", { slug, reason: "queue_capacity_rejected", request_id: requestId });
+          throw attachRequestId(
+            makeFailure("SUPERVISOR_CAPACITY_EXCEEDED", "Retry queue is at capacity", {
+              slug,
+              maxLength: queueMaxLength,
+            }),
+            requestId,
+          );
+        }
+      }
+      throw normalizedError;
     } finally {
       if (shouldObserveExecution) {
         metrics.observe("supervisor.execution.duration_ms", Date.now() - executionStartedAt, { slug, method });
@@ -809,10 +1648,32 @@ function createSupervisorV1(options = {}) {
         });
 
         if (terminateOk) {
+          safeAudit({
+            event: "terminate",
+            principal_id: "system",
+            slug,
+            request_id: "",
+            status: "success",
+            details: {
+              source: "reap",
+            },
+          });
           reaped += 1;
           metrics.increment("supervisor.instance.reaped", { slug });
           metrics.increment("supervisor.instance.terminated", { slug, source: "reap" });
         } else {
+          safeAudit({
+            event: "terminate",
+            principal_id: "system",
+            slug,
+            request_id: "",
+            status: "failure",
+            details: {
+              source: "reap",
+              code: terminateResult.error.code,
+              message: terminateResult.error.message,
+            },
+          });
           failed += 1;
         }
       }
@@ -868,6 +1729,17 @@ function createSupervisorV1(options = {}) {
 
   async function shutdown() {
     isShuttingDown = true;
+    stopQueueProcessor();
+    safeAudit({
+      event: "shutdown",
+      principal_id: "system",
+      slug: "",
+      request_id: "",
+      status: "success",
+      details: {
+        phase: "start",
+      },
+    });
 
     const terminateTargets = [];
     const allSlugs = Array.from(new Set([...Object.keys(SKILL_CONFIG), ...pools.keys()])).sort();
@@ -898,6 +1770,18 @@ function createSupervisorV1(options = {}) {
     for (const target of terminateTargets) {
       const terminateResult = await spawner.terminateSkill(target.containerId);
       if (isSpawnerError(terminateResult)) {
+        safeAudit({
+          event: "terminate",
+          principal_id: "system",
+          slug: target.slug,
+          request_id: "",
+          status: "failure",
+          details: {
+            source: "shutdown",
+            code: terminateResult.error.code,
+            message: terminateResult.error.message,
+          },
+        });
         failed += 1;
         errors.push({
           containerId: target.containerId,
@@ -905,6 +1789,16 @@ function createSupervisorV1(options = {}) {
           message: terminateResult.error.message,
         });
       } else {
+        safeAudit({
+          event: "terminate",
+          principal_id: "system",
+          slug: target.slug,
+          request_id: "",
+          status: "success",
+          details: {
+            source: "shutdown",
+          },
+        });
         terminated += 1;
         metrics.increment("supervisor.instance.terminated", { slug: target.slug, source: "shutdown" });
       }
@@ -916,11 +1810,25 @@ function createSupervisorV1(options = {}) {
     pendingSpawnsBySlug.clear();
     reapReservationsBySlug.clear();
     slugLocks.clear();
+    requestQueue.clear();
     aggregateCounts.total = 0;
     aggregateCounts.ready = 0;
     aggregateCounts.busy = 0;
     aggregateCounts.pending = 0;
     publishGaugeSnapshot();
+    publishQueueGauge();
+    safeAudit({
+      event: "shutdown",
+      principal_id: "system",
+      slug: "",
+      request_id: "",
+      status: failed > 0 ? "failure" : "success",
+      details: {
+        phase: "complete",
+        terminated,
+        failed,
+      },
+    });
 
     return {
       ok: true,
@@ -931,6 +1839,8 @@ function createSupervisorV1(options = {}) {
   }
 
   publishGaugeSnapshot();
+  initializeCircuitMetrics();
+  publishQueueGauge();
 
   return {
     initialize,

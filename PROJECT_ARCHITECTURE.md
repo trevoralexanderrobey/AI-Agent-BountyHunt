@@ -442,7 +442,91 @@ Bridge / Director Agent
 
 ---
 
-### 12. Burp Suite Integration (BionicLink)
+### 12. HTTP API Ingress (Phase 10)
+
+**Server**: `/Users/trevorrobey/AI-Agent-BountyHunt/openclaw-bridge/http/server.js`  
+**Handlers**: `/Users/trevorrobey/AI-Agent-BountyHunt/openclaw-bridge/http/handlers.js`  
+**Spec**: `/Users/trevorrobey/AI-Agent-BountyHunt/openclaw-bridge/docs/http-api-spec.md`  
+**Purpose**: External HTTP ingress wrapping Supervisor v1
+
+#### Endpoints
+- `POST /api/v1/execute` — Execute skill/tool with auth, rate limiting, retry policy
+- `GET /health` — Service health with supervisor/queue status
+- `GET /metrics` — In-memory metrics snapshot (JSON)
+- `GET /metrics/prometheus` — Prometheus text format (when enabled)
+
+#### Features
+- Header forwarding: `Authorization`, `X-Request-Id`, `X-Principal-Id`
+- Graceful shutdown on SIGINT/SIGTERM (drain timeout, then supervisor shutdown)
+- HTTP-layer metrics: `http.requests.total`, `http.request.duration_ms`
+- Optional: disabled by default (`httpServer.enabled = false`)
+
+---
+
+### 13. Production Hardening (Phase 11)
+
+**TLS Config**: `/Users/trevorrobey/AI-Agent-BountyHunt/openclaw-bridge/security/tls-config.js`  
+**Request Signing**: `/Users/trevorrobey/AI-Agent-BountyHunt/openclaw-bridge/security/request-signing.js`  
+**Audit Logger**: `/Users/trevorrobey/AI-Agent-BountyHunt/openclaw-bridge/security/audit-logger.js`  
+**Prometheus**: `/Users/trevorrobey/AI-Agent-BountyHunt/openclaw-bridge/monitoring/prometheus-exporter.js`  
+**Spec**: `/Users/trevorrobey/AI-Agent-BountyHunt/openclaw-bridge/docs/phase-11-production-hardening.md`
+
+#### TLS/mTLS
+- TLS 1.2+ minimum, certificate chain validation on startup
+- mTLS with client CA verification (`MTLS_ENABLED`, `MTLS_CA_PATH`)
+
+#### Request Signing
+- HMAC-SHA256 over canonical JSON payload
+- `X-Signature` header validation on all JSON POST requests
+
+#### Audit Logging
+- Append-only structured NDJSON (execute, spawn, terminate, auth failures, circuit trips)
+- Daily rotation with max size limit (100MB default)
+- No token/secret values written
+
+#### Prometheus Exporter
+- `GET /metrics/prometheus` — text/plain 0.0.4 format
+- Converts in-memory counters/histograms/gauges to Prometheus scrape format
+
+---
+
+### 14. Tool Adapter Framework (Phase 11A–11C)
+
+**Framework**: `/Users/trevorrobey/AI-Agent-BountyHunt/openclaw-bridge/tools/`  
+**Specs**: `docs/tool-adapter-framework.md`, `docs/batch-1-tools.md`, `docs/batch-2-tools.md`  
+**Purpose**: Direct CLI tool execution via standardized adapters, bypassing container lifecycle
+
+#### Architecture
+- `adapter-interface.js` — Contract: `execute()`, `validateInput()`, `normalizeOutput()`, `getResourceLimits()`
+- `base-adapter.js` — Shared: timeout wrapping, validation flow, output size enforcement
+- `tool-registry.js` — Allowlist-only registry with `seal()` for immutability
+- `tool-validator.js` — Request validation before execution
+
+#### Available Adapters
+
+| Tool | Batch | Timeout | Max Output |
+|------|-------|---------|------------|
+| `curl` | 1 | 30s | 5MB |
+| `nslookup` | 1 | 10s | 1MB |
+| `whois` | 1 | 15s | 2MB |
+| `hashcat` | 2 | 300s | 1MB |
+| `sqlmap` | 2 | 300s | 5MB |
+| `nikto` | 2 | 600s | 10MB |
+
+#### Security
+- All tools use `spawn()` with argument arrays (`shell: false`)
+- Input validation and whitelisting per adapter
+- Hard timeout enforcement with process kill
+- Reserved headers filtered (curl adapter)
+
+#### Supervisor Routing
+- Tool adapter requests bypass spawner/container/queue/circuit-breaker
+- Auth and rate limiting still apply
+- Tool metrics: `tool.executions.total`, `tool.execution.duration_ms`
+
+---
+
+### 15. Burp Suite Integration (BionicLink)
 
 **Extension**: BionicLink (custom Burp extension)  
 **Port**: 8090 (HTTP)  
@@ -662,7 +746,29 @@ User receives scan summary with findings
 │   │   └── metrics.js             # In-memory metrics (counters, histograms, gauges)
 │   ├── security/                  # Security controls
 │   │   ├── auth.js                # Auth guard (constant-time bearer validation)
-│   │   └── rate-limit.js          # Per-caller token bucket rate limiter
+│   │   ├── rate-limit.js          # Per-caller token bucket rate limiter
+│   │   ├── tls-config.js          # TLS/mTLS configuration
+│   │   ├── request-signing.js     # HMAC-SHA256 request signature verification
+│   │   └── audit-logger.js        # Structured append-only audit logging
+│   ├── http/                      # HTTP API ingress (Phase 10)
+│   │   ├── server.js              # HTTP server with graceful shutdown
+│   │   └── handlers.js            # Route handlers (/api/v1/execute, /health, /metrics)
+│   ├── monitoring/                # Production monitoring
+│   │   └── prometheus-exporter.js # Prometheus text format exporter
+│   ├── tools/                     # Tool Adapter Framework (Phase 11A–11C)
+│   │   ├── adapter-interface.js   # Adapter contract definition
+│   │   ├── base-adapter.js        # Shared adapter base class
+│   │   ├── tool-registry.js       # Allowlist tool registry
+│   │   ├── tool-validator.js      # Request validation layer
+│   │   └── adapters/              # Individual tool adapters
+│   │       ├── index.js           # Batch 1 registration
+│   │       ├── batch-2-index.js   # Batch 2 registration
+│   │       ├── curl-adapter.js    # HTTP client adapter
+│   │       ├── nslookup-adapter.js # DNS lookup adapter
+│   │       ├── whois-adapter.js   # WHOIS query adapter
+│   │       ├── hashcat-adapter.js # Password cracking adapter
+│   │       ├── sqlmap-adapter.js  # SQL injection testing adapter
+│   │       └── nikto-adapter.js   # Web server scanner adapter
 │   ├── containers/                # Dockerfiles for containerized skills
 │   │   └── nmap/Dockerfile        # Containerized nmap skill
 │   ├── github-pro-mcp/            # MCP bridge for GitHub Pro
@@ -704,6 +810,11 @@ User receives scan summary with findings
 │   │   ├── supervisor-v1-spec.md  # Supervisor v1 routing/pooling spec
 │   │   ├── observability-spec.md  # Observability telemetry spec
 │   │   ├── phase-9-security-baseline.md  # Security baseline and acceptance checklist
+│   │   ├── http-api-spec.md       # HTTP API ingress spec (Phase 10)
+│   │   ├── phase-11-production-hardening.md  # TLS, signing, audit, Prometheus
+│   │   ├── tool-adapter-framework.md  # Tool adapter framework spec
+│   │   ├── batch-1-tools.md       # Batch 1 tool adapters (curl, nslookup, whois)
+│   │   ├── batch-2-tools.md       # Batch 2 tool adapters (hashcat, sqlmap, nikto)
 │   │   ├── API.md                 # API contract
 │   │   ├── BURP_INTEGRATION.md    # Burp setup guide
 │   │   ├── LLDB_TRIAGE.md         # LLDB setup guide
@@ -945,6 +1056,6 @@ This architecture is designed for security researchers, bug bounty hunters, and 
 
 ---
 
-**Document Version**: 1.4  
-**Last Updated**: February 24, 2026  
+**Document Version**: 1.5  
+**Last Updated**: February 25, 2026  
 **Maintained By**: Trevor Robey

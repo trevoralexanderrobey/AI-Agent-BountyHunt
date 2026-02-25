@@ -323,3 +323,115 @@ Verification:
 7. Deferred from Phase 9A:
    - idempotency keys
    - queueing/retry orchestration
+
+## Phase 9B Implementation Notes
+
+1. Idempotency is optional and disabled by default:
+   - enabled via `createSupervisorV1({ idempotency: { enabled: true } })`
+   - default TTL: `300000` ms
+   - default max entries: `1000`
+2. `execute(slug, method, params, requestContext)` accepts optional:
+   - `requestContext.idempotencyKey`
+3. Replay eligibility requires all of:
+   - same normalized principal ID
+   - same slug
+   - same method
+   - same idempotency key
+   - same stable JSON params hash
+4. Idempotency lookup occurs after:
+   - request ID derivation
+   - auth validation
+   - rate limit check
+   and before slug-lock acquisition/capacity checks.
+5. Replay path is non-executing:
+   - no lock reservation
+   - no capacity reservation
+   - no spawn attempt
+   - no MCP call
+6. Store records only completed outcomes:
+   - successful runtime results
+   - runtime-style JSON-RPC error envelopes (`{ ok:false, error:{...} }`)
+   - transport failures / `INSTANCE_FAILED` are never cached
+7. Store schema is in-memory only:
+   - key: `${principalId}::${slug}::${method}::${idempotencyKey}`
+   - value: `{ createdAt, paramsHash, result, error }`
+8. Safety constraints:
+   - no tokens/container IDs/network addresses in idempotency store
+   - no changes to lock scope
+   - no queueing/retry semantics added
+
+## Phase 9C Implementation Notes
+
+1. Queueing/retry is optional and disabled by default:
+   - enabled via `createSupervisorV1({ queue: { enabled: true, maxLength } })`
+   - default queue max length: `100`
+   - default queue poll interval: `250ms`
+2. Queue implementation:
+   - in-memory FIFO (`RequestQueue`) with O(1) enqueue/dequeue/peek
+   - bounded length; full queue causes explicit capacity rejection
+3. Retry policy is request-scoped and opt-in via:
+   - `requestContext.retryPolicy = { retries, delayMs, backoffFactor }`
+   - defaults when provided: `{ retries: 3, delayMs: 1000, backoffFactor: 2 }`
+4. Retry eligibility:
+   - only for non-idempotent methods (`run`, `tag_baseline`)
+   - only on transport-level supervisor failure (`INSTANCE_FAILED`)
+   - runtime-style error envelopes are not retried
+5. Retry scheduling:
+   - retries decremented before enqueue
+   - next execution delayed by current `delayMs`
+   - next retry uses exponential delay (`delayMs * backoffFactor`)
+   - no infinite retry loop
+6. Queue processing constraints:
+   - oldest-first dispatch
+   - capacity check before dispatch
+   - no lock scope changes; processing reuses existing `execute()` flow
+   - no spawner/MCP behavior changes
+7. Observability additions (supervisor namespace):
+   - `supervisor.queue.length` gauge
+   - `supervisor.retries.count` counter
+   - `supervisor.retry.failure` counter
+   - `supervisor.capacity.rejection.due.to.queue` counter
+   - `supervisor.queue.execution.delay.histogram` histogram
+8. Security/non-interference:
+   - no token logging
+   - no new Docker surface
+   - no lifecycle/state-machine drift
+
+## Phase 9D Implementation Notes
+
+1. Circuit breaker is optional and disabled by default.
+   - Enable with `createSupervisorV1({ circuitBreaker: { enabled: true } })`
+   - Defaults:
+     - `failureThreshold: 5`
+     - `successThreshold: 2`
+     - `timeout: 30000`
+2. Per-skill circuit state is maintained in memory:
+   - `CLOSED`, `OPEN`, `HALF_OPEN`
+   - fields: `failureCount`, `successCount`, `lastFailureAt`, `lastTransitionAt`
+3. Pre-lock request gating:
+   - breaker check occurs before slug lock acquisition
+   - `OPEN` rejects immediately with `CIRCUIT_BREAKER_OPEN`
+   - `HALF_OPEN` permits one in-flight request via lease; concurrent probe attempts are rejected
+4. State transitions:
+   - `CLOSED -> OPEN` on threshold consecutive transport failures
+   - `OPEN -> HALF_OPEN` when timeout elapses
+   - `HALF_OPEN -> CLOSED` on consecutive probe successes
+   - `HALF_OPEN -> OPEN` on first transport failure
+5. Health scoring:
+   - `100` for `CLOSED`
+   - `50` for `HALF_OPEN`
+   - `0` for `OPEN`
+6. Metrics:
+   - `supervisor.circuit_breaker.state` gauge (`OPEN=0`, `HALF_OPEN=1`, `CLOSED=2`)
+   - `supervisor.circuit_breaker.trips` counter
+   - `supervisor.circuit_breaker.recoveries` counter
+   - `supervisor.skill.health` gauge
+   - state/health gauges and transition counters update on state transitions
+7. Queue interaction:
+   - queue dispatch reuses normal `execute()` path, so breaker gates queued work identically
+   - when breaker is `OPEN`, retries are not re-enqueued from `INSTANCE_FAILED` path
+8. Non-interference constraints preserved:
+   - no runtime/mcp/spawner contract changes
+   - no lock scope expansion
+   - no lifecycle state-machine changes
+   - no secret/token disclosure
