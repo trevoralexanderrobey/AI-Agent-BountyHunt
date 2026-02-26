@@ -18,6 +18,24 @@ This phase does not change:
 5. idempotency contract
 6. federation HTTP contract
 
+## Remaining Architectural Boundary (Phase 15)
+
+Phase 15 intentionally does **not** provide partition containment. During a network partition:
+
+1. each partition computes leader from its local membership view
+2. each partition computes shard ownership from its local membership view
+3. both partitions may continue serving requests
+
+Deterministic routing is preserved *within* each partition, but containment across divergent membership views is not guaranteed in this phase.
+
+This is expected and deliberate because consensus/quorum protocols are out of scope.
+
+Next control-plane step after Phase 15:
+
+1. partition safety guard
+2. convergence delay window
+3. majority-loss containment policy
+
 ## Files
 
 1. `/Users/trevorrobey/AI-Agent-BountyHunt/openclaw-bridge/cluster/leader-election.js`
