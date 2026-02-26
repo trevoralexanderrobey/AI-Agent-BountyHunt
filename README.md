@@ -20,6 +20,9 @@ Key capabilities:
 - **Federation** — Multi-node peer registry, remote execution, heartbeat monitoring, deterministic overflow routing
 - **Persistent State** — File-backed control plane persistence (idempotency, queue, circuit breaker, peer metadata)
 - **Cluster Coordination** — Leader election, shard ownership, rendezvous hashing, multi-supervisor routing
+- **Partition Containment** — Majority-loss detection, convergence stabilization, shard/leader freeze
+- **Deployment Topology** — Rolling upgrade safety, version compatibility guard, bootstrap validation
+- **Cluster Simulation** — Deterministic fault injection harness for multi-node scenario testing
 - **MCP Bridge** — Director → Executor pattern connecting GitHub Pro / Antigravity / Codex to OpenClaw
 
 ### OpenClaw Bridge Runtime
@@ -116,6 +119,9 @@ cd "AG for OC"
 - [Federation Spec](./openclaw-bridge/docs/federation-spec.md) — Multi-node peer registry and deterministic routing
 - [Persistent State Spec](./openclaw-bridge/docs/persistent-state-spec.md) — File-backed control plane persistence
 - [Cluster Spec](./openclaw-bridge/docs/cluster-spec.md) — Leader election and shard-based multi-supervisor routing
+- [Cluster Convergence Spec](./openclaw-bridge/docs/cluster-convergence-spec.md) — Partition containment and convergence
+- [Deployment Topology Spec](./openclaw-bridge/docs/deployment-topology-spec.md) — Rolling upgrades and version safety
+- [Cluster Simulation Spec](./openclaw-bridge/docs/cluster-simulation-spec.md) — Multi-node fault injection harness
 - [Bridge Setup & Operations](./openclaw-bridge/SETUP.md)
 - [Bridge API Contract](./openclaw-bridge/docs/API.md)
 - [Burp Integration](./openclaw-bridge/docs/BURP_INTEGRATION.md)

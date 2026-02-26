@@ -357,3 +357,40 @@ Key behaviors:
 - Config mismatches (shardCount, timeouts) mark peers `DOWN`
 
 Spec: `/Users/trevorrobey/AI-Agent-BountyHunt/openclaw-bridge/docs/cluster-spec.md`
+
+## Partition containment (Phase 16)
+
+Automatic partition detection and shard/leader freeze:
+- Strict majority rule: `observedSize > previousStableSize / 2`
+- While partitioned: no snapshot promotion, no rebalance, no remote forwarding
+- Recovery requires restored membership stable for 2 consecutive ticks
+- Convergence window (10s) prevents flap-driven rebalance
+
+Spec: `/Users/trevorrobey/AI-Agent-BountyHunt/openclaw-bridge/docs/cluster-convergence-spec.md`
+
+## Deployment topology (Phase 17)
+
+Rolling upgrade and version compatibility safety:
+
+```bash
+# Bootstrap publishes node metadata automatically
+# Version guard enforces: same MAJOR, MINOR skew <= 1
+# Critical config (shardCount, timeouts) is restart-only
+```
+
+Spec: `/Users/trevorrobey/AI-Agent-BountyHunt/openclaw-bridge/docs/deployment-topology-spec.md`
+
+## Cluster simulation (Phase 18)
+
+Deterministic fault injection harness for multi-node testing:
+
+```bash
+cd "/Users/trevorrobey/AI-Agent-BountyHunt/openclaw-bridge"
+
+# Validate simulator API
+node -e "const { createClusterSimulator } = require('./simulation/cluster-simulator.js'); console.log(Object.keys(createClusterSimulator()));"
+```
+
+Covers: partitions, equal splits, rolling upgrades, rapid flapping, restart scenarios, mixed load.
+
+Spec: `/Users/trevorrobey/AI-Agent-BountyHunt/openclaw-bridge/docs/cluster-simulation-spec.md`

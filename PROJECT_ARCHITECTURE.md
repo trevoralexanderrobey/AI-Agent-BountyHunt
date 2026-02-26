@@ -615,7 +615,75 @@ Bridge / Director Agent
 
 ---
 
-### 18. Burp Suite Integration (BionicLink)
+### 18. Partition Containment & Convergence (Phase 16)
+
+**Partition Detector**: `/Users/trevorrobey/AI-Agent-BountyHunt/openclaw-bridge/cluster/partition-detector.js`  
+**Spec**: `/Users/trevorrobey/AI-Agent-BountyHunt/openclaw-bridge/docs/cluster-convergence-spec.md`  
+**Purpose**: Detect network partitions and freeze shard/leader state to prevent split-brain
+
+#### Partition Rules
+- Strict majority: `observedSize > previousStableSize / 2`
+- Equal-split containment (e.g., 6→3: both sides freeze)
+- Baseline derived from last promoted stable snapshot only
+
+#### While Partitioned
+- No stable snapshot promotion or shard rebalance
+- Remote forwarding disabled (backpressure)
+- Leader transitions suppressed, pinned to stable state
+
+#### Recovery
+- Observed size ≥ `ceil(baseline / 2)` for 2 consecutive ticks
+- Convergence window (10s default) prevents flap-driven rebalance
+
+#### Metrics
+- `cluster.partition_detected`, `cluster.partition_recovered`, `cluster.partition_state`
+
+---
+
+### 19. Deployment Topology & Rolling Upgrades (Phase 17)
+
+**Bootstrap Manager**: `/Users/trevorrobey/AI-Agent-BountyHunt/openclaw-bridge/deployment/bootstrap-manager.js`  
+**Version Guard**: `/Users/trevorrobey/AI-Agent-BountyHunt/openclaw-bridge/deployment/version-guard.js`  
+**Spec**: `/Users/trevorrobey/AI-Agent-BountyHunt/openclaw-bridge/docs/deployment-topology-spec.md`
+
+#### Bootstrap Validation
+- Enforces: federation enabled, explicit nodeId, required cluster params, TLS when HTTP enabled
+- Publishes node metadata: `nodeId`, `softwareVersion`, `configHash`, `shardCount`
+
+#### Version Compatibility
+- Same MAJOR required, MINOR skew ≤ 1
+- Incompatible peers marked `DOWN`, `cluster.version_mismatch` incremented
+- Version-skew freeze: no promotion/rebalance/leader transition while `compatiblePopulation ≤ observedPopulation / 2`
+
+#### Config Safety
+- Critical params (`shardCount`, `leaderTimeoutMs`, `heartbeatIntervalMs`) are restart-only
+
+---
+
+### 20. Cluster Simulation & Fault Injection (Phase 18)
+
+**Simulator**: `/Users/trevorrobey/AI-Agent-BountyHunt/openclaw-bridge/simulation/cluster-simulator.js`  
+**Fault Injector**: `/Users/trevorrobey/AI-Agent-BountyHunt/openclaw-bridge/simulation/fault-injector.js`  
+**Spec**: `/Users/trevorrobey/AI-Agent-BountyHunt/openclaw-bridge/docs/cluster-simulation-spec.md`  
+**Purpose**: Deterministic in-process harness for multi-node cluster scenario testing
+
+#### Capabilities
+- Deterministic clock (no wall-clock leakage)
+- Real production Supervisor + ClusterManager APIs (no mocked control plane)
+- Fault injection: node down, latency, timeout, partition (symmetric & asymmetric), config/version skew
+
+#### Scenario Coverage
+- 5-node partition, 6-node equal split, rolling upgrades, rapid flapping
+- Queue pressure + federation routing, mixed tool/skill load
+- Restart during partition, freeze probe, and rolling upgrade
+
+#### Validation Report
+- `no_split_brain_under_partition`, `no_duplicate_execution_detected`, `freeze_behavior_correct`
+- `rolling_upgrade_invariants_hold`, `snapshot_consistency_preserved`, `no_deadlock_detected`
+
+---
+
+### 21. Burp Suite Integration (BionicLink)
 
 **Extension**: BionicLink (custom Burp extension)  
 **Port**: 8090 (HTTP)  
@@ -869,9 +937,16 @@ User receives scan summary with findings
 │   ├── state/                     # Persistent control plane state (Phase 14)
 │   │   ├── persistent-store.js    # Atomic file-backed JSON persistence
 │   │   └── state-manager.js       # State recovery orchestration
-│   ├── cluster/                   # Multi-supervisor coordination (Phase 15)
+│   ├── cluster/                   # Multi-supervisor coordination (Phase 15–16)
 │   │   ├── leader-election.js     # Deterministic leader election
-│   │   └── cluster-manager.js     # Shard ownership, reconciliation, heartbeat
+│   │   ├── cluster-manager.js     # Shard ownership, reconciliation, heartbeat
+│   │   └── partition-detector.js   # Network partition detection and containment
+│   ├── deployment/                # Deployment topology (Phase 17)
+│   │   ├── bootstrap-manager.js   # Node startup validation and metadata
+│   │   └── version-guard.js       # Version compatibility guard
+│   ├── simulation/                # Cluster simulation (Phase 18)
+│   │   ├── cluster-simulator.js   # Deterministic multi-node simulator
+│   │   └── fault-injector.js      # Fault injection interface
 │   ├── containers/                # Dockerfiles for containerized skills
 │   │   └── nmap/Dockerfile        # Containerized nmap skill
 │   ├── github-pro-mcp/            # MCP bridge for GitHub Pro
@@ -922,6 +997,9 @@ User receives scan summary with findings
 │   │   ├── federation-spec.md     # Federation transport and routing spec
 │   │   ├── persistent-state-spec.md  # Persistent control plane state spec
 │   │   ├── cluster-spec.md        # Cluster coordination and leader election spec
+│   │   ├── cluster-convergence-spec.md  # Partition containment and convergence
+│   │   ├── deployment-topology-spec.md  # Rolling upgrades and version safety
+│   │   ├── cluster-simulation-spec.md   # Multi-node simulation harness
 │   │   ├── API.md                 # API contract
 │   │   ├── BURP_INTEGRATION.md    # Burp setup guide
 │   │   ├── LLDB_TRIAGE.md         # LLDB setup guide
@@ -1163,6 +1241,6 @@ This architecture is designed for security researchers, bug bounty hunters, and 
 
 ---
 
-**Document Version**: 1.8  
+**Document Version**: 1.9  
 **Last Updated**: February 25, 2026  
 **Maintained By**: Trevor Robey

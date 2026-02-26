@@ -12,6 +12,7 @@ const { createPeerRegistry, STATUS_DOWN, STATUS_UP } = require("../federation/pe
 const { createRemoteExecutionClient } = require("../federation/remote-client.js");
 const { createPeerHeartbeat } = require("../federation/heartbeat.js");
 const { createClusterManager } = require("../cluster/cluster-manager.js");
+const { createBootstrapManager } = require("../deployment/bootstrap-manager.js");
 const { createCircuitBreaker } = require("./circuit-breaker.js");
 const { RequestQueue } = require("./request-queue.js");
 const { registerBatch1Tools } = require("../tools/adapters/index.js");
@@ -145,13 +146,29 @@ function createSupervisorV1(options = {}) {
   const clusterShardCount = parsePositiveInt(clusterOptions.shardCount, 16);
   const clusterHeartbeatIntervalMs = parsePositiveInt(clusterOptions.heartbeatIntervalMs, 5000);
   const clusterLeaderTimeoutMs = parsePositiveInt(clusterOptions.leaderTimeoutMs, 15000);
-
-  if (clusterEnabled && !federationEnabled) {
-    throw new Error("cluster.enabled requires federation.enabled=true");
-  }
-  if (clusterEnabled && !clusterNodeIdCandidate) {
-    throw new Error("cluster.nodeId is required when cluster.enabled=true");
-  }
+  const deploymentOptions = options.deployment && typeof options.deployment === "object" ? options.deployment : {};
+  const bootstrapManager = createBootstrapManager({
+    clusterEnabled,
+    federationEnabled,
+    nodeId: clusterNodeIdCandidate,
+    clusterConfig: {
+      shardCount: clusterShardCount,
+      leaderTimeoutMs: clusterLeaderTimeoutMs,
+      heartbeatIntervalMs: clusterHeartbeatIntervalMs,
+    },
+    softwareVersion: deploymentOptions.softwareVersion,
+    configHash: deploymentOptions.configHash,
+    httpEnabled: deploymentOptions.httpEnabled,
+    tls: deploymentOptions.tls,
+    tokenRotation: deploymentOptions.tokenRotation,
+  });
+  bootstrapManager.validateStartup();
+  bootstrapManager.assertCriticalConfigUnchanged({
+    shardCount: clusterShardCount,
+    leaderTimeoutMs: clusterLeaderTimeoutMs,
+    heartbeatIntervalMs: clusterHeartbeatIntervalMs,
+  });
+  const nodePublication = bootstrapManager.getNodePublication();
 
   const requestTimeoutMs = parsePositiveInt(options.requestTimeoutMs, DEFAULT_REQUEST_TIMEOUT_MS);
   const idempotencyEnabled = Boolean(options.idempotency && options.idempotency.enabled);
@@ -254,7 +271,9 @@ function createSupervisorV1(options = {}) {
 
   const clusterManager = clusterEnabled
     ? createClusterManager({
-        nodeId: clusterNodeIdCandidate,
+        nodeId: nodePublication.nodeId,
+        softwareVersion: nodePublication.softwareVersion,
+        configHash: nodePublication.configHash,
         shardCount: clusterShardCount,
         heartbeatIntervalMs: clusterHeartbeatIntervalMs,
         leaderTimeoutMs: clusterLeaderTimeoutMs,
@@ -815,6 +834,21 @@ function createSupervisorV1(options = {}) {
 
   function publishQueueGauge() {
     metrics.gauge("supervisor.queue.length", requestQueue.length);
+  }
+
+  function publishNodeMetadataGauge() {
+    if (!clusterEnabled) {
+      return;
+    }
+
+    metrics.gauge("cluster.node_metadata", 1, {
+      node_id: nodePublication.nodeId,
+      software_version: nodePublication.softwareVersion,
+      config_hash: nodePublication.configHash,
+      shard_count: nodePublication.shardCount,
+      leader_timeout_ms: nodePublication.leaderTimeoutMs,
+      heartbeat_interval_ms: nodePublication.heartbeatIntervalMs,
+    });
   }
 
   function circuitStateMetricValue(state) {
@@ -1796,6 +1830,7 @@ function createSupervisorV1(options = {}) {
 
   async function initialize() {
     await ensureInitialized();
+    publishNodeMetadataGauge();
     if (stateManager && !statePersistenceInitialized) {
       const loadResult = await stateManager.initialize();
       statePersistenceInitialized = true;
