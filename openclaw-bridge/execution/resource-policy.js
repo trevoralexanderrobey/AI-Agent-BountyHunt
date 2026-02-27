@@ -27,6 +27,60 @@ const DEFAULT_RESOURCE_LIMITS = deepFreeze({
 });
 
 const TOOL_RESOURCE_POLICIES = deepFreeze({
+  curl: {
+    cpuShares: 256,
+    memoryLimitMb: 256,
+    maxRuntimeSeconds: 30,
+    maxOutputBytes: 5 * 1024 * 1024,
+  },
+  nslookup: {
+    cpuShares: 128,
+    memoryLimitMb: 128,
+    maxRuntimeSeconds: 15,
+    maxOutputBytes: 1024 * 1024,
+  },
+  whois: {
+    cpuShares: 256,
+    memoryLimitMb: 256,
+    maxRuntimeSeconds: 20,
+    maxOutputBytes: 2 * 1024 * 1024,
+  },
+  hashcat: {
+    cpuShares: 1024,
+    memoryLimitMb: 1024,
+    maxRuntimeSeconds: 300,
+    maxOutputBytes: 10 * 1024 * 1024,
+  },
+  sqlmap: {
+    cpuShares: 512,
+    memoryLimitMb: 512,
+    maxRuntimeSeconds: 300,
+    maxOutputBytes: 5 * 1024 * 1024,
+  },
+  nikto: {
+    cpuShares: 512,
+    memoryLimitMb: 512,
+    maxRuntimeSeconds: 300,
+    maxOutputBytes: 5 * 1024 * 1024,
+  },
+  aircrack: {
+    cpuShares: 1024,
+    memoryLimitMb: 1024,
+    maxRuntimeSeconds: 600,
+    maxOutputBytes: 5 * 1024 * 1024,
+  },
+  msfvenom: {
+    cpuShares: 512,
+    memoryLimitMb: 1024,
+    maxRuntimeSeconds: 120,
+    maxOutputBytes: 10 * 1024 * 1024,
+  },
+  ffuf: {
+    cpuShares: 512,
+    memoryLimitMb: 512,
+    maxRuntimeSeconds: 300,
+    maxOutputBytes: 5 * 1024 * 1024,
+  },
   nmap: {
     cpuShares: 512,
     memoryLimitMb: 512,

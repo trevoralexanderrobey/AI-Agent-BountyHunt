@@ -1,4 +1,6 @@
 const { resolveResourceLimits, validateResourceLimitsObject } = require("../execution/resource-policy.js");
+const { DEFAULT_SANDBOX_POLICY } = require("../execution/sandbox-policy.js");
+const { resolveToolImageReference } = require("../execution/tool-image-catalog.js");
 
 class BaseToolAdapter {
   constructor(config = {}) {
@@ -7,8 +9,16 @@ class BaseToolAdapter {
     this.description = typeof config.description === "string" ? config.description : "";
     this.executionMode = config && config.executionMode === "container" ? "container" : "host";
     this.containerRuntime = config && config.containerRuntime ? config.containerRuntime : null;
+    this.containerRuntimeEnabled = Boolean(config && config.containerRuntimeEnabled === true);
     this.resourcePolicies =
       config && config.resourcePolicies && typeof config.resourcePolicies === "object" ? config.resourcePolicies : null;
+    this.sandboxPolicies =
+      config && config.sandboxPolicies && typeof config.sandboxPolicies === "object" ? config.sandboxPolicies : null;
+    this.imagePolicies =
+      config && config.imagePolicies && typeof config.imagePolicies === "object" ? config.imagePolicies : null;
+    this.containerImages =
+      config && config.containerImages && typeof config.containerImages === "object" ? config.containerImages : null;
+    this.production = Boolean(config && config.production === true);
   }
 
   getResourceLimits() {
@@ -20,7 +30,7 @@ class BaseToolAdapter {
   }
 
   /**
-   * @param {{ params: Object, timeout: number, requestId: string, resourceLimits?: { cpuShares: number, memoryLimitMb: number, maxRuntimeSeconds: number, maxOutputBytes: number } }} input
+   * @param {{ params: Object, timeout: number, requestId: string, resourceLimits?: { cpuShares: number, memoryLimitMb: number, maxRuntimeSeconds: number, maxOutputBytes: number }, executionEligibility?: { allowed: boolean, reasonCode?: string, details?: Object } }} input
    * @returns {Promise<{ ok: boolean, result?: Object, error?: { code: string, message: string }, metadata: { executionTimeMs: number, outputBytes: number, requestId: string } }>}
    */
   async execute(input) {
@@ -78,8 +88,17 @@ class BaseToolAdapter {
     throw this.makeError("NOT_IMPLEMENTED", "executeImpl() must be implemented by subclass");
   }
 
-  async executeContainerImpl(_input) {
-    throw this.makeError("NOT_IMPLEMENTED", "executeContainerImpl() must be implemented by subclass");
+  async executeContainerImpl(input) {
+    return this.buildContainerInvocation({
+      params: input.params,
+      timeout: input.timeout,
+      requestId: input.requestId,
+      inputArtifacts: await this.buildContainerInputArtifacts({
+        params: input.params,
+        timeout: input.timeout,
+        requestId: input.requestId,
+      }),
+    });
   }
 
   async validateInput(_params) {
@@ -167,7 +186,129 @@ class BaseToolAdapter {
     return { code, message };
   }
 
+  resolveExecutionEligibility(input) {
+    if (!input || typeof input !== "object") {
+      return {
+        allowed: true,
+        reasonCode: "",
+        details: {},
+      };
+    }
+
+    const eligibility = input.executionEligibility;
+    if (!eligibility || typeof eligibility !== "object") {
+      return {
+        allowed: true,
+        reasonCode: "",
+        details: {},
+      };
+    }
+
+    return {
+      allowed: eligibility.allowed !== false,
+      reasonCode: typeof eligibility.reasonCode === "string" ? eligibility.reasonCode : "",
+      details: eligibility.details && typeof eligibility.details === "object" ? eligibility.details : {},
+    };
+  }
+
+  ensureExecutionEligibility(input) {
+    const eligibility = this.resolveExecutionEligibility(input);
+    if (eligibility.allowed) {
+      return;
+    }
+
+    const reasonCode = eligibility.reasonCode || "EXECUTION_SUPPRESSED_BY_CLUSTER_STATE";
+    throw this.makeError(
+      "EXECUTION_SUPPRESSED_BY_CLUSTER_STATE",
+      `Container execution is suppressed by cluster state (${reasonCode})`,
+    );
+  }
+
+  resolveContainerImage() {
+    const imageRef = resolveToolImageReference(this.slug, {
+      images: this.containerImages || undefined,
+    });
+
+    if (!imageRef) {
+      throw this.makeError("INVALID_CONTAINER_REQUEST", `Container image is not defined for tool '${this.slug || ""}'`);
+    }
+
+    return imageRef;
+  }
+
+  resolveSandboxConfig() {
+    const sandboxConfig =
+      this.sandboxPolicies && this.slug && this.sandboxPolicies[this.slug] && typeof this.sandboxPolicies[this.slug] === "object"
+        ? this.sandboxPolicies[this.slug]
+        : DEFAULT_SANDBOX_POLICY;
+
+    return {
+      runAsNonRoot: sandboxConfig.runAsNonRoot,
+      dropCapabilities: Array.isArray(sandboxConfig.dropCapabilities) ? sandboxConfig.dropCapabilities.slice() : [],
+      privileged: sandboxConfig.privileged,
+      hostPID: sandboxConfig.hostPID,
+      hostNetwork: sandboxConfig.hostNetwork,
+      hostMounts: sandboxConfig.hostMounts,
+      readOnlyRootFilesystem: sandboxConfig.readOnlyRootFilesystem,
+      writableVolumes: Array.isArray(sandboxConfig.writableVolumes) ? sandboxConfig.writableVolumes.slice() : [],
+      seccompProfile: sandboxConfig.seccompProfile,
+      appArmorProfile: sandboxConfig.appArmorProfile,
+    };
+  }
+
+  resolveSignatureVerified() {
+    if (this.imagePolicies && this.slug && this.imagePolicies[this.slug] && typeof this.imagePolicies[this.slug] === "object") {
+      const perTool = this.imagePolicies[this.slug];
+      if (Object.prototype.hasOwnProperty.call(perTool, "signatureVerified")) {
+        return perTool.signatureVerified === true;
+      }
+    }
+
+    return false;
+  }
+
+  async buildContainerInputArtifacts({ params, timeout, requestId }) {
+    const payload = {
+      slug: this.slug,
+      params,
+      timeout,
+      requestId,
+    };
+
+    return [
+      {
+        kind: "inlineText",
+        contents: JSON.stringify(payload),
+        targetPath: "/scratch/request.json",
+      },
+    ];
+  }
+
+  buildContainerInvocation({ params, timeout, requestId, inputArtifacts }) {
+    return {
+      image: this.resolveContainerImage(),
+      args: [],
+      env: {
+        OPENCLAW_REQUEST_PATH: "/scratch/request.json",
+        OPENCLAW_TOOL_SLUG: this.slug,
+      },
+      inputArtifacts: Array.isArray(inputArtifacts) ? inputArtifacts : [],
+      sandboxConfig: this.resolveSandboxConfig(),
+      signatureVerified: this.resolveSignatureVerified(),
+      requestId,
+    };
+  }
+
   async executeInContainer({ params, timeout, requestId, input }) {
+    if (!this.containerRuntimeEnabled) {
+      throw this.makeError(
+        "CONTAINER_RUNTIME_DISABLED",
+        "Container runtime is disabled; set execution.containerRuntimeEnabled=true to enable container execution",
+      );
+    }
+
+    this.ensureExecutionEligibility(input);
+
     if (!this.containerRuntime || typeof this.containerRuntime.runContainer !== "function") {
       throw this.makeError("CONTAINER_RUNTIME_REQUIRED", "Container runtime required for container execution mode");
     }
@@ -177,10 +318,7 @@ class BaseToolAdapter {
       const message = requestedLimitsResult.errors.length
         ? requestedLimitsResult.errors.join("; ")
         : "Explicit resourceLimits are required for container execution mode";
-      throw this.makeError(
-        "RESOURCE_LIMITS_REQUIRED",
-        message,
-      );
+      throw this.makeError("RESOURCE_LIMITS_REQUIRED", message);
     }
     const requestedLimits = requestedLimitsResult.limits;
 
@@ -218,6 +356,7 @@ class BaseToolAdapter {
         ...request,
         resourceLimits: requestedLimits,
         toolSlug: this.slug,
+        requestId,
       }),
       timeout,
     );

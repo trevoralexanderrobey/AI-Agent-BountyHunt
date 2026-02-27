@@ -1,6 +1,8 @@
 function createNoopMetrics() {
   return {
     increment: () => {},
+    observe: () => {},
+    gauge: () => {},
   };
 }
 
@@ -12,6 +14,20 @@ function createSafeMetrics(rawMetrics) {
       try {
         if (typeof source.increment === "function") {
           source.increment(...args);
+        }
+      } catch {}
+    },
+    observe: (...args) => {
+      try {
+        if (typeof source.observe === "function") {
+          source.observe(...args);
+        }
+      } catch {}
+    },
+    gauge: (...args) => {
+      try {
+        if (typeof source.gauge === "function") {
+          source.gauge(...args);
         }
       } catch {}
     },
@@ -30,7 +46,7 @@ function sanitizeImage(image) {
 }
 
 function sanitizeValue(key, value) {
-  const sensitive = /(token|secret|password|authorization|authheader|signature|privatekey|env|args|headers?)/i;
+  const sensitive = /(token|secret|password|authorization|authheader|signature|privatekey|env|args|headers?|apikey|key)/i;
   if (sensitive.test(String(key || ""))) {
     return "[redacted]";
   }
@@ -83,13 +99,41 @@ function createContainerAudit(options = {}) {
     write("container.start", payload || {});
     metrics.increment("tool.container.start", {
       image: sanitizeImage(payload && payload.image),
+      tool: payload && payload.toolSlug ? String(payload.toolSlug) : "",
     });
   }
 
   function recordStop(payload) {
-    write("container.stop", payload || {});
+    const safe = payload && typeof payload === "object" ? payload : {};
+    write("container.stop", safe);
     metrics.increment("tool.container.stop", {
-      image: sanitizeImage(payload && payload.image),
+      image: sanitizeImage(safe.image),
+      tool: safe && safe.toolSlug ? String(safe.toolSlug) : "",
+    });
+
+    const durationMs =
+      Number.isFinite(Number(safe.stopTime)) && Number.isFinite(Number(safe.startTime))
+        ? Math.max(0, Number(safe.stopTime) - Number(safe.startTime))
+        : 0;
+    const memoryUsage = Number.isFinite(Number(safe.resourceUsage && safe.resourceUsage.memoryUsageBytes))
+      ? Number(safe.resourceUsage.memoryUsageBytes)
+      : 0;
+    const cpuUsage = Number.isFinite(Number(safe.resourceUsage && safe.resourceUsage.cpuUsageNano))
+      ? Number(safe.resourceUsage.cpuUsageNano)
+      : 0;
+    const exitCode = Number.isFinite(Number(safe.exitCode)) ? Number(safe.exitCode) : 0;
+
+    metrics.observe("tool.container.duration", durationMs, {
+      tool: safe && safe.toolSlug ? String(safe.toolSlug) : "",
+    });
+    metrics.observe("tool.container.memory_usage", Math.max(0, memoryUsage), {
+      tool: safe && safe.toolSlug ? String(safe.toolSlug) : "",
+    });
+    metrics.observe("tool.container.cpu_usage", Math.max(0, cpuUsage), {
+      tool: safe && safe.toolSlug ? String(safe.toolSlug) : "",
+    });
+    metrics.gauge("tool.container.exit_code", exitCode, {
+      tool: safe && safe.toolSlug ? String(safe.toolSlug) : "",
     });
   }
 
@@ -97,6 +141,7 @@ function createContainerAudit(options = {}) {
     write("container.crash", payload || {});
     metrics.increment("tool.container.crash", {
       image: sanitizeImage(payload && payload.image),
+      tool: payload && payload.toolSlug ? String(payload.toolSlug) : "",
     });
   }
 
@@ -104,6 +149,7 @@ function createContainerAudit(options = {}) {
     write("container.timeout", payload || {});
     metrics.increment("tool.container.timeout", {
       image: sanitizeImage(payload && payload.image),
+      tool: payload && payload.toolSlug ? String(payload.toolSlug) : "",
     });
   }
 

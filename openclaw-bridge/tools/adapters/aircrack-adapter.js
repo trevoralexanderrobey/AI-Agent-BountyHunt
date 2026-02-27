@@ -244,6 +244,43 @@ class AircrackAdapter extends BaseToolAdapter {
     });
   }
 
+  async executeContainerImpl(input) {
+    const params = input && input.params && typeof input.params === 'object' ? { ...input.params } : {};
+    const rawCapturePath = typeof params.capturePath === 'string' ? params.capturePath.trim() : '';
+    if (!rawCapturePath) {
+      throw this.makeError('INVALID_TOOL_INPUT', 'capturePath is required for aircrack container execution');
+    }
+
+    const captureBasename = path.basename(rawCapturePath);
+    const containerCapturePath = `/scratch/captures/${captureBasename}`;
+    params.capturePath = containerCapturePath;
+
+    const requestPayload = {
+      slug: this.slug,
+      params,
+      timeout: input.timeout,
+      requestId: input.requestId,
+    };
+
+    return this.buildContainerInvocation({
+      params,
+      timeout: input.timeout,
+      requestId: input.requestId,
+      inputArtifacts: [
+        {
+          kind: 'hostPath',
+          sourcePath: rawCapturePath,
+          targetPath: containerCapturePath,
+        },
+        {
+          kind: 'inlineText',
+          contents: JSON.stringify(requestPayload),
+          targetPath: '/scratch/request.json',
+        },
+      ],
+    });
+  }
+
   async normalizeOutput(rawOutput) {
     const payload = this.parseJson(rawOutput);
     const cracked = Boolean(payload.cracked);

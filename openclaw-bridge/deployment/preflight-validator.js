@@ -8,6 +8,7 @@ const { resolveResourceLimits } = require("../execution/resource-policy.js");
 const { validateEgressPolicy } = require("../execution/egress-policy.js");
 const { validateImageReference } = require("../execution/image-policy.js");
 const { SUPPORTED_BACKENDS } = require("../execution/container-runtime.js");
+const { resolveToolImageReference: resolveCatalogImageReference } = require("../execution/tool-image-catalog.js");
 const { createToolRegistry } = require("../tools/tool-registry.js");
 const { registerBatch1Tools } = require("../tools/adapters/index.js");
 const { registerBatch2Tools } = require("../tools/adapters/batch-2-index.js");
@@ -349,6 +350,36 @@ function resolveExecutionBackend(options, manifest) {
   return { value: "mock", source: "default" };
 }
 
+function resolveExecutionContainerRuntimeEnabled(options, manifest) {
+  const optionExecution = options && options.execution && typeof options.execution === "object" ? options.execution : {};
+  if (Object.prototype.hasOwnProperty.call(optionExecution, "containerRuntimeEnabled")) {
+    return {
+      value: optionExecution.containerRuntimeEnabled === true,
+      source: "options.execution.containerRuntimeEnabled",
+    };
+  }
+
+  if (typeof process.env.CONTAINER_RUNTIME_ENABLED !== "undefined") {
+    return {
+      value: parseBoolean(process.env.CONTAINER_RUNTIME_ENABLED, false),
+      source: "CONTAINER_RUNTIME_ENABLED",
+    };
+  }
+
+  const manifestExecution = manifest && manifest.execution && typeof manifest.execution === "object" ? manifest.execution : {};
+  if (Object.prototype.hasOwnProperty.call(manifestExecution, "containerRuntimeEnabled")) {
+    return {
+      value: manifestExecution.containerRuntimeEnabled === true,
+      source: "manifest.execution.containerRuntimeEnabled",
+    };
+  }
+
+  return {
+    value: false,
+    source: "default",
+  };
+}
+
 function extractConfiguredToolAdapterSlugs(toolAdapters) {
   const slugs = new Set();
   if (Array.isArray(toolAdapters)) {
@@ -522,14 +553,10 @@ function resolveExecutionConfig(options, manifest) {
   return merged;
 }
 
-function resolveToolImageReference(executionConfig, slug, toolConfig) {
+function resolveExecutionToolImageReference(executionConfig, slug, toolConfig) {
   const direct = normalizeString(toolConfig && toolConfig.image);
   if (direct) {
     return direct;
-  }
-  const mapped = normalizeString(executionConfig && executionConfig.images && executionConfig.images[slug]);
-  if (mapped) {
-    return mapped;
   }
   const policyImage = normalizeString(
     executionConfig &&
@@ -540,6 +567,13 @@ function resolveToolImageReference(executionConfig, slug, toolConfig) {
   if (policyImage) {
     return policyImage;
   }
+  const fallback = resolveCatalogImageReference(slug, {
+    images: executionConfig && executionConfig.images,
+  });
+  if (fallback) {
+    return fallback;
+  }
+
   return normalizeString(executionConfig && executionConfig.image);
 }
 
@@ -561,8 +595,36 @@ function resolveSignatureFlag(executionConfig, slug, toolConfig) {
   return undefined;
 }
 
+function resolveRequireSignatureVerification(executionConfig, slug, toolConfig, isProduction) {
+  if (toolConfig && Object.prototype.hasOwnProperty.call(toolConfig, "requireSignatureVerification")) {
+    return toolConfig.requireSignatureVerification === true;
+  }
+  if (
+    executionConfig &&
+    executionConfig.imagePolicies &&
+    executionConfig.imagePolicies[slug] &&
+    Object.prototype.hasOwnProperty.call(executionConfig.imagePolicies[slug], "requireSignatureVerification")
+  ) {
+    return executionConfig.imagePolicies[slug].requireSignatureVerification === true;
+  }
+  if (executionConfig && Object.prototype.hasOwnProperty.call(executionConfig, "requireSignatureVerification")) {
+    return executionConfig.requireSignatureVerification === true;
+  }
+  return isProduction;
+}
+
 function validateExecutionGuardrails(
-  { executionMode, executionModeSource, executionBackend, executionBackendSource, executionConfig, knownToolSlugs, isProduction },
+  {
+    executionMode,
+    executionModeSource,
+    executionBackend,
+    executionBackendSource,
+    executionConfig,
+    containerRuntimeEnabled,
+    containerRuntimeEnabledSource,
+    knownToolSlugs,
+    isProduction,
+  },
   errors,
   warnings,
 ) {
@@ -624,6 +686,15 @@ function validateExecutionGuardrails(
       executionToolCount: 0,
       validatedTools: [],
     };
+  }
+
+  if (isProduction && containerRuntimeEnabled !== true) {
+    addIssue(
+      errors,
+      "CONTAINER_RUNTIME_DISABLED",
+      "Container mode requires execution.containerRuntimeEnabled=true in production",
+      { containerRuntimeEnabledSource },
+    );
   }
 
   const tools = executionConfig && executionConfig.tools && typeof executionConfig.tools === "object" ? executionConfig.tools : {};
@@ -708,8 +779,9 @@ function validateExecutionGuardrails(
       });
     }
 
-    const imageRef = resolveToolImageReference(executionConfig, slug, toolConfig);
+    const imageRef = resolveExecutionToolImageReference(executionConfig, slug, toolConfig);
     const imagePolicy = executionConfig.imagePolicies && executionConfig.imagePolicies[slug];
+    const requireSignatureVerification = resolveRequireSignatureVerification(executionConfig, slug, toolConfig, isProduction);
     const imageValidation = validateImageReference(imageRef, {
       production: isProduction,
       allowedRegistries:
@@ -719,7 +791,7 @@ function validateExecutionGuardrails(
           executionConfig.imagePolicy.allowedRegistries) ||
         executionConfig.allowedImageRegistries,
       requireDigestPinning: true,
-      requireSignatureVerification: true,
+      requireSignatureVerification,
       signatureVerified: resolveSignatureFlag(executionConfig, slug, toolConfig),
     });
     if (!imageValidation.valid) {
@@ -1150,6 +1222,7 @@ async function runPreflightValidation(options = {}) {
   const clusterCapabilities = resolveClusterCapabilities(options, manifest);
   const executionModeResult = resolveExecutionMode(options, manifest);
   const executionBackendResult = resolveExecutionBackend(options, manifest);
+  const containerRuntimeEnabledResult = resolveExecutionContainerRuntimeEnabled(options, manifest);
   const executionConfig = resolveExecutionConfig(options, manifest);
   const knownToolSlugs = resolveAuthoritativeToolSlugs(options);
 
@@ -1207,6 +1280,8 @@ async function runPreflightValidation(options = {}) {
       executionBackend: executionBackendResult.value,
       executionBackendSource: executionBackendResult.source,
       executionConfig,
+      containerRuntimeEnabled: containerRuntimeEnabledResult.value,
+      containerRuntimeEnabledSource: containerRuntimeEnabledResult.source,
       knownToolSlugs,
       isProduction: productionMode.isProduction,
     },
@@ -1236,6 +1311,8 @@ async function runPreflightValidation(options = {}) {
       executionModeSource: executionModeResult.source,
       executionBackend: executionBackendResult.value || "unset",
       executionBackendSource: executionBackendResult.source,
+      containerRuntimeEnabled: containerRuntimeEnabledResult.value === true,
+      containerRuntimeEnabledSource: containerRuntimeEnabledResult.source,
       executionToolCount: executionValidation.executionToolCount,
       validatedExecutionTools: executionValidation.validatedTools,
       knownExecutionTools: Array.from(knownToolSlugs).sort((a, b) => a.localeCompare(b)),
@@ -1305,6 +1382,12 @@ function parseCliArgs(argv) {
     if (token === "--execution-backend") {
       parsed.execution = parsed.execution || {};
       parsed.execution.backend = normalizeMode(args[index + 1]);
+      index += 1;
+      continue;
+    }
+    if (token === "--container-runtime-enabled") {
+      parsed.execution = parsed.execution || {};
+      parsed.execution.containerRuntimeEnabled = parseBoolean(args[index + 1], false);
       index += 1;
       continue;
     }

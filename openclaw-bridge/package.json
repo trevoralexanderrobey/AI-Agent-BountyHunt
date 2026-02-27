@@ -4,7 +4,9 @@
   "license": "MIT",
   "private": true,
   "dependencies": {
-    "@modelcontextprotocol/sdk": "^1.12.1"
+    "@modelcontextprotocol/sdk": "^1.12.1",
+    "dockerode": "^4.0.9",
+    "tar-stream": "^3.1.7"
   },
   "devDependencies": {
     "@types/node": "^22.14.1",
@@ -21,7 +23,8 @@
     "bridge:status": "./scripts/bridge-control.sh status",
     "bridge:logs": "./scripts/bridge-control.sh logs",
     "bridge:health": "./scripts/bridge-control.sh health",
-    "bridge:test": "vitest run bridge/tests"
+    "bridge:test": "vitest run bridge/tests",
+    "execution:test": "node --test tests/execution/*.test.js"
   },
   "version": "0.1.0"
 }

@@ -186,6 +186,24 @@ function parseCliArgs(argv) {
       parsed.includeDiagnostics = false;
       continue;
     }
+    if (token === "--execution-mode") {
+      parsed.execution = parsed.execution || {};
+      parsed.execution.executionMode = normalizeString(args[index + 1]).toLowerCase();
+      index += 1;
+      continue;
+    }
+    if (token === "--execution-backend") {
+      parsed.execution = parsed.execution || {};
+      parsed.execution.backend = normalizeString(args[index + 1]).toLowerCase();
+      index += 1;
+      continue;
+    }
+    if (token === "--container-runtime-enabled") {
+      parsed.execution = parsed.execution || {};
+      parsed.execution.containerRuntimeEnabled = parseBoolean(args[index + 1], false);
+      index += 1;
+      continue;
+    }
   }
 
   return parsed;
@@ -216,6 +234,34 @@ if (require.main === module) {
       deployment: {
         ...(fileOptions.deployment || {}),
         ...(cliOptions.deployment || {}),
+      },
+      execution: {
+        ...(fileOptions.execution || {}),
+        ...(cliOptions.execution || {}),
+        tools: {
+          ...((fileOptions.execution && fileOptions.execution.tools) || {}),
+          ...((cliOptions.execution && cliOptions.execution.tools) || {}),
+        },
+        resourcePolicies: {
+          ...((fileOptions.execution && fileOptions.execution.resourcePolicies) || {}),
+          ...((cliOptions.execution && cliOptions.execution.resourcePolicies) || {}),
+        },
+        sandboxPolicies: {
+          ...((fileOptions.execution && fileOptions.execution.sandboxPolicies) || {}),
+          ...((cliOptions.execution && cliOptions.execution.sandboxPolicies) || {}),
+        },
+        egressPolicies: {
+          ...((fileOptions.execution && fileOptions.execution.egressPolicies) || {}),
+          ...((cliOptions.execution && cliOptions.execution.egressPolicies) || {}),
+        },
+        imagePolicies: {
+          ...((fileOptions.execution && fileOptions.execution.imagePolicies) || {}),
+          ...((cliOptions.execution && cliOptions.execution.imagePolicies) || {}),
+        },
+        images: {
+          ...((fileOptions.execution && fileOptions.execution.images) || {}),
+          ...((cliOptions.execution && cliOptions.execution.images) || {}),
+        },
       },
       liveCheck: {
         ...(fileOptions.liveCheck || {}),

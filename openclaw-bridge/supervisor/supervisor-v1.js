@@ -20,6 +20,7 @@ const { registerBatch2Tools } = require("../tools/adapters/batch-2-index.js");
 const { registerBatch3Tools } = require("../tools/adapters/batch-3-index.js");
 const { createToolRegistry } = require("../tools/tool-registry.js");
 const { createToolValidator } = require("../tools/tool-validator.js");
+const { createContainerRuntime } = require("../execution/container-runtime.js");
 
 const SKILL_CONFIG = Object.freeze({
   nmap: Object.freeze({
@@ -49,6 +50,91 @@ const DEFAULT_RETRY_POLICY = Object.freeze({
   backoffFactor: 2,
 });
 const NON_IDEMPOTENT_METHODS = new Set(["run", "tag_baseline"]);
+
+function normalizeString(value) {
+  return typeof value === "string" ? value.trim() : "";
+}
+
+function parseBoolean(value, fallback = false) {
+  if (typeof value === "boolean") {
+    return value;
+  }
+  if (typeof value === "number") {
+    return value !== 0;
+  }
+  if (typeof value === "string") {
+    const normalized = value.trim().toLowerCase();
+    if (normalized === "true" || normalized === "1" || normalized === "yes") {
+      return true;
+    }
+    if (normalized === "false" || normalized === "0" || normalized === "no") {
+      return false;
+    }
+  }
+  return fallback;
+}
+
+function isPlainObject(value) {
+  return Boolean(value && typeof value === "object" && !Array.isArray(value));
+}
+
+function normalizeExecutionMode(value) {
+  const normalized = normalizeString(value).toLowerCase();
+  return normalized === "container" ? "container" : "host";
+}
+
+function normalizeExecutionBackend(value) {
+  return normalizeString(value).toLowerCase();
+}
+
+function resolveExecutionSettings(options = {}) {
+  const execution = options.execution && typeof options.execution === "object" ? options.execution : {};
+
+  const executionMode = normalizeExecutionMode(
+    Object.prototype.hasOwnProperty.call(execution, "executionMode") ? execution.executionMode : process.env.TOOL_EXECUTION_MODE,
+  );
+  const containerRuntimeEnabled = Object.prototype.hasOwnProperty.call(execution, "containerRuntimeEnabled")
+    ? execution.containerRuntimeEnabled === true
+    : parseBoolean(process.env.CONTAINER_RUNTIME_ENABLED, false);
+  const backendValue = Object.prototype.hasOwnProperty.call(execution, "backend")
+    ? execution.backend
+    : process.env.CONTAINER_RUNTIME_BACKEND;
+  const backend = normalizeExecutionBackend(backendValue) || "mock";
+  const production = Object.prototype.hasOwnProperty.call(execution, "production")
+    ? execution.production === true
+    : normalizeString(process.env.NODE_ENV).toLowerCase() === "production";
+
+  const resourcePolicies = isPlainObject(execution.resourcePolicies) ? execution.resourcePolicies : {};
+  const sandboxPolicies = isPlainObject(execution.sandboxPolicies) ? execution.sandboxPolicies : {};
+  const egressPolicies = isPlainObject(execution.egressPolicies) ? execution.egressPolicies : {};
+  const imagePolicies = isPlainObject(execution.imagePolicies) ? execution.imagePolicies : {};
+  const images = isPlainObject(execution.images) ? execution.images : {};
+  const tools = isPlainObject(execution.tools) ? execution.tools : {};
+  const allowedImageRegistries = Array.isArray(execution.allowedImageRegistries) ? execution.allowedImageRegistries : undefined;
+
+  return {
+    executionMode,
+    containerRuntimeEnabled,
+    backend,
+    production,
+    resourcePolicies,
+    sandboxPolicies,
+    egressPolicies,
+    imagePolicies,
+    images,
+    tools,
+    allowedImageRegistries,
+    requireSignatureVerificationInProduction: Object.prototype.hasOwnProperty.call(
+      execution,
+      "requireSignatureVerificationInProduction",
+    )
+      ? execution.requireSignatureVerificationInProduction === true
+      : true,
+    externalNetworkName: normalizeString(execution.externalNetworkName),
+    internalNetworkName: normalizeString(execution.internalNetworkName),
+    nonRootUser: normalizeString(execution.nonRootUser),
+  };
+}
 
 function createNoopMetrics() {
   return {
@@ -214,12 +300,35 @@ function createSupervisorV1(options = {}) {
         ? options.auditLog.rotationPolicy
         : undefined,
   });
+  const executionSettings = resolveExecutionSettings(options);
+  const containerRuntime =
+    executionSettings.executionMode === "container" && executionSettings.containerRuntimeEnabled
+      ? options.containerRuntime && typeof options.containerRuntime.runContainer === "function"
+        ? options.containerRuntime
+        : createContainerRuntime({
+            backend: executionSettings.backend,
+            production: executionSettings.production,
+            containerRuntimeEnabled: executionSettings.containerRuntimeEnabled,
+            metrics,
+            auditLogger,
+            execution: {
+              resourcePolicies: executionSettings.resourcePolicies,
+              egressPolicies: executionSettings.egressPolicies,
+              allowedImageRegistries: executionSettings.allowedImageRegistries,
+              requireSignatureVerificationInProduction: executionSettings.requireSignatureVerificationInProduction,
+              externalNetworkName: executionSettings.externalNetworkName,
+              internalNetworkName: executionSettings.internalNetworkName,
+              nonRootUser: executionSettings.nonRootUser,
+            },
+          })
+      : null;
   const externalToolRegistry = options.toolRegistry && typeof options.toolRegistry.get === "function" ? options.toolRegistry : null;
   const toolRegistry = externalToolRegistry || createToolRegistry({ strict: false });
   registerBatch1Tools(toolRegistry);
   registerBatch2Tools(toolRegistry);
   registerBatch3Tools(toolRegistry);
   registerConfiguredToolAdapters(toolRegistry, options.toolAdapters);
+  configureManagedToolAdapters(toolRegistry);
   if (!externalToolRegistry && typeof toolRegistry.seal === "function") {
     toolRegistry.seal();
   }
@@ -400,6 +509,99 @@ function createSupervisorV1(options = {}) {
         }
       }
     }
+  }
+
+  function configureManagedToolAdapters(registry) {
+    if (!registry || typeof registry.list !== "function" || typeof registry.get !== "function") {
+      return;
+    }
+
+    const listed = registry.list();
+    for (const item of listed) {
+      const slug = normalizeString(item && item.slug).toLowerCase();
+      if (!slug) {
+        continue;
+      }
+
+      const adapter = registry.get(slug);
+      if (!adapter || typeof adapter !== "object") {
+        continue;
+      }
+
+      if (typeof adapter.executeInContainer !== "function") {
+        continue;
+      }
+
+      adapter.executionMode = executionSettings.executionMode;
+      adapter.containerRuntime = containerRuntime;
+      adapter.containerRuntimeEnabled = executionSettings.containerRuntimeEnabled;
+      adapter.resourcePolicies = executionSettings.resourcePolicies;
+      adapter.sandboxPolicies = executionSettings.sandboxPolicies;
+      adapter.imagePolicies = executionSettings.imagePolicies;
+      adapter.containerImages = executionSettings.images;
+      adapter.production = executionSettings.production;
+    }
+  }
+
+  function resolveContainerExecutionEligibility() {
+    if (!clusterEnabled || !clusterManager) {
+      return {
+        allowed: true,
+        reasonCode: "",
+        details: {},
+      };
+    }
+
+    const snapshot = clusterManager.getSnapshot();
+    const partitionSuppressed = Boolean(snapshot && snapshot.partition && snapshot.partition.partitioned === true);
+    const freezeSuppressed = Number(snapshot && snapshot.upgradeCompatibility && snapshot.upgradeCompatibility.freezeActive) === 1;
+    if (!partitionSuppressed && !freezeSuppressed) {
+      return {
+        allowed: true,
+        reasonCode: "",
+        details: {},
+      };
+    }
+
+    return {
+      allowed: false,
+      reasonCode: partitionSuppressed ? "PARTITION_SUPPRESSED" : "FREEZE_SUPPRESSED",
+      details: {
+        partitioned: partitionSuppressed,
+        freezeActive: freezeSuppressed,
+      },
+    };
+  }
+
+  function readToolContainerConfig(slug) {
+    const tools = executionSettings.tools;
+    if (!isPlainObject(tools)) {
+      return {};
+    }
+    const perTool = tools[slug];
+    return isPlainObject(perTool) ? perTool : {};
+  }
+
+  function resolveRequestedContainerLimits(slug, params, requestContext) {
+    const context = requestContext && typeof requestContext === "object" ? requestContext : {};
+    const toolConfig = readToolContainerConfig(slug);
+
+    const contextLimits = isPlainObject(context.resourceLimits) ? context.resourceLimits : null;
+    if (contextLimits) {
+      return { ...contextLimits };
+    }
+
+    const toolConfigLimits = isPlainObject(toolConfig.resourceLimits) ? toolConfig.resourceLimits : null;
+    if (toolConfigLimits) {
+      return { ...toolConfigLimits };
+    }
+
+    const paramsLimits = isPlainObject(params && params.resourceLimits) ? params.resourceLimits : null;
+    if (paramsLimits) {
+      return { ...paramsLimits };
+    }
+
+    return null;
   }
 
   function makeFailure(code, message, details) {
@@ -1946,10 +2148,23 @@ function createSupervisorV1(options = {}) {
 
         metrics.increment("tool.executions.total", { slug });
         const toolStartedAt = Date.now();
-        const toolResult = await validation.adapter.execute({
+        const executionInput = {
           params,
           timeout: requestTimeoutMs,
           requestId,
+        };
+        const adapterExecutionMode =
+          validation.adapter && validation.adapter.executionMode === "container" ? "container" : "host";
+        if (adapterExecutionMode === "container") {
+          const eligibility = resolveContainerExecutionEligibility();
+          const requestedLimits = resolveRequestedContainerLimits(slug, params, context);
+          executionInput.executionEligibility = eligibility;
+          if (requestedLimits) {
+            executionInput.resourceLimits = requestedLimits;
+          }
+        }
+        const toolResult = await validation.adapter.execute({
+          ...executionInput,
         });
         const toolDuration = Math.max(
           0,
@@ -2622,6 +2837,11 @@ function createSupervisorV1(options = {}) {
     isShuttingDown = true;
     suspendStatePersistence = true;
     stopQueueProcessor();
+    if (containerRuntime && typeof containerRuntime.stopOrphanSweeper === "function") {
+      try {
+        containerRuntime.stopOrphanSweeper();
+      } catch {}
+    }
     if (clusterEnabled && clusterManager && typeof clusterManager.stop === "function") {
       clusterManager.stop();
     }

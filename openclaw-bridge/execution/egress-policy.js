@@ -25,6 +25,51 @@ const DEFAULT_EGRESS_POLICY = deepFreeze({
 });
 
 const TOOL_EGRESS_POLICIES = deepFreeze({
+  curl: {
+    allowedExternalNetwork: true,
+    allowedCIDR: [],
+    rateLimitPerSecond: 20,
+  },
+  nslookup: {
+    allowedExternalNetwork: true,
+    allowedCIDR: [],
+    rateLimitPerSecond: 20,
+  },
+  whois: {
+    allowedExternalNetwork: true,
+    allowedCIDR: [],
+    rateLimitPerSecond: 10,
+  },
+  hashcat: {
+    allowedExternalNetwork: false,
+    allowedCIDR: [],
+    rateLimitPerSecond: 1,
+  },
+  sqlmap: {
+    allowedExternalNetwork: true,
+    allowedCIDR: [],
+    rateLimitPerSecond: 5,
+  },
+  nikto: {
+    allowedExternalNetwork: true,
+    allowedCIDR: [],
+    rateLimitPerSecond: 5,
+  },
+  aircrack: {
+    allowedExternalNetwork: false,
+    allowedCIDR: [],
+    rateLimitPerSecond: 1,
+  },
+  msfvenom: {
+    allowedExternalNetwork: false,
+    allowedCIDR: [],
+    rateLimitPerSecond: 1,
+  },
+  ffuf: {
+    allowedExternalNetwork: true,
+    allowedCIDR: [],
+    rateLimitPerSecond: 10,
+  },
   nmap: {
     allowedExternalNetwork: true,
     allowedCIDR: [],

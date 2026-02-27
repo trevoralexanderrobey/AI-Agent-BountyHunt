@@ -719,7 +719,22 @@ Bridge / Director Agent
 
 ---
 
-### 23. Burp Suite Integration (BionicLink)
+### 23. Execution Plane Activation (Phase 20)
+
+**Tool Runner**: `/Users/trevorrobey/AI-Agent-BountyHunt/openclaw-bridge/runtime/container-tool-runner.js`  
+**Image Catalog**: `/Users/trevorrobey/AI-Agent-BountyHunt/openclaw-bridge/execution/tool-image-catalog.js`  
+**Spec**: `/Users/trevorrobey/AI-Agent-BountyHunt/openclaw-bridge/docs/execution-plane-activation-spec.md`  
+**Purpose**: Execute selected tools securely inside strict, read-only Docker containers managed by OpenClaw Bridge.
+
+#### Capabilities
+- **Activation Mode**: Evaluates `executionMode=container` and `execution.containerRuntimeEnabled=true` globally before execution
+- **Security Checkpoints**: Fails fast if boundaries (sandbox, bounds, egress) are invalid prior to spawn
+- **Container Cleanup**: Automatically handles volume and container creation, sweeping, and removal
+- **Pinned Provenance**: Requires predefined SHA256 image references tracked in the `tool-image-catalog`
+
+---
+
+### 24. Burp Suite Integration (BionicLink)
 
 **Extension**: BionicLink (custom Burp extension)  
 **Port**: 8090 (HTTP)  
@@ -930,7 +945,8 @@ User receives scan summary with findings
 │   │   └── server.ts              # Main HTTP server
 │   ├── runtime/                   # Skill Runtime Core
 │   │   ├── skill-runtime-core.js  # Extracted runtime module (TSP v2/v3)
-│   │   └── mcp-skill-server.js    # JSON-RPC MCP server for containers
+│   │   ├── mcp-skill-server.js    # JSON-RPC MCP server for containers
+│   │   └── container-tool-runner.js # Orchestration connector for spawn
 │   ├── spawner/                   # Container lifecycle management
 │   │   └── spawner-v2.js          # Spawner v2 control plane
 │   ├── supervisor/                # Routing and pooling layer
@@ -997,9 +1013,21 @@ User receives scan summary with findings
 │   │   ├── resource-policy.js     # Tool resource constraints
 │   │   ├── egress-policy.js       # Outbound network connectivity rules
 │   │   ├── image-policy.js        # Digest pinning and registry verification
-│   │   └── container-audit.js     # Security profile/audit verification
+│   │   ├── container-audit.js     # Security profile/audit verification
+│   │   └── tool-image-catalog.js  # SHA256 pinned container images
 │   ├── containers/                # Dockerfiles for containerized skills
-│   │   └── nmap/Dockerfile        # Containerized nmap skill
+│   │   ├── nmap/                  # nmap skill
+│   │   ├── aircrack/              # Wireless testing
+│   │   ├── curl/                  # Request tool
+│   │   ├── ffuf/                  # Fuzzing tool
+│   │   ├── hashcat/               # Local password crack tool
+│   │   ├── msfvenom/              # Exploit generator
+│   │   ├── nikto/                 # Scanner
+│   │   ├── nslookup/              # Network config lookup
+│   │   ├── sqlmap/                # SQL/DB scanning
+│   │   └── whois/                 # Network lookup
+│   ├── tests/                     # Test suite
+│   │   └── execution/             # Container enforcement integration tests
 │   ├── github-pro-mcp/            # MCP bridge for GitHub Pro
 │   │   ├── src/                   # MCP server source
 │   │   │   ├── server.ts          # MCP server entry
@@ -1052,6 +1080,7 @@ User receives scan summary with findings
 │   │   ├── deployment-topology-spec.md  # Rolling upgrades and version safety
 │   │   ├── cluster-simulation-spec.md   # Multi-node simulation harness
 │   │   ├── execution-plane-hardening-spec.md # Execution plane hardening policies
+│   │   ├── execution-plane-activation-spec.md # Container execution logic spec
 │   │   ├── API.md                 # API contract
 │   │   ├── BURP_INTEGRATION.md    # Burp setup guide
 │   │   ├── LLDB_TRIAGE.md         # LLDB setup guide
@@ -1293,6 +1322,6 @@ This architecture is designed for security researchers, bug bounty hunters, and 
 
 ---
 
-**Document Version**: 1.12  
+**Document Version**: 1.13  
 **Last Updated**: February 27, 2026  
 **Maintained By**: Trevor Robey

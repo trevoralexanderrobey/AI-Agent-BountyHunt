@@ -432,3 +432,19 @@ Components defined:
 Host execution remains transitional default.
 
 Spec: `/Users/trevorrobey/AI-Agent-BountyHunt/openclaw-bridge/docs/execution-plane-hardening-spec.md`
+
+## Execution plane activation (Phase 20)
+
+Containerized execution enablement preserving control-plane scheduling behavior.
+
+Opt-in required globally via config block:
+```bash
+OPENCLAW_EXECUTION_MODE=container
+OPENCLAW_CONTAINER_RUNTIME_ENABLED=true
+```
+
+- Preflight validation is layered before dispatch
+- Explicit signed registries and digest-pinned images run in tightly constrained sandboxes
+- Tools use `container-tool-runner.js` if enabled and fallback to host execution if rejected
+
+Spec: `/Users/trevorrobey/AI-Agent-BountyHunt/openclaw-bridge/docs/execution-plane-activation-spec.md`

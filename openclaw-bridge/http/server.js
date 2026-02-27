@@ -40,6 +40,34 @@ function parseBoolean(value, fallback = false) {
   return fallback;
 }
 
+function parseCsv(value) {
+  if (typeof value !== "string") {
+    return [];
+  }
+  return value
+    .split(",")
+    .map((entry) => entry.trim())
+    .filter(Boolean);
+}
+
+function parseCsvOrUndefined(value) {
+  const parsed = parseCsv(value);
+  return parsed.length > 0 ? parsed : undefined;
+}
+
+function normalizeExecutionMode(value) {
+  const normalized = typeof value === "string" ? value.trim().toLowerCase() : "";
+  return normalized === "container" ? "container" : "host";
+}
+
+function normalizeExecutionBackend(value) {
+  const normalized = typeof value === "string" ? value.trim().toLowerCase() : "";
+  if (normalized === "docker" || normalized === "containerd" || normalized === "mock") {
+    return normalized;
+  }
+  return "mock";
+}
+
 function getBaseContentType(rawHeader) {
   if (typeof rawHeader !== "string") {
     return "";
@@ -468,6 +496,19 @@ if (require.main === module) {
           daily: parseBoolean(process.env.AUDIT_LOG_ROTATE_DAILY, true),
           maxBytes: process.env.AUDIT_LOG_MAX_BYTES,
         },
+      },
+      execution: {
+        executionMode: normalizeExecutionMode(process.env.TOOL_EXECUTION_MODE),
+        containerRuntimeEnabled: parseBoolean(process.env.CONTAINER_RUNTIME_ENABLED, false),
+        backend: normalizeExecutionBackend(process.env.CONTAINER_RUNTIME_BACKEND),
+        allowedImageRegistries: parseCsvOrUndefined(process.env.EXECUTION_ALLOWED_IMAGE_REGISTRIES),
+        requireSignatureVerificationInProduction: parseBoolean(
+          process.env.EXECUTION_REQUIRE_SIGNATURE_VERIFICATION_IN_PRODUCTION,
+          true,
+        ),
+        externalNetworkName: process.env.EXECUTION_EXTERNAL_NETWORK_NAME,
+        internalNetworkName: process.env.EXECUTION_INTERNAL_NETWORK_NAME,
+        nonRootUser: process.env.EXECUTION_CONTAINER_NON_ROOT_USER,
       },
     },
     tls: {
