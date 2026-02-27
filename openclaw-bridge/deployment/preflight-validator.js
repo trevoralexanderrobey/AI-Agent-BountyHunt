@@ -3,6 +3,16 @@ const fs = require("node:fs");
 const path = require("node:path");
 
 const { createVersionGuard } = require("./version-guard.js");
+const { validateSandboxConfig } = require("../execution/sandbox-policy.js");
+const { resolveResourceLimits } = require("../execution/resource-policy.js");
+const { validateEgressPolicy } = require("../execution/egress-policy.js");
+const { validateImageReference } = require("../execution/image-policy.js");
+const { SUPPORTED_BACKENDS } = require("../execution/container-runtime.js");
+const { createToolRegistry } = require("../tools/tool-registry.js");
+const { registerBatch1Tools } = require("../tools/adapters/index.js");
+const { registerBatch2Tools } = require("../tools/adapters/batch-2-index.js");
+const { registerBatch3Tools } = require("../tools/adapters/batch-3-index.js");
+const { createSpawnerV2 } = require("../spawner/spawner-v2.js");
 
 const PARTITION_CONTAINMENT_METRICS = [
   "cluster.partition_state",
@@ -294,6 +304,438 @@ function resolveTlsConfig(options) {
     keyPath,
     mtlsEnabled,
     caPath,
+  };
+}
+
+function normalizeMode(value) {
+  return normalizeString(value).toLowerCase();
+}
+
+function resolveExecutionMode(options, manifest) {
+  const optionMode = normalizeMode(options && options.execution && options.execution.executionMode);
+  if (optionMode) {
+    return { value: optionMode, source: "options.execution.executionMode" };
+  }
+
+  const envMode = normalizeMode(process.env.TOOL_EXECUTION_MODE);
+  if (envMode) {
+    return { value: envMode, source: "TOOL_EXECUTION_MODE" };
+  }
+
+  const manifestMode = normalizeMode(manifest && manifest.execution && manifest.execution.executionMode);
+  if (manifestMode) {
+    return { value: manifestMode, source: "manifest.execution.executionMode" };
+  }
+
+  return { value: "", source: "unset" };
+}
+
+function resolveExecutionBackend(options, manifest) {
+  const optionBackend = normalizeMode(options && options.execution && options.execution.backend);
+  if (optionBackend) {
+    return { value: optionBackend, source: "options.execution.backend" };
+  }
+
+  const envBackend = normalizeMode(process.env.CONTAINER_RUNTIME_BACKEND);
+  if (envBackend) {
+    return { value: envBackend, source: "CONTAINER_RUNTIME_BACKEND" };
+  }
+
+  const manifestBackend = normalizeMode(manifest && manifest.execution && manifest.execution.backend);
+  if (manifestBackend) {
+    return { value: manifestBackend, source: "manifest.execution.backend" };
+  }
+
+  return { value: "mock", source: "default" };
+}
+
+function extractConfiguredToolAdapterSlugs(toolAdapters) {
+  const slugs = new Set();
+  if (Array.isArray(toolAdapters)) {
+    for (const item of toolAdapters) {
+      if (!item || typeof item !== "object") {
+        continue;
+      }
+      const slug = normalizeString(item.slug).toLowerCase();
+      if (slug) {
+        slugs.add(slug);
+      }
+    }
+    return slugs;
+  }
+
+  if (toolAdapters && typeof toolAdapters === "object") {
+    for (const key of Object.keys(toolAdapters)) {
+      const slug = normalizeString(key).toLowerCase();
+      if (slug) {
+        slugs.add(slug);
+      }
+    }
+  }
+
+  return slugs;
+}
+
+function resolveAuthoritativeToolSlugs(options) {
+  if (options && options.toolRegistry && typeof options.toolRegistry.list === "function") {
+    const listed = options.toolRegistry.list();
+    const set = new Set();
+    for (const item of listed) {
+      if (!item || typeof item !== "object") {
+        continue;
+      }
+      const slug = normalizeString(item.slug).toLowerCase();
+      if (slug) {
+        set.add(slug);
+      }
+    }
+    return set;
+  }
+
+  const registry = createToolRegistry({ strict: false });
+  registerBatch1Tools(registry);
+  registerBatch2Tools(registry);
+  registerBatch3Tools(registry);
+  const configured = extractConfiguredToolAdapterSlugs(options && options.toolAdapters);
+  for (const slug of configured) {
+    if (!registry.has(slug)) {
+      registry.register(slug, {
+        name: slug,
+        slug,
+        description: "Configured external adapter",
+        execute: async () => ({ ok: true }),
+        validateInput: async () => ({ valid: true }),
+        normalizeOutput: async (output) => output,
+        getResourceLimits: () => ({ timeoutMs: 1000, memoryMb: 64, maxOutputBytes: 1024 }),
+      });
+    }
+  }
+
+  const set = new Set();
+  for (const item of registry.list()) {
+    const slug = normalizeString(item.slug).toLowerCase();
+    if (slug) {
+      set.add(slug);
+    }
+  }
+
+  const skillConfig = options && options.skillConfig && typeof options.skillConfig === "object" ? options.skillConfig : {};
+  for (const slug of Object.keys(skillConfig)) {
+    const normalized = normalizeString(slug).toLowerCase();
+    if (normalized) {
+      set.add(normalized);
+    }
+  }
+
+  try {
+    const spawnerConstants = createSpawnerV2().constants;
+    if (spawnerConstants && spawnerConstants.IMAGE_ALLOWLIST && typeof spawnerConstants.IMAGE_ALLOWLIST === "object") {
+      for (const slug of Object.keys(spawnerConstants.IMAGE_ALLOWLIST)) {
+        const normalized = normalizeString(slug).toLowerCase();
+        if (normalized) {
+          set.add(normalized);
+        }
+      }
+    }
+  } catch {}
+
+  return set;
+}
+
+function normalizeToolConfigMap(input) {
+  if (Array.isArray(input)) {
+    const map = {};
+    for (const item of input) {
+      const slug = normalizeString(item).toLowerCase();
+      if (slug) {
+        map[slug] = {};
+      }
+    }
+    return map;
+  }
+
+  if (input && typeof input === "object") {
+    const map = {};
+    for (const key of Object.keys(input)) {
+      const slug = normalizeString(key).toLowerCase();
+      if (!slug) {
+        continue;
+      }
+      const value = input[key];
+      map[slug] = value && typeof value === "object" ? value : {};
+    }
+    return map;
+  }
+
+  return {};
+}
+
+function resolveExecutionConfig(options, manifest) {
+  const manifestExecution = manifest && manifest.execution && typeof manifest.execution === "object" ? manifest.execution : {};
+  const optionExecution = options && options.execution && typeof options.execution === "object" ? options.execution : {};
+
+  const merged = {
+    ...manifestExecution,
+    ...optionExecution,
+    tools: {
+      ...normalizeToolConfigMap(manifestExecution.tools),
+      ...normalizeToolConfigMap(optionExecution.tools),
+    },
+    resourcePolicies: {
+      ...(manifestExecution.resourcePolicies && typeof manifestExecution.resourcePolicies === "object"
+        ? manifestExecution.resourcePolicies
+        : {}),
+      ...(optionExecution.resourcePolicies && typeof optionExecution.resourcePolicies === "object"
+        ? optionExecution.resourcePolicies
+        : {}),
+    },
+    sandboxPolicies: {
+      ...(manifestExecution.sandboxPolicies && typeof manifestExecution.sandboxPolicies === "object"
+        ? manifestExecution.sandboxPolicies
+        : {}),
+      ...(optionExecution.sandboxPolicies && typeof optionExecution.sandboxPolicies === "object"
+        ? optionExecution.sandboxPolicies
+        : {}),
+    },
+    egressPolicies: {
+      ...(manifestExecution.egressPolicies && typeof manifestExecution.egressPolicies === "object"
+        ? manifestExecution.egressPolicies
+        : {}),
+      ...(optionExecution.egressPolicies && typeof optionExecution.egressPolicies === "object"
+        ? optionExecution.egressPolicies
+        : {}),
+    },
+    imagePolicies: {
+      ...(manifestExecution.imagePolicies && typeof manifestExecution.imagePolicies === "object"
+        ? manifestExecution.imagePolicies
+        : {}),
+      ...(optionExecution.imagePolicies && typeof optionExecution.imagePolicies === "object"
+        ? optionExecution.imagePolicies
+        : {}),
+    },
+    images: {
+      ...(manifestExecution.images && typeof manifestExecution.images === "object" ? manifestExecution.images : {}),
+      ...(optionExecution.images && typeof optionExecution.images === "object" ? optionExecution.images : {}),
+    },
+  };
+
+  return merged;
+}
+
+function resolveToolImageReference(executionConfig, slug, toolConfig) {
+  const direct = normalizeString(toolConfig && toolConfig.image);
+  if (direct) {
+    return direct;
+  }
+  const mapped = normalizeString(executionConfig && executionConfig.images && executionConfig.images[slug]);
+  if (mapped) {
+    return mapped;
+  }
+  const policyImage = normalizeString(
+    executionConfig &&
+      executionConfig.imagePolicies &&
+      executionConfig.imagePolicies[slug] &&
+      executionConfig.imagePolicies[slug].image,
+  );
+  if (policyImage) {
+    return policyImage;
+  }
+  return normalizeString(executionConfig && executionConfig.image);
+}
+
+function resolveSignatureFlag(executionConfig, slug, toolConfig) {
+  if (toolConfig && Object.prototype.hasOwnProperty.call(toolConfig, "signatureVerified")) {
+    return toolConfig.signatureVerified;
+  }
+  if (
+    executionConfig &&
+    executionConfig.imagePolicies &&
+    executionConfig.imagePolicies[slug] &&
+    Object.prototype.hasOwnProperty.call(executionConfig.imagePolicies[slug], "signatureVerified")
+  ) {
+    return executionConfig.imagePolicies[slug].signatureVerified;
+  }
+  if (executionConfig && Object.prototype.hasOwnProperty.call(executionConfig, "signatureVerified")) {
+    return executionConfig.signatureVerified;
+  }
+  return undefined;
+}
+
+function validateExecutionGuardrails(
+  { executionMode, executionModeSource, executionBackend, executionBackendSource, executionConfig, knownToolSlugs, isProduction },
+  errors,
+  warnings,
+) {
+  const mode = normalizeMode(executionMode);
+  const supportedModes = new Set(["host", "container"]);
+
+  if (mode && !supportedModes.has(mode)) {
+    addIssue(errors, "EXECUTION_CONTAINER_REQUIRED_PROD", "execution.executionMode must be either 'host' or 'container'", {
+      executionMode: mode,
+      executionModeSource,
+    });
+    return {
+      mode,
+      executionToolCount: 0,
+      validatedTools: [],
+    };
+  }
+
+  if (!SUPPORTED_BACKENDS.includes(executionBackend)) {
+    addIssue(errors, "EXECUTION_CONTAINER_REQUIRED_PROD", "execution backend must be one of mock,docker,containerd", {
+      executionBackend,
+      executionBackendSource,
+    });
+    return {
+      mode,
+      executionToolCount: 0,
+      validatedTools: [],
+    };
+  }
+
+  if (isProduction && !mode) {
+    addIssue(
+      errors,
+      "EXECUTION_CONTAINER_REQUIRED_PROD",
+      "Production mode requires explicit execution.executionMode to be set",
+      { executionModeSource },
+    );
+    return {
+      mode,
+      executionToolCount: 0,
+      validatedTools: [],
+    };
+  }
+
+  if (mode === "host") {
+    if (isProduction) {
+      addIssue(warnings, "HOST_EXECUTION_TRANSITIONAL_PROD", "Host execution mode is transitional and not production-hardened", {});
+    }
+    return {
+      mode,
+      executionToolCount: 0,
+      validatedTools: [],
+    };
+  }
+
+  if (mode !== "container") {
+    return {
+      mode,
+      executionToolCount: 0,
+      validatedTools: [],
+    };
+  }
+
+  const tools = executionConfig && executionConfig.tools && typeof executionConfig.tools === "object" ? executionConfig.tools : {};
+  const slugs = Object.keys(tools).map((item) => normalizeString(item).toLowerCase()).filter(Boolean);
+  const uniqueSlugs = Array.from(new Set(slugs)).sort((a, b) => a.localeCompare(b));
+
+  if (isProduction && uniqueSlugs.length === 0) {
+    addIssue(
+      errors,
+      "EXECUTION_CONTAINER_REQUIRED_PROD",
+      "Container execution mode requires at least one execution.tools entry in production",
+      {},
+    );
+  }
+
+  const validatedTools = [];
+
+  for (const slug of uniqueSlugs) {
+    if (!knownToolSlugs.has(slug)) {
+      addIssue(errors, "EXECUTION_TOOL_UNREGISTERED", "execution.tools contains an unregistered tool slug", {
+        toolSlug: slug,
+      });
+    }
+
+    const toolConfig = tools[slug] && typeof tools[slug] === "object" ? tools[slug] : {};
+    const sandboxConfig =
+      (toolConfig && typeof toolConfig.sandbox === "object" && toolConfig.sandbox) ||
+      (executionConfig.sandboxPolicies && executionConfig.sandboxPolicies[slug]) ||
+      executionConfig.sandboxPolicy ||
+      null;
+
+    if (!sandboxConfig || typeof sandboxConfig !== "object") {
+      addIssue(errors, "SANDBOX_POLICY_MISSING", "Sandbox policy is required for container execution tool", { toolSlug: slug });
+    } else {
+      const sandboxValidation = validateSandboxConfig(sandboxConfig);
+      if (!sandboxValidation.valid) {
+        addIssue(errors, "SANDBOX_POLICY_MISSING", "Sandbox policy is invalid for container execution tool", {
+          toolSlug: slug,
+          errors: sandboxValidation.errors,
+        });
+      }
+    }
+
+    const resourcePolicies = {
+      ...(executionConfig.resourcePolicies && typeof executionConfig.resourcePolicies === "object" ? executionConfig.resourcePolicies : {}),
+    };
+    if (toolConfig && typeof toolConfig.resourceLimits === "object") {
+      resourcePolicies[slug] = toolConfig.resourceLimits;
+    }
+
+    try {
+      resolveResourceLimits(slug, {
+        policies: resourcePolicies,
+        allowDefault: !isProduction,
+      });
+    } catch (error) {
+      addIssue(
+        errors,
+        error && typeof error.code === "string" ? error.code : "RESOURCE_POLICY_UNDEFINED",
+        "Resource policy is undefined or invalid for container execution tool",
+        {
+          toolSlug: slug,
+          reason: error && error.message ? error.message : String(error),
+        },
+      );
+    }
+
+    const egressPolicies = {
+      ...(executionConfig.egressPolicies && typeof executionConfig.egressPolicies === "object" ? executionConfig.egressPolicies : {}),
+    };
+    if (toolConfig && typeof toolConfig.egress === "object") {
+      egressPolicies[slug] = toolConfig.egress;
+    }
+
+    const egressValidation = validateEgressPolicy(slug, egressPolicies, {
+      allowDefault: !isProduction,
+    });
+    if (!egressValidation.valid) {
+      addIssue(errors, "EGRESS_POLICY_UNDEFINED", "Egress policy is undefined or invalid for container execution tool", {
+        toolSlug: slug,
+        errors: egressValidation.errors,
+      });
+    }
+
+    const imageRef = resolveToolImageReference(executionConfig, slug, toolConfig);
+    const imagePolicy = executionConfig.imagePolicies && executionConfig.imagePolicies[slug];
+    const imageValidation = validateImageReference(imageRef, {
+      production: isProduction,
+      allowedRegistries:
+        (imagePolicy && Array.isArray(imagePolicy.allowedRegistries) && imagePolicy.allowedRegistries) ||
+        (executionConfig.imagePolicy &&
+          Array.isArray(executionConfig.imagePolicy.allowedRegistries) &&
+          executionConfig.imagePolicy.allowedRegistries) ||
+        executionConfig.allowedImageRegistries,
+      requireDigestPinning: true,
+      requireSignatureVerification: true,
+      signatureVerified: resolveSignatureFlag(executionConfig, slug, toolConfig),
+    });
+    if (!imageValidation.valid) {
+      addIssue(errors, "IMAGE_POLICY_VIOLATION", "Image policy validation failed for container execution tool", {
+        toolSlug: slug,
+        errors: imageValidation.errors,
+      });
+    }
+
+    validatedTools.push(slug);
+  }
+
+  return {
+    mode,
+    executionToolCount: uniqueSlugs.length,
+    validatedTools,
   };
 }
 
@@ -706,6 +1148,10 @@ async function runPreflightValidation(options = {}) {
   const versionTargetsResult = resolveVersionTargets(options, manifest);
   const softwareVersionResult = resolveSoftwareVersion(options);
   const clusterCapabilities = resolveClusterCapabilities(options, manifest);
+  const executionModeResult = resolveExecutionMode(options, manifest);
+  const executionBackendResult = resolveExecutionBackend(options, manifest);
+  const executionConfig = resolveExecutionConfig(options, manifest);
+  const knownToolSlugs = resolveAuthoritativeToolSlugs(options);
 
   const nodeId = resolveNodeId(options);
   const statePathTemplate = resolveClusterStatePathTemplate(options);
@@ -754,6 +1200,20 @@ async function runPreflightValidation(options = {}) {
     await validateContainmentMetrics(options.liveCheck, errors, warnings);
   }
 
+  const executionValidation = validateExecutionGuardrails(
+    {
+      executionMode: executionModeResult.value,
+      executionModeSource: executionModeResult.source,
+      executionBackend: executionBackendResult.value,
+      executionBackendSource: executionBackendResult.source,
+      executionConfig,
+      knownToolSlugs,
+      isProduction: productionMode.isProduction,
+    },
+    errors,
+    warnings,
+  );
+
   const result = {
     ready_for_production: errors.length === 0,
     warnings,
@@ -772,6 +1232,13 @@ async function runPreflightValidation(options = {}) {
       localVersionSource: softwareVersionResult.source,
       statePathTemplate,
       nodeId,
+      executionMode: executionModeResult.value || "unset",
+      executionModeSource: executionModeResult.source,
+      executionBackend: executionBackendResult.value || "unset",
+      executionBackendSource: executionBackendResult.source,
+      executionToolCount: executionValidation.executionToolCount,
+      validatedExecutionTools: executionValidation.validatedTools,
+      knownExecutionTools: Array.from(knownToolSlugs).sort((a, b) => a.localeCompare(b)),
     },
   };
 
@@ -829,6 +1296,18 @@ function parseCliArgs(argv) {
       index += 1;
       continue;
     }
+    if (token === "--execution-mode") {
+      parsed.execution = parsed.execution || {};
+      parsed.execution.executionMode = normalizeMode(args[index + 1]);
+      index += 1;
+      continue;
+    }
+    if (token === "--execution-backend") {
+      parsed.execution = parsed.execution || {};
+      parsed.execution.backend = normalizeMode(args[index + 1]);
+      index += 1;
+      continue;
+    }
   }
 
   return parsed;
@@ -859,6 +1338,34 @@ if (require.main === module) {
       deployment: {
         ...(fileOptions.deployment || {}),
         ...(cliOptions.deployment || {}),
+      },
+      execution: {
+        ...(fileOptions.execution || {}),
+        ...(cliOptions.execution || {}),
+        tools: {
+          ...((fileOptions.execution && fileOptions.execution.tools) || {}),
+          ...((cliOptions.execution && cliOptions.execution.tools) || {}),
+        },
+        resourcePolicies: {
+          ...((fileOptions.execution && fileOptions.execution.resourcePolicies) || {}),
+          ...((cliOptions.execution && cliOptions.execution.resourcePolicies) || {}),
+        },
+        sandboxPolicies: {
+          ...((fileOptions.execution && fileOptions.execution.sandboxPolicies) || {}),
+          ...((cliOptions.execution && cliOptions.execution.sandboxPolicies) || {}),
+        },
+        egressPolicies: {
+          ...((fileOptions.execution && fileOptions.execution.egressPolicies) || {}),
+          ...((cliOptions.execution && cliOptions.execution.egressPolicies) || {}),
+        },
+        imagePolicies: {
+          ...((fileOptions.execution && fileOptions.execution.imagePolicies) || {}),
+          ...((cliOptions.execution && cliOptions.execution.imagePolicies) || {}),
+        },
+        images: {
+          ...((fileOptions.execution && fileOptions.execution.images) || {}),
+          ...((cliOptions.execution && cliOptions.execution.images) || {}),
+        },
       },
       liveCheck: {
         ...(fileOptions.liveCheck || {}),

@@ -23,6 +23,7 @@ Key capabilities:
 - **Partition Containment** — Majority-loss detection, convergence stabilization, shard/leader freeze
 - **Deployment Topology** — Rolling upgrade safety, version compatibility guard, bootstrap validation
 - **Operational Runbooks** — Preflight validation, SLO/SLI tracking, scaling strategy, and disaster recovery playbooks
+- **Execution Plane Hardening** — Container runtime integration scaffolding, resource/egress/sandbox policies
 - **Cluster Simulation** — Deterministic fault injection harness for multi-node scenario testing
 - **MCP Bridge** — Director → Executor pattern connecting GitHub Pro / Antigravity / Codex to OpenClaw
 
@@ -122,6 +123,7 @@ cd "AG for OC"
 - [Cluster Spec](./openclaw-bridge/docs/cluster-spec.md) — Leader election and shard-based multi-supervisor routing
 - [Cluster Convergence Spec](./openclaw-bridge/docs/cluster-convergence-spec.md) — Partition containment and convergence
 - [Deployment Topology Spec](./openclaw-bridge/docs/deployment-topology-spec.md) — Rolling upgrades and version safety
+- [Execution Plane Hardening Spec](./openclaw-bridge/docs/execution-plane-hardening-spec.md) — Container execution policy enforcement scaffolding
 - [Cluster Simulation Spec](./openclaw-bridge/docs/cluster-simulation-spec.md) — Multi-node fault injection harness
 - [Topology Model](./openclaw-bridge/deployment/topology-model.md) — Production topology model and node placement guidance
 - [Operational Playbook](./openclaw-bridge/deployment/operational-playbook.md) — Playbooks for disaster recovery and performance targets

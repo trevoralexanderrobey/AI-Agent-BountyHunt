@@ -698,11 +698,28 @@ Bridge / Director Agent
 - **Preflight validator**: Pre-flight inspection scripts ensuring environment compliance
 - **SLO/SLI Target definitions**: Established p95 latency error budgets and reliability objectives
 - **Scaling strategy**: Prescriptive scale-up/scale-out node guidance
-- **Disaster Recovery**: Structured workflows for Single-AZ to Region-wide losses
+#### Disaster Recovery
+- Structured workflows for Single-AZ to Region-wide losses
 
 ---
 
-### 22. Burp Suite Integration (BionicLink)
+### 22. Execution Plane Hardening (Phase 19A)
+
+**Container Runtime**: `/Users/trevorrobey/AI-Agent-BountyHunt/openclaw-bridge/execution/container-runtime.js`  
+**Policies**: `sandbox-policy.js`, `resource-policy.js`, `egress-policy.js`, `image-policy.js`  
+**Spec**: `/Users/trevorrobey/AI-Agent-BountyHunt/openclaw-bridge/docs/execution-plane-hardening-spec.md`  
+**Purpose**: Container execution policy validation and security scaffolding structure decoupling execution constraints from control-plane logic.
+
+#### Capabilities
+- **Sandbox Boundary**: Definitions for capabilities, mounts, and profiles
+- **Resource Limits**: CPU, memory, and runtime enforcement definitions
+- **Egress Network**: Scaffolding for per-tool egress network constraints
+- **Image Provenance**: Require digest-pinned explicit images from allowlisted registries
+- **Host execution**: Default transitional stance maintained until full enablement
+
+---
+
+### 23. Burp Suite Integration (BionicLink)
 
 **Extension**: BionicLink (custom Burp extension)  
 **Port**: 8090 (HTTP)  
@@ -974,6 +991,13 @@ User receives scan summary with findings
 │   ├── simulation/                # Cluster simulation (Phase 18)
 │   │   ├── cluster-simulator.js   # Deterministic multi-node simulator
 │   │   └── fault-injector.js      # Fault injection interface
+│   ├── execution/                 # Execution plane hardening (Phase 19A)
+│   │   ├── container-runtime.js   # Main execution orchestration
+│   │   ├── sandbox-policy.js      # Privileges and capability drops
+│   │   ├── resource-policy.js     # Tool resource constraints
+│   │   ├── egress-policy.js       # Outbound network connectivity rules
+│   │   ├── image-policy.js        # Digest pinning and registry verification
+│   │   └── container-audit.js     # Security profile/audit verification
 │   ├── containers/                # Dockerfiles for containerized skills
 │   │   └── nmap/Dockerfile        # Containerized nmap skill
 │   ├── github-pro-mcp/            # MCP bridge for GitHub Pro
@@ -1027,6 +1051,7 @@ User receives scan summary with findings
 │   │   ├── cluster-convergence-spec.md  # Partition containment and convergence
 │   │   ├── deployment-topology-spec.md  # Rolling upgrades and version safety
 │   │   ├── cluster-simulation-spec.md   # Multi-node simulation harness
+│   │   ├── execution-plane-hardening-spec.md # Execution plane hardening policies
 │   │   ├── API.md                 # API contract
 │   │   ├── BURP_INTEGRATION.md    # Burp setup guide
 │   │   ├── LLDB_TRIAGE.md         # LLDB setup guide
@@ -1268,6 +1293,6 @@ This architecture is designed for security researchers, bug bounty hunters, and 
 
 ---
 
-**Document Version**: 1.11  
+**Document Version**: 1.12  
 **Last Updated**: February 27, 2026  
 **Maintained By**: Trevor Robey

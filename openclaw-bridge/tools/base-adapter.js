@@ -1,8 +1,14 @@
+const { resolveResourceLimits, validateResourceLimitsObject } = require("../execution/resource-policy.js");
+
 class BaseToolAdapter {
   constructor(config = {}) {
     this.name = typeof config.name === "string" ? config.name : "";
     this.slug = typeof config.slug === "string" ? config.slug : "";
     this.description = typeof config.description === "string" ? config.description : "";
+    this.executionMode = config && config.executionMode === "container" ? "container" : "host";
+    this.containerRuntime = config && config.containerRuntime ? config.containerRuntime : null;
+    this.resourcePolicies =
+      config && config.resourcePolicies && typeof config.resourcePolicies === "object" ? config.resourcePolicies : null;
   }
 
   getResourceLimits() {
@@ -14,7 +20,7 @@ class BaseToolAdapter {
   }
 
   /**
-   * @param {{ params: Object, timeout: number, requestId: string }} input
+   * @param {{ params: Object, timeout: number, requestId: string, resourceLimits?: { cpuShares: number, memoryLimitMb: number, maxRuntimeSeconds: number, maxOutputBytes: number } }} input
    * @returns {Promise<{ ok: boolean, result?: Object, error?: { code: string, message: string }, metadata: { executionTimeMs: number, outputBytes: number, requestId: string } }>}
    */
   async execute(input) {
@@ -33,7 +39,10 @@ class BaseToolAdapter {
       const limits = this.getResourceLimits();
       const timeoutMs = this.resolveTimeout(input ? input.timeout : undefined, limits.timeoutMs);
 
-      const rawResult = await this.withTimeout(this.executeImpl({ params, timeout: timeoutMs, requestId }), timeoutMs);
+      const rawResult =
+        this.executionMode === "container"
+          ? await this.executeInContainer({ params, timeout: timeoutMs, requestId, input })
+          : await this.withTimeout(this.executeImpl({ params, timeout: timeoutMs, requestId }), timeoutMs);
       const normalized = await this.normalizeOutput(rawResult);
       const payload = this.ensureObject(normalized, "Normalized output must be an object");
 
@@ -67,6 +76,10 @@ class BaseToolAdapter {
 
   async executeImpl(_input) {
     throw this.makeError("NOT_IMPLEMENTED", "executeImpl() must be implemented by subclass");
+  }
+
+  async executeContainerImpl(_input) {
+    throw this.makeError("NOT_IMPLEMENTED", "executeContainerImpl() must be implemented by subclass");
   }
 
   async validateInput(_params) {
@@ -152,6 +165,110 @@ class BaseToolAdapter {
     const code = error && typeof error.code === "string" ? error.code : "TOOL_EXECUTION_ERROR";
     const message = error && typeof error.message === "string" ? error.message : "Tool execution failed";
     return { code, message };
+  }
+
+  async executeInContainer({ params, timeout, requestId, input }) {
+    if (!this.containerRuntime || typeof this.containerRuntime.runContainer !== "function") {
+      throw this.makeError("CONTAINER_RUNTIME_REQUIRED", "Container runtime required for container execution mode");
+    }
+
+    const requestedLimitsResult = this.normalizeRequestedResourceLimits(input ? input.resourceLimits : undefined);
+    if (!requestedLimitsResult.valid) {
+      const message = requestedLimitsResult.errors.length
+        ? requestedLimitsResult.errors.join("; ")
+        : "Explicit resourceLimits are required for container execution mode";
+      throw this.makeError(
+        "RESOURCE_LIMITS_REQUIRED",
+        message,
+      );
+    }
+    const requestedLimits = requestedLimitsResult.limits;
+
+    let policyLimits;
+    try {
+      policyLimits = resolveResourceLimits(this.slug, {
+        allowDefault: false,
+        policies: this.resourcePolicies || undefined,
+      });
+    } catch (error) {
+      if (error && typeof error.code === "string") {
+        throw error;
+      }
+      throw this.makeError(
+        "RESOURCE_POLICY_UNDEFINED",
+        `Resource policy is required for container mode tool '${this.slug || ""}'`,
+      );
+    }
+
+    this.ensureRequestedWithinPolicy(requestedLimits, policyLimits);
+
+    const invocation = await this.executeContainerImpl({
+      params,
+      timeout,
+      requestId,
+      resourceLimits: requestedLimits,
+    });
+    const request = this.ensureObject(invocation, "Container invocation must be an object");
+    if (typeof request.image !== "string" || request.image.trim().length === 0) {
+      throw this.makeError("INVALID_CONTAINER_REQUEST", "Container invocation must include image");
+    }
+
+    return this.withTimeout(
+      this.containerRuntime.runContainer({
+        ...request,
+        resourceLimits: requestedLimits,
+        toolSlug: this.slug,
+      }),
+      timeout,
+    );
+  }
+
+  normalizeRequestedResourceLimits(resourceLimits) {
+    if (!resourceLimits || typeof resourceLimits !== "object") {
+      return {
+        valid: false,
+        limits: null,
+        errors: ["Explicit resourceLimits are required for container execution mode"],
+      };
+    }
+
+    const validation = validateResourceLimitsObject(resourceLimits, {
+      rejectUnknown: true,
+      label: "input.resourceLimits",
+    });
+    return {
+      valid: validation.valid,
+      limits: validation.valid ? validation.limits : null,
+      errors: validation.valid ? [] : validation.errors,
+    };
+  }
+
+  ensureRequestedWithinPolicy(requested, policy) {
+    const keys = ["cpuShares", "memoryLimitMb", "maxRuntimeSeconds", "maxOutputBytes"];
+    for (const key of keys) {
+      const requestedValue = requested[key];
+      const policyValue = policy && policy[key];
+
+      if (
+        typeof requestedValue !== "number" ||
+        !Number.isFinite(requestedValue) ||
+        !Number.isInteger(requestedValue) ||
+        requestedValue <= 0 ||
+        typeof policyValue !== "number" ||
+        !Number.isFinite(policyValue) ||
+        !Number.isInteger(policyValue) ||
+        policyValue <= 0
+      ) {
+        throw this.makeError("RESOURCE_POLICY_INVALID", `Missing or invalid resource limit '${key}'`);
+      }
+
+      if (requestedValue > policyValue) {
+        throw this.makeError(
+          "RESOURCE_LIMIT_EXCEEDED",
+          `Requested ${key} (${requestedValue}) exceeds policy limit (${policyValue})`,
+        );
+      }
+    }
   }
 }
 

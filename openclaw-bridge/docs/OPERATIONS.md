@@ -418,3 +418,17 @@ Included playbooks:
 - Disaster recovery playbooks (node failure to full-region loss)
 
 Docs base: `/Users/trevorrobey/AI-Agent-BountyHunt/openclaw-bridge/deployment/`
+
+## Execution plane hardening (Phase 19A)
+
+Container execution policy definitions and scaffolding defining the execution-plane security boundaries. Enforcement mechanisms are part of Phase 20.
+
+Components defined:
+- Sandbox policy: privileged flags, mount types, profile restrictions
+- Resource policy: CPU, Memory limit guarantees
+- Egress policy: outbound network constraint patterns
+- Image provenance overrides and digest-pinning
+
+Host execution remains transitional default.
+
+Spec: `/Users/trevorrobey/AI-Agent-BountyHunt/openclaw-bridge/docs/execution-plane-hardening-spec.md`

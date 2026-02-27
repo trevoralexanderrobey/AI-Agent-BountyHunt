@@ -85,6 +85,7 @@ function createSafeMetrics(rawMetrics) {
 function createSpawnerV2(options = {}) {
   const registry = new Map();
   const metrics = createSafeMetrics(options.metrics);
+  const containerRuntime = options && options.containerRuntime ? options.containerRuntime : null;
   let initialized = false;
 
   function makeFailure(code, message, details) {
@@ -829,6 +830,7 @@ function createSpawnerV2(options = {}) {
       HEALTH_POLL_INTERVAL_MS,
       SKILL_EXECUTION_TIMEOUT_MS,
       CONTAINER_HTTP_PORT,
+      containerRuntimeInjected: Boolean(containerRuntime),
     },
   };
 }
