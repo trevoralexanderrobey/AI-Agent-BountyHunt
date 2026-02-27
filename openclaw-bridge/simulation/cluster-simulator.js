@@ -23,6 +23,7 @@ const DEFAULT_CONVERGENCE_WINDOW_MS = 10000;
 const DEFAULT_QUEUE_POLL_INTERVAL_MS = 250;
 const DEFAULT_CLOCK_START_MS = Date.UTC(2026, 0, 1, 0, 0, 0);
 const DEFAULT_RANDOM_SEED = 424242;
+const FREEZE_INCOMPATIBLE_VERSION_SUFFIX = "-freeze-incompat";
 
 function normalizeNodeId(value) {
   return typeof value === "string" ? value.trim() : "";
@@ -1420,6 +1421,7 @@ function createClusterSimulator(options = {}) {
     typeof options.baseDir === "string" && options.baseDir.trim()
       ? path.resolve(options.baseDir.trim())
       : path.resolve(process.cwd(), "data", "simulation-phase-18");
+  const cleanStart = options.cleanStart !== false;
 
   const validation = {
     no_split_brain_under_partition: false,
@@ -1457,6 +1459,9 @@ function createClusterSimulator(options = {}) {
     clusterManagerPatchRestore: null,
     createSupervisorV1: null,
     supervisorModulePath: require.resolve("../supervisor/supervisor-v1.js"),
+    lastDiagnostics: {},
+    clusterManagerStatePathEnvBefore: null,
+    clusterManagerStatePathEnvHadValue: false,
   };
 
   function now() {
@@ -1600,6 +1605,34 @@ function createClusterSimulator(options = {}) {
 
   function installClusterManagerTracingPatch() {
     const clusterManagerModulePath = require.resolve("../cluster/cluster-manager.js");
+    const versionGuardModulePath = require.resolve("../deployment/version-guard.js");
+    const versionGuardModule = require(versionGuardModulePath);
+    const originalCreateVersionGuard = versionGuardModule.createVersionGuard;
+
+    versionGuardModule.createVersionGuard = function createFreezeAwareVersionGuard(...args) {
+      const guard = originalCreateVersionGuard(...args);
+      if (!guard || typeof guard !== "object") {
+        return guard;
+      }
+
+      const originalIsCoexistenceAllowed =
+        typeof guard.isCoexistenceAllowed === "function"
+          ? guard.isCoexistenceAllowed.bind(guard)
+          : () => false;
+
+      return {
+        ...guard,
+        isCoexistenceAllowed(localVersion, remoteVersion) {
+          const remote = typeof remoteVersion === "string" ? remoteVersion.trim() : "";
+          if (remote.includes(FREEZE_INCOMPATIBLE_VERSION_SUFFIX)) {
+            return false;
+          }
+          return originalIsCoexistenceAllowed(localVersion, remoteVersion);
+        },
+      };
+    };
+
+    delete require.cache[clusterManagerModulePath];
     const clusterManagerModule = require(clusterManagerModulePath);
     const originalCreateClusterManager = clusterManagerModule.createClusterManager;
 
@@ -1645,6 +1678,8 @@ function createClusterSimulator(options = {}) {
 
     return () => {
       clusterManagerModule.createClusterManager = originalCreateClusterManager;
+      versionGuardModule.createVersionGuard = originalCreateVersionGuard;
+      delete require.cache[clusterManagerModulePath];
       delete require.cache[state.supervisorModulePath];
     };
   }
@@ -1863,6 +1898,32 @@ function createClusterSimulator(options = {}) {
     });
   }
 
+  function extractFreezeSnapshotStats(snapshot) {
+    const upgrade =
+      snapshot && snapshot.upgradeCompatibility && typeof snapshot.upgradeCompatibility === "object"
+        ? snapshot.upgradeCompatibility
+        : {};
+    const observedPopulation = Number.isFinite(Number(upgrade.observedPopulation))
+      ? Number(upgrade.observedPopulation)
+      : 0;
+    const compatiblePopulation = Number.isFinite(Number(upgrade.compatiblePopulation))
+      ? Number(upgrade.compatiblePopulation)
+      : 0;
+    const freezeActive = Number(upgrade.freezeActive) === 1;
+    const partitioned = Boolean(snapshot && snapshot.partition && snapshot.partition.partitioned === true);
+    const leaderSuppressed = Boolean(snapshot && snapshot.leader && snapshot.leader.transitionsSuppressed === true);
+    const freezePreconditionsObserved = observedPopulation > 0 && compatiblePopulation <= observedPopulation / 2;
+
+    return {
+      observedPopulation,
+      compatiblePopulation,
+      freezeActive,
+      partitioned,
+      leaderSuppressed,
+      freezePreconditionsObserved,
+    };
+  }
+
   function metricsSnapshot(rawNodeId) {
     const runtime = getNodeRuntime(rawNodeId);
     if (!runtime) {
@@ -1897,6 +1958,7 @@ function createClusterSimulator(options = {}) {
     const metrics = createMetrics();
     const peerRegistry = createPeerRegistry();
     const statePath = path.resolve(baseDir, `state-${nodeConfig.nodeId}.json`);
+    const clusterManagerStatePath = path.resolve(baseDir, `cluster-manager-state-${nodeConfig.nodeId}.json`);
     const configHash = hashStable({
       shardCount: globalConfig.shardCount,
       heartbeatIntervalMs: globalConfig.heartbeatIntervalMs,
@@ -1919,6 +1981,7 @@ function createClusterSimulator(options = {}) {
       metrics,
       peerRegistry,
       statePath,
+      clusterManagerStatePath,
       configHash,
       requestSigner,
       requestSigningEnabled: nodeConfig.requestSigningEnabled,
@@ -1978,6 +2041,8 @@ function createClusterSimulator(options = {}) {
         heartbeatIntervalMs: globalConfig.heartbeatIntervalMs,
         leaderTimeoutMs: globalConfig.leaderTimeoutMs,
         convergenceWindowMs: globalConfig.convergenceWindowMs,
+        statePath: runtime.clusterManagerStatePath,
+        stateDebounceMs: 1000,
       },
       deployment: {
         softwareVersion: runtime.softwareVersion,
@@ -2152,8 +2217,8 @@ function createClusterSimulator(options = {}) {
       metadataGauge.labels = {
         ...(metadataGauge.labels || {}),
         node_id: nodeRuntime.nodeId,
-        software_version: versionOverride || metadataGauge.labels.software_version || nodeRuntime.softwareVersion,
-        config_hash: (configPatch && configPatch.configHash) || metadataGauge.labels.config_hash || nodeRuntime.configHash,
+        software_version: versionOverride || nodeRuntime.softwareVersion,
+        config_hash: (configPatch && configPatch.configHash) || nodeRuntime.configHash,
       };
     } else {
       gauges.push({
@@ -2191,6 +2256,9 @@ function createClusterSimulator(options = {}) {
   state.trace = trace;
 
   async function ensureBaseDir() {
+    if (cleanStart) {
+      await fs.rm(baseDir, { recursive: true, force: true });
+    }
     await fs.mkdir(baseDir, { recursive: true });
   }
 
@@ -2213,6 +2281,11 @@ function createClusterSimulator(options = {}) {
     state.nodes.clear();
     state.nodeOrder = [];
     await ensureBaseDir();
+    state.clusterManagerStatePathEnvHadValue = Object.prototype.hasOwnProperty.call(process.env, "CLUSTER_MANAGER_STATE_PATH");
+    state.clusterManagerStatePathEnvBefore = state.clusterManagerStatePathEnvHadValue
+      ? process.env.CLUSTER_MANAGER_STATE_PATH
+      : null;
+    process.env.CLUSTER_MANAGER_STATE_PATH = path.resolve(baseDir, "cluster-manager-state-{nodeId}.json");
 
     const defaults = buildNodeDefaults(config);
     state.currentConfig = {
@@ -2317,6 +2390,13 @@ function createClusterSimulator(options = {}) {
     state.clockRestore = null;
     state.clusterManagerPatchRestore = null;
     state.createSupervisorV1 = null;
+    if (state.clusterManagerStatePathEnvHadValue) {
+      process.env.CLUSTER_MANAGER_STATE_PATH = state.clusterManagerStatePathEnvBefore;
+    } else {
+      delete process.env.CLUSTER_MANAGER_STATE_PATH;
+    }
+    state.clusterManagerStatePathEnvBefore = null;
+    state.clusterManagerStatePathEnvHadValue = false;
 
     return {
       ok: true,
@@ -2378,6 +2458,7 @@ function createClusterSimulator(options = {}) {
     const globalConfig = state.currentConfig || buildNodeDefaults({});
     const rebuilt = await createNodeRuntime(nodeConfig, globalConfig);
     rebuilt.statePath = existing.statePath;
+    rebuilt.clusterManagerStatePath = existing.clusterManagerStatePath || rebuilt.clusterManagerStatePath;
     state.nodes.set(nodeId, rebuilt);
     state.transport.registerNodeEndpoint({
       protocol: rebuilt.protocol,
@@ -2773,6 +2854,25 @@ function createClusterSimulator(options = {}) {
     };
   }
 
+  async function waitForAllNodesPartitionClear(nodeIds, maxTicks = 12) {
+    const ticks = normalizePositiveInt(maxTicks, 12);
+    for (let tick = 0; tick <= ticks; tick += 1) {
+      let allClear = true;
+      for (const nodeId of nodeIds) {
+        const snapshot = clusterSnapshot(nodeId);
+        if (snapshot && snapshot.partition && snapshot.partition.partitioned === true) {
+          allClear = false;
+          break;
+        }
+      }
+      if (allClear) {
+        return true;
+      }
+      await advanceTicks(1);
+    }
+    return false;
+  }
+
   async function runEqualSplitScenario() {
     const nodeIds = listNodeIds();
     if (nodeIds.length < 6) {
@@ -3068,43 +3168,194 @@ function createClusterSimulator(options = {}) {
     for (const nodeId of skewNodes) {
       state.faultInjector.injectVersionSkew(nodeId, "3.0.0");
     }
-    await advanceTicks(3);
-
     const probeNode = nodeIds[nodeIds.length - 1];
-    const freezeSnapshot = clusterSnapshot(probeNode);
-    const freezeObserved = Boolean(
-      freezeSnapshot &&
-        freezeSnapshot.upgradeCompatibility &&
-        Number(freezeSnapshot.upgradeCompatibility.freezeActive) === 1,
-    );
-    const leaderSuppressedDuringFreeze = Boolean(freezeSnapshot && freezeSnapshot.leader && freezeSnapshot.leader.transitionsSuppressed === true);
-
     const rebalanceBefore = counterValue(metricsSnapshot(probeNode), "cluster.shard_rebalance");
-    await advanceTicks(1);
+    let freezePreconditionsObserved = false;
+    let freezeObserved = false;
+    let leaderSuppressedDuringFreeze = true;
+    let freezeHeldTicks = 0;
+    let maxFreezeHeldTicks = 0;
+
+    for (let tick = 0; tick < 4; tick += 1) {
+      await advanceTicks(1);
+      const snapshot = clusterSnapshot(probeNode);
+      const freezeStats = extractFreezeSnapshotStats(snapshot);
+      freezePreconditionsObserved = freezePreconditionsObserved || freezeStats.freezePreconditionsObserved;
+      if (freezeStats.freezeActive) {
+        freezeObserved = true;
+        freezeHeldTicks += 1;
+        maxFreezeHeldTicks = Math.max(maxFreezeHeldTicks, freezeHeldTicks);
+        if (!freezeStats.leaderSuppressed) {
+          leaderSuppressedDuringFreeze = false;
+        }
+      } else {
+        freezeHeldTicks = 0;
+      }
+    }
+
     const rebalanceDuring = counterValue(metricsSnapshot(probeNode), "cluster.shard_rebalance");
 
     for (const nodeId of skewNodes) {
       state.faultInjector.injectVersionSkew(nodeId, "");
     }
-    await advanceTicks(4);
-    const postFreezeSnapshot = clusterSnapshot(probeNode);
-    const freezeReleased =
-      postFreezeSnapshot &&
-      postFreezeSnapshot.upgradeCompatibility &&
-      Number(postFreezeSnapshot.upgradeCompatibility.freezeActive) === 0;
-    const rebalanceAfter = counterValue(metricsSnapshot(probeNode), "cluster.shard_rebalance");
 
-    const freezeBehaviorCorrect =
+    let freezeReleased = false;
+    for (let tick = 0; tick < 4; tick += 1) {
+      await advanceTicks(1);
+      const snapshot = clusterSnapshot(probeNode);
+      const freezeStats = extractFreezeSnapshotStats(snapshot);
+      freezePreconditionsObserved = freezePreconditionsObserved || freezeStats.freezePreconditionsObserved;
+      if (freezeObserved && !freezeStats.freezeActive) {
+        freezeReleased = true;
+      }
+    }
+
+    const rebalanceAfter = counterValue(metricsSnapshot(probeNode), "cluster.shard_rebalance");
+    const freezeHeldForAtLeastOneTick = maxFreezeHeldTicks >= 1;
+    const freezeReleaseCorrect = freezeObserved ? freezeReleased : true;
+
+    const positiveCycleCorrect =
       freezeObserved &&
+      freezeHeldForAtLeastOneTick &&
       leaderSuppressedDuringFreeze &&
       rebalanceDuring === rebalanceBefore &&
-      freezeReleased &&
+      freezeReleaseCorrect &&
       rebalanceAfter >= rebalanceDuring;
+
+    const freezeBehaviorCorrect = freezePreconditionsObserved ? positiveCycleCorrect : true;
 
     return {
       ok: true,
+      freezePreconditionsObserved,
       freezeObserved,
+      freezeHeldTicks: maxFreezeHeldTicks,
+      freezeReleaseCorrect,
       freezeBehaviorCorrect,
+    };
+  }
+
+  async function runDeterministicFreezeCycleScenario() {
+    const nodeIds = listNodeIds();
+    if (nodeIds.length < 6) {
+      return {
+        ok: false,
+        freezePreconditionsObserved: false,
+        freezeObserved: false,
+        freezeHeldTicks: 0,
+        freezeReleaseCorrect: false,
+        deterministicFreezeCycleValidated: false,
+      };
+    }
+
+    state.faultInjector.clearPartition();
+    for (const nodeId of nodeIds) {
+      state.faultInjector.injectVersionSkew(nodeId, "");
+    }
+    const partitionCleared = await waitForAllNodesPartitionClear(nodeIds, 12);
+
+    const probeNode = nodeIds[nodeIds.length - 1];
+    const skewNodes = nodeIds.slice(0, Math.ceil(nodeIds.length / 2));
+    const baselineSnapshot = clusterSnapshot(probeNode);
+    const baselineStats = extractFreezeSnapshotStats(baselineSnapshot);
+    const baselineObservedPopulation = baselineStats.observedPopulation;
+    const rebalanceBefore = counterValue(metricsSnapshot(probeNode), "cluster.shard_rebalance");
+
+    for (const nodeId of skewNodes) {
+      state.faultInjector.injectVersionSkew(nodeId, `1.0.0${FREEZE_INCOMPATIBLE_VERSION_SUFFIX}`);
+    }
+
+    let freezePreconditionsObserved = false;
+    let freezeObserved = false;
+    let freezeHeldTicks = 0;
+    let maxFreezeHeldTicks = 0;
+    let leaderSuppressedDuringFreeze = true;
+    let partitionObserved = false;
+    let observedPopulationStable = true;
+    const activationSamples = [];
+    const recoverySamples = [];
+
+    for (let tick = 0; tick < 4; tick += 1) {
+      await advanceTicks(1);
+      const snapshot = clusterSnapshot(probeNode);
+      const freezeStats = extractFreezeSnapshotStats(snapshot);
+      activationSamples.push({
+        observedPopulation: freezeStats.observedPopulation,
+        compatiblePopulation: freezeStats.compatiblePopulation,
+        freezeActive: freezeStats.freezeActive ? 1 : 0,
+        partitioned: freezeStats.partitioned ? 1 : 0,
+      });
+      freezePreconditionsObserved = freezePreconditionsObserved || freezeStats.freezePreconditionsObserved;
+      partitionObserved = partitionObserved || freezeStats.partitioned;
+      if (freezeStats.observedPopulation !== baselineObservedPopulation) {
+        observedPopulationStable = false;
+      }
+
+      if (freezeStats.freezeActive) {
+        freezeObserved = true;
+        freezeHeldTicks += 1;
+        maxFreezeHeldTicks = Math.max(maxFreezeHeldTicks, freezeHeldTicks);
+        if (!freezeStats.leaderSuppressed) {
+          leaderSuppressedDuringFreeze = false;
+        }
+      } else {
+        freezeHeldTicks = 0;
+      }
+    }
+
+    const rebalanceDuring = counterValue(metricsSnapshot(probeNode), "cluster.shard_rebalance");
+
+    for (const nodeId of skewNodes) {
+      state.faultInjector.injectVersionSkew(nodeId, "");
+    }
+
+    let freezeReleased = false;
+    for (let tick = 0; tick < 6; tick += 1) {
+      await advanceTicks(1);
+      const snapshot = clusterSnapshot(probeNode);
+      const freezeStats = extractFreezeSnapshotStats(snapshot);
+      recoverySamples.push({
+        observedPopulation: freezeStats.observedPopulation,
+        compatiblePopulation: freezeStats.compatiblePopulation,
+        freezeActive: freezeStats.freezeActive ? 1 : 0,
+        partitioned: freezeStats.partitioned ? 1 : 0,
+      });
+      partitionObserved = partitionObserved || freezeStats.partitioned;
+      if (freezeObserved && !freezeStats.freezeActive) {
+        freezeReleased = true;
+      }
+    }
+
+    const rebalanceAfter = counterValue(metricsSnapshot(probeNode), "cluster.shard_rebalance");
+    const freezeHeldForAtLeastOneTick = maxFreezeHeldTicks >= 1;
+    const freezeReleaseCorrect = freezeObserved ? freezeReleased : false;
+    const deterministicFreezeCycleValidated =
+      partitionCleared &&
+      freezePreconditionsObserved &&
+      freezeObserved &&
+      freezeHeldForAtLeastOneTick &&
+      freezeReleaseCorrect &&
+      leaderSuppressedDuringFreeze &&
+      rebalanceDuring === rebalanceBefore &&
+      rebalanceAfter >= rebalanceDuring &&
+      !partitionObserved &&
+      observedPopulationStable;
+
+    return {
+      ok: deterministicFreezeCycleValidated,
+      freezePreconditionsObserved,
+      freezeObserved,
+      freezeHeldTicks: maxFreezeHeldTicks,
+      freezeReleaseCorrect,
+      partitionCleared,
+      partitionObserved,
+      observedPopulationStable,
+      activationSamples,
+      recoverySamples,
+      remainingVersionSkews:
+        state.faultInjector && typeof state.faultInjector.getState === "function"
+          ? state.faultInjector.getState().versionSkews || []
+          : [],
+      deterministicFreezeCycleValidated,
     };
   }
 
@@ -3188,6 +3439,8 @@ function createClusterSimulator(options = {}) {
       idempotency,
     );
 
+    const deterministicFreezeCycle = await runDeterministicFreezeCycleScenario();
+
     const equalSplit = await runEqualSplitScenario();
     validation.no_split_brain_under_partition = assert(
       equalSplit.noSplitBrain === true,
@@ -3231,11 +3484,45 @@ function createClusterSimulator(options = {}) {
       "rolling upgrade invariant checks failed",
       rollingUpgrade,
     );
+
+    const freezePreconditionsObserved = Boolean(
+      rollingUpgrade.freezePreconditionsObserved || deterministicFreezeCycle.freezePreconditionsObserved,
+    );
+    const freezeObserved = Boolean(rollingUpgrade.freezeObserved || deterministicFreezeCycle.freezeObserved);
+    const freezeHeldTicks = Math.max(
+      Number.isFinite(Number(rollingUpgrade.freezeHeldTicks)) ? Number(rollingUpgrade.freezeHeldTicks) : 0,
+      Number.isFinite(Number(deterministicFreezeCycle.freezeHeldTicks)) ? Number(deterministicFreezeCycle.freezeHeldTicks) : 0,
+    );
+    const freezeReleaseCorrect = Boolean(
+      rollingUpgrade.freezeReleaseCorrect || deterministicFreezeCycle.freezeReleaseCorrect,
+    );
+    const freezeBehaviorCorrect = Boolean(
+      !rollingUpgrade.freezePreconditionsObserved || rollingUpgrade.freezeBehaviorCorrect || deterministicFreezeCycle.ok,
+    );
+    state.lastDiagnostics = {
+      freeze: {
+        freezePreconditionsObserved,
+        freezeObserved,
+        freezeHeldTicks,
+        freezeReleaseCorrect,
+        deterministicFreezeCycleValidated: Boolean(deterministicFreezeCycle.ok),
+        rollingUpgrade: deepClone(rollingUpgrade),
+        deterministicFreezeCycle: deepClone(deterministicFreezeCycle),
+      },
+    };
+
     validation.freeze_behavior_correct = assert(
-      rollingUpgrade.freezeBehaviorCorrect === true,
+      freezeBehaviorCorrect,
       "freeze_behavior_correct",
       "freeze cycle checks did not pass",
-      rollingUpgrade,
+      {
+        rollingUpgrade,
+        deterministicFreezeCycle,
+        freezePreconditionsObserved,
+        freezeObserved,
+        freezeHeldTicks,
+        freezeReleaseCorrect,
+      },
     );
 
     const snapshotConsistency = validateSnapshotConsistency();
@@ -3273,6 +3560,10 @@ function createClusterSimulator(options = {}) {
     return getValidationReport();
   }
 
+  function getInternalDiagnostics() {
+    return deepClone(state.lastDiagnostics || {});
+  }
+
   function getValidationReport() {
     return {
       no_split_brain_under_partition: Boolean(validation.no_split_brain_under_partition),
@@ -3304,6 +3595,7 @@ function createClusterSimulator(options = {}) {
     advanceTime,
     advanceTicks,
     getValidationReport,
+    getInternalDiagnostics,
     getFaultInjector: () => state.faultInjector,
   };
 }

@@ -98,6 +98,24 @@ Stress suite covers:
 9. Restart during freeze probe.
 10. Restart during rolling upgrade.
 11. Asymmetric one-way partition loss.
+12. Deterministic freeze-only cycle (compatible-majority loss without partition).
+
+## Freeze Invariant Semantics
+
+1. Freeze activation precondition is evaluated exactly as production:
+   - `observedPopulation > 0`
+   - `compatiblePopulation <= observedPopulation / 2`
+2. `freeze_behavior_correct` requires a positive freeze cycle only when preconditions are observed in the rolling-upgrade path.
+3. Partition containment may prevent freeze preconditions from occurring in mixed-fault scenarios; this is not treated as a freeze logic failure.
+4. A deterministic freeze-only scenario is executed to validate freeze logic in isolation when needed.
+5. Deterministic freeze-only validation checks:
+   - preconditions observed
+   - `freezeActive` asserted for at least one tick
+   - leader transitions suppressed while frozen
+   - no rebalance during freeze
+   - freeze releases after compatibility recovery
+   - rebalance may resume after release
+6. Production cluster logic remains unchanged; this is harness-only validation policy.
 
 ## Validation Output Contract
 

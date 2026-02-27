@@ -22,6 +22,14 @@ function membershipKey(nodeIds) {
   return normalizeMembership(nodeIds).join(",");
 }
 
+function normalizeNonNegativeInt(value, fallback = 0) {
+  const parsed = Number(value);
+  if (!Number.isFinite(parsed) || parsed < 0) {
+    return fallback;
+  }
+  return Math.floor(parsed);
+}
+
 function createPartitionDetector(options = {}) {
   const listeners = new Set();
   let partitioned = false;
@@ -31,6 +39,7 @@ function createPartitionDetector(options = {}) {
   let lastStableMembershipSize = 0;
   let recoveryMembershipKey = "";
   let recoveryStableTicks = 0;
+  let restored = false;
 
   function emitPartitionChange(payload) {
     for (const callback of listeners) {
@@ -54,6 +63,65 @@ function createPartitionDetector(options = {}) {
     };
   }
 
+  function getState() {
+    return {
+      partitioned,
+      partitionEnteredAt,
+      partitionEntryBaselineSize,
+      lastStableMembershipKey,
+      lastStableMembershipSize,
+      recoveryMembershipKey,
+      recoveryStableTicks,
+      restored,
+    };
+  }
+
+  function exportState() {
+    return {
+      ...getState(),
+    };
+  }
+
+  function restoreState(state = {}, restoreOptions = {}) {
+    const stableNodeIds = normalizeMembership(
+      Array.isArray(restoreOptions.stableHealthyNodeIds)
+        ? restoreOptions.stableHealthyNodeIds
+        : options.initialStableHealthyNodeIds,
+    );
+    const fallbackStableKey = membershipKey(stableNodeIds);
+    const fallbackStableSize = stableNodeIds.length;
+
+    const nextLastStableMembershipKey =
+      typeof state.lastStableMembershipKey === "string" && state.lastStableMembershipKey.trim()
+        ? state.lastStableMembershipKey.trim()
+        : fallbackStableKey;
+    const nextLastStableMembershipSize = normalizeNonNegativeInt(state.lastStableMembershipSize, fallbackStableSize);
+    const nextPartitioned = Boolean(state.partitioned);
+
+    lastStableMembershipKey = nextLastStableMembershipKey;
+    lastStableMembershipSize = nextLastStableMembershipSize;
+    partitioned = nextPartitioned;
+    restored = true;
+
+    if (!partitioned) {
+      partitionEnteredAt = 0;
+      partitionEntryBaselineSize = 0;
+      recoveryMembershipKey = "";
+      recoveryStableTicks = 0;
+      return getState();
+    }
+
+    partitionEnteredAt = normalizeNonNegativeInt(state.partitionEnteredAt, 0);
+    partitionEntryBaselineSize = normalizeNonNegativeInt(state.partitionEntryBaselineSize, 0);
+    if (partitionEntryBaselineSize <= 0) {
+      partitionEntryBaselineSize = Math.max(0, nextLastStableMembershipSize, fallbackStableSize);
+    }
+    recoveryMembershipKey = "";
+    recoveryStableTicks = 0;
+
+    return getState();
+  }
+
   function evaluateMembership(input = {}) {
     const now = Number.isFinite(Number(input.now)) ? Math.max(0, Number(input.now)) : Date.now();
     const stableNodeIds = normalizeMembership(input.stableHealthyNodeIds);
@@ -70,8 +138,35 @@ function createPartitionDetector(options = {}) {
     let entered = false;
     let recovered = false;
     let reason = "steady";
+    const restoredPartitionGuard = restored === true && partitioned === true;
 
-    if (!partitioned) {
+    if (restoredPartitionGuard) {
+      const recoveryThreshold = Math.ceil(partitionEntryBaselineSize / 2);
+      const thresholdMet = observedSize >= recoveryThreshold;
+      if (!thresholdMet) {
+        reason = "recovery_threshold_not_met";
+        recoveryMembershipKey = "";
+        recoveryStableTicks = 0;
+      } else {
+        if (observedKey && observedKey === recoveryMembershipKey) {
+          recoveryStableTicks += 1;
+        } else {
+          recoveryMembershipKey = observedKey;
+          recoveryStableTicks = observedKey ? 1 : 0;
+        }
+
+        reason = "recovery_stabilizing";
+        if (recoveryStableTicks >= 2) {
+          partitioned = false;
+          recovered = true;
+          reason = "recovered_stable_membership";
+          partitionEnteredAt = 0;
+          partitionEntryBaselineSize = 0;
+          recoveryMembershipKey = "";
+          recoveryStableTicks = 0;
+        }
+      }
+    } else if (!partitioned) {
       if (stableSize > 0 && observedSize <= stableSize / 2) {
         partitioned = true;
         entered = true;
@@ -122,6 +217,10 @@ function createPartitionDetector(options = {}) {
       });
     }
 
+    if (restored) {
+      restored = false;
+    }
+
     return {
       partitioned,
       entered,
@@ -140,6 +239,7 @@ function createPartitionDetector(options = {}) {
       thresholdMet: partitionEntryBaselineSize > 0 ? observedSize >= Math.ceil(partitionEntryBaselineSize / 2) : false,
       lastStableMembershipKey,
       lastStableMembershipSize,
+      restored,
     };
   }
 
@@ -154,6 +254,9 @@ function createPartitionDetector(options = {}) {
   return {
     isPartitioned,
     onPartitionChange,
+    getState,
+    exportState,
+    restoreState,
     evaluateMembership,
   };
 }

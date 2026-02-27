@@ -1,8 +1,10 @@
 const crypto = require("node:crypto");
 const http = require("node:http");
 const https = require("node:https");
+const path = require("node:path");
 
 const { STATUS_DOWN, STATUS_UP } = require("../federation/peer-registry.js");
+const { createStateManager } = require("../state/state-manager.js");
 const { createVersionGuard } = require("../deployment/version-guard.js");
 const { createLeaderElection } = require("./leader-election.js");
 const { createPartitionDetector } = require("./partition-detector.js");
@@ -12,6 +14,8 @@ const DEFAULT_HEARTBEAT_INTERVAL_MS = 5000;
 const DEFAULT_LEADER_TIMEOUT_MS = 15000;
 const DEFAULT_CONVERGENCE_WINDOW_MS = 10000;
 const DEFAULT_METRICS_FETCH_TIMEOUT_MS = 3000;
+const DEFAULT_CLUSTER_STATE_DEBOUNCE_MS = 1000;
+const CLUSTER_CONTROL_STATE_VERSION = 1;
 
 function parsePositiveInt(value, fallback) {
   const parsed = Number.parseInt(String(value ?? "").trim(), 10);
@@ -19,6 +23,46 @@ function parsePositiveInt(value, fallback) {
     return fallback;
   }
   return parsed;
+}
+
+function parseNonNegativeInt(value, fallback = 0) {
+  const parsed = Number(value);
+  if (!Number.isFinite(parsed) || parsed < 0) {
+    return fallback;
+  }
+  return Math.floor(parsed);
+}
+
+function parseBoolean(value, fallback = false) {
+  if (typeof value === "boolean") {
+    return value;
+  }
+  if (typeof value === "number") {
+    return value !== 0;
+  }
+  if (typeof value === "string") {
+    const normalized = value.trim().toLowerCase();
+    if (normalized === "true" || normalized === "1" || normalized === "yes") {
+      return true;
+    }
+    if (normalized === "false" || normalized === "0" || normalized === "no") {
+      return false;
+    }
+  }
+  return fallback;
+}
+
+function resolveClusterStatePath(rawPath, nodeId) {
+  const fromOptions = typeof rawPath === "string" ? rawPath.trim() : "";
+  const fromEnv = typeof process.env.CLUSTER_MANAGER_STATE_PATH === "string" ? process.env.CLUSTER_MANAGER_STATE_PATH.trim() : "";
+  const candidate = fromOptions || fromEnv;
+  if (candidate) {
+    if (candidate.includes("{nodeId}")) {
+      return path.resolve(candidate.replaceAll("{nodeId}", nodeId));
+    }
+    return path.resolve(candidate);
+  }
+  return path.resolve(`./data/cluster-manager-state-${nodeId}.json`);
 }
 
 function normalizeNodeId(value) {
@@ -309,6 +353,15 @@ function membershipKey(nodeIds) {
     .join(",");
 }
 
+function computeSnapshotVersionForMembershipIdentity(identityKey) {
+  if (!identityKey) {
+    return 0;
+  }
+  const digest = crypto.createHash("sha256").update(identityKey, "utf8").digest();
+  const raw = digest.readUInt32BE(0);
+  return raw === 0 ? 1 : raw;
+}
+
 function createClusterManager(options = {}) {
   const localNodeId = normalizeNodeId(options.nodeId || options.localNodeId);
   if (!localNodeId) {
@@ -335,6 +388,11 @@ function createClusterManager(options = {}) {
   const leaderTimeoutMs = parsePositiveInt(options.leaderTimeoutMs, DEFAULT_LEADER_TIMEOUT_MS);
   const convergenceWindowMs = parsePositiveInt(options.convergenceWindowMs, DEFAULT_CONVERGENCE_WINDOW_MS);
   const metricsFetchTimeoutMs = parsePositiveInt(options.metricsFetchTimeoutMs, DEFAULT_METRICS_FETCH_TIMEOUT_MS);
+  const clusterStatePath = resolveClusterStatePath(options.statePath || (options.persistence && options.persistence.path), localNodeId);
+  const clusterStateDebounceMs = parsePositiveInt(
+    options.stateDebounceMs || (options.persistence && options.persistence.debounceMs),
+    DEFAULT_CLUSTER_STATE_DEBOUNCE_MS,
+  );
   const localSoftwareVersion =
     typeof options.softwareVersion === "string" && options.softwareVersion.trim() ? options.softwareVersion.trim() : "0.0.0";
   const localConfigHash = typeof options.configHash === "string" ? options.configHash.trim() : "unknown";
@@ -373,8 +431,16 @@ function createClusterManager(options = {}) {
   let pendingStableTicks = 0;
   let lastObservedMembershipKey = "";
   let freezeActive = false;
+  let freezeHoldRestored = false;
+  let freezeHoldPendingKey = "";
+  let freezeHoldFirstSeenAt = 0;
+  let freezeHoldStableTicks = 0;
   let observedPopulation = 0;
   let compatiblePopulation = 0;
+  let controlStateInitialized = false;
+  let controlStateRestored = false;
+  let restoreBarrierActive = false;
+  let restoreBarrierPending = false;
 
   const configMismatchStateByPeer = new Map();
   const configMismatchReasonByPeer = new Map();
@@ -428,12 +494,14 @@ function createClusterManager(options = {}) {
               return null;
             }
             const status = node && node.status === STATUS_UP ? STATUS_UP : STATUS_DOWN;
+            const registryStatus = node && node.registryStatus === STATUS_UP ? STATUS_UP : STATUS_DOWN;
             const healthy = Boolean(node && node.healthy === true) || status === STATUS_UP;
             return {
               nodeId,
               isLocal: Boolean(node && node.isLocal),
               healthy,
               status: healthy ? STATUS_UP : STATUS_DOWN,
+              registryStatus,
               capabilities: normalizeCapabilities(node && node.capabilities),
               softwareVersion: node && typeof node.softwareVersion === "string" ? node.softwareVersion.trim() : "",
               configHash: node && typeof node.configHash === "string" ? node.configHash.trim() : "",
@@ -499,6 +567,13 @@ function createClusterManager(options = {}) {
 
   function buildPublishedSnapshot({ convergenceDelayActive, leaderComputation }) {
     const partitioned = partitionDetector.isPartitioned();
+    const computedCandidate =
+      leaderComputation && typeof leaderComputation.candidate === "string" && leaderComputation.candidate
+        ? leaderComputation.candidate
+        : null;
+    const transitionsSuppressed = Boolean(leaderComputation && leaderComputation.transitionsSuppressed);
+    const currentLeader = leaderElection.getCurrentLeader();
+    const effectiveLeader = currentLeader || (transitionsSuppressed ? computedCandidate : null);
 
     return deepFreeze({
       ...stableSnapshot,
@@ -528,13 +603,10 @@ function createClusterManager(options = {}) {
         pendingSince: pendingFirstSeenAt,
       },
       leader: {
-        current: leaderElection.getCurrentLeader(),
+        current: effectiveLeader,
         computedFromStableSnapshot: Boolean(leaderComputation && leaderComputation.computedFromStableSnapshot),
-        transitionsSuppressed: Boolean(leaderComputation && leaderComputation.transitionsSuppressed),
-        candidate:
-          leaderComputation && typeof leaderComputation.candidate === "string" && leaderComputation.candidate
-            ? leaderComputation.candidate
-            : null,
+        transitionsSuppressed,
+        candidate: computedCandidate,
       },
       upgradeCompatibility: {
         localSoftwareVersion,
@@ -572,6 +644,7 @@ function createClusterManager(options = {}) {
       isLocal: true,
       healthy: true,
       status: STATUS_UP,
+      registryStatus: STATUS_UP,
       capabilities: localCapabilities.slice(),
       softwareVersion: localSoftwareVersion,
       configHash: localConfigHash,
@@ -602,6 +675,7 @@ function createClusterManager(options = {}) {
         isLocal: false,
         healthy: effectiveStatus === STATUS_UP,
         status: effectiveStatus,
+        registryStatus: peer.status === STATUS_UP ? STATUS_UP : STATUS_DOWN,
         capabilities: normalizeCapabilities(peer.capabilities),
         softwareVersion: peerMetadata && typeof peerMetadata.softwareVersion === "string" ? peerMetadata.softwareVersion : "",
         configHash: peerMetadata && typeof peerMetadata.configHash === "string" ? peerMetadata.configHash : "",
@@ -633,12 +707,21 @@ function createClusterManager(options = {}) {
   }
 
   function promoteObservedToStable(now) {
-    stableSnapshotVersion += 1;
+    if (restoreBarrierActive) {
+      return false;
+    }
+    const observedMembershipIdentity = snapshotMembershipKey(observedSnapshot);
+    const stableMembershipIdentity = snapshotMembershipKey(stableSnapshot);
+    if (observedMembershipIdentity === stableMembershipIdentity) {
+      return false;
+    }
+    stableSnapshotVersion = computeSnapshotVersionForMembershipIdentity(observedMembershipIdentity);
     stableSnapshot = createSnapshot({
       version: stableSnapshotVersion,
       createdAt: now,
       nodes: observedSnapshot.nodes,
     });
+    return true;
   }
 
   function evaluateShardRebalance(snapshot) {
@@ -690,6 +773,7 @@ function createClusterManager(options = {}) {
 
   function recomputeLeaderFromStable(options = {}) {
     const suppressTransitions = Boolean(options.suppressTransitions);
+    const suppressMetrics = Boolean(options.suppressMetrics);
     const stableHealthyNodeIds = stableSnapshot.healthyNodes
       .map((node) => normalizeNodeId(node && node.nodeId))
       .filter(Boolean)
@@ -714,7 +798,7 @@ function createClusterManager(options = {}) {
       timestamp: now,
     });
 
-    if (election.changed && election.currentLeader) {
+    if (!suppressMetrics && election.changed && election.currentLeader) {
       metrics.increment("cluster.leader_elected");
     }
 
@@ -724,6 +808,168 @@ function createClusterManager(options = {}) {
       transitionsSuppressed: false,
       candidate: election.currentLeader,
     };
+  }
+
+  function resetFreezeHoldProgress() {
+    freezeHoldPendingKey = "";
+    freezeHoldFirstSeenAt = 0;
+    freezeHoldStableTicks = 0;
+  }
+
+  function buildPersistentClusterState() {
+    const stableSnapshotMembership = {
+      nodes: Array.isArray(stableSnapshot.nodes) ? stableSnapshot.nodes.map((node) => ({ ...node })) : [],
+    };
+    const partitionState = partitionDetector.exportState();
+
+    return {
+      stableSnapshot: stableSnapshotMembership,
+      freeze: {
+        active: Boolean(freezeActive),
+        holdRestored: Boolean(freezeHoldRestored),
+      },
+      partition: {
+        partitioned: Boolean(partitionState.partitioned),
+        partitionEntryBaselineSize: parseNonNegativeInt(partitionState.partitionEntryBaselineSize, 0),
+        partitionEnteredAt: parseNonNegativeInt(partitionState.partitionEnteredAt, 0),
+        lastStableMembershipKey:
+          typeof partitionState.lastStableMembershipKey === "string" ? partitionState.lastStableMembershipKey : "",
+        lastStableMembershipSize: parseNonNegativeInt(partitionState.lastStableMembershipSize, 0),
+        recoveryMembershipKey: typeof partitionState.recoveryMembershipKey === "string" ? partitionState.recoveryMembershipKey : "",
+        recoveryStableTicks: parseNonNegativeInt(partitionState.recoveryStableTicks, 0),
+      },
+    };
+  }
+
+  async function restorePersistedClusterState(payload = {}) {
+    const persisted = payload && typeof payload === "object" ? payload : {};
+    const persistedStableSnapshot =
+      persisted.stableSnapshot && typeof persisted.stableSnapshot === "object" ? persisted.stableSnapshot : null;
+    if (persistedStableSnapshot && Array.isArray(persistedStableSnapshot.nodes)) {
+      const restoredStableMembershipSnapshot = createSnapshot({
+        version: 0,
+        createdAt: 0,
+        nodes: persistedStableSnapshot.nodes,
+      });
+      const restoredMembershipIdentity = snapshotMembershipKey(restoredStableMembershipSnapshot);
+      stableSnapshotVersion = computeSnapshotVersionForMembershipIdentity(restoredMembershipIdentity);
+      stableSnapshot = createSnapshot({
+        version: stableSnapshotVersion,
+        createdAt: 0,
+        nodes: persistedStableSnapshot.nodes,
+      });
+    } else {
+      stableSnapshotVersion = 0;
+      stableSnapshot = createSnapshot({
+        version: 0,
+        createdAt: 0,
+        nodes: [],
+      });
+    }
+
+    observedSnapshotVersion = 0;
+    observedSnapshot = createSnapshot({
+      version: observedSnapshotVersion,
+      createdAt: 0,
+      nodes: [],
+    });
+
+    hasShardBaseline = false;
+    previousMembershipKey = "";
+    previousAssignmentDigest = "";
+    previousNonSelfHealthyCount = 0;
+    resetPendingPromotion();
+    lastObservedMembershipKey = "";
+
+    const persistedFreeze = persisted.freeze && typeof persisted.freeze === "object" ? persisted.freeze : {};
+    freezeActive = parseBoolean(persistedFreeze.active, false);
+    freezeHoldRestored = freezeActive || parseBoolean(persistedFreeze.holdRestored, false);
+    resetFreezeHoldProgress();
+
+    observedPopulation = 0;
+    compatiblePopulation = 0;
+
+    const restoredPartitionState =
+      persisted.partition && typeof persisted.partition === "object" ? persisted.partition : {};
+    const detectorState = partitionDetector.restoreState(restoredPartitionState, {
+      stableHealthyNodeIds: stableSnapshot.healthyNodes.map((node) => node.nodeId),
+    });
+
+    lastPartitionEvaluation = {
+      ...lastPartitionEvaluation,
+      partitioned: detectorState.partitioned,
+      entered: false,
+      recovered: false,
+      reason: "restored",
+      timestamp: parseNonNegativeInt(Date.now(), 0),
+      stableMembershipKey: snapshotMembershipKey(stableSnapshot),
+      stableSize: stableSnapshot.healthyNodes.length,
+      observedMembershipKey: "",
+      observedSize: 0,
+      partitionEnteredAt: parseNonNegativeInt(detectorState.partitionEnteredAt, 0),
+      partitionEntryBaselineSize: parseNonNegativeInt(detectorState.partitionEntryBaselineSize, 0),
+      recoveryMembershipKey: typeof detectorState.recoveryMembershipKey === "string" ? detectorState.recoveryMembershipKey : "",
+      recoveryStableTicks: parseNonNegativeInt(detectorState.recoveryStableTicks, 0),
+      recoveryThreshold: Math.ceil(Math.max(0, parseNonNegativeInt(detectorState.partitionEntryBaselineSize, 0)) / 2),
+      thresholdMet: false,
+      lastStableMembershipKey:
+        typeof detectorState.lastStableMembershipKey === "string" ? detectorState.lastStableMembershipKey : "",
+      lastStableMembershipSize: parseNonNegativeInt(detectorState.lastStableMembershipSize, 0),
+    };
+
+    const leaderComputation = recomputeLeaderFromStable({
+      suppressTransitions: true,
+      suppressMetrics: true,
+    });
+    publishedSnapshot = buildPublishedSnapshot({
+      convergenceDelayActive: freezeActive ? 1 : 0,
+      leaderComputation,
+    });
+
+    controlStateRestored = true;
+    restoreBarrierPending = true;
+  }
+
+  const clusterStateManager = createStateManager({
+    version: CLUSTER_CONTROL_STATE_VERSION,
+    path: clusterStatePath,
+    debounceMs: clusterStateDebounceMs,
+    buildState: buildPersistentClusterState,
+    applyState: restorePersistedClusterState,
+    onError: () => {},
+  });
+
+  function scheduleClusterStatePersist(reason = "cluster_reconcile") {
+    if (!controlStateInitialized) {
+      return;
+    }
+    clusterStateManager.schedulePersist(reason);
+  }
+
+  async function ensureControlStateInitialized() {
+    if (controlStateInitialized) {
+      return;
+    }
+    await clusterStateManager.initialize();
+    controlStateInitialized = true;
+    if (!controlStateRestored) {
+      restoreBarrierPending = false;
+      const leaderComputation = recomputeLeaderFromStable({
+        suppressTransitions: false,
+        suppressMetrics: true,
+      });
+      publishedSnapshot = buildPublishedSnapshot({
+        convergenceDelayActive: 0,
+        leaderComputation,
+      });
+    }
+  }
+
+  async function shutdownControlState() {
+    if (!controlStateInitialized) {
+      return;
+    }
+    await clusterStateManager.shutdown();
   }
 
   async function validatePeerClusterConfig(peer) {
@@ -863,6 +1109,10 @@ function createClusterManager(options = {}) {
     const strictMode = Boolean(options.strictMode);
 
     try {
+      await ensureControlStateInitialized();
+      if (!restoreBarrierActive && restoreBarrierPending) {
+        restoreBarrierActive = true;
+      }
       publishClusterConfigGauges();
       federationHeartbeat.stop();
       await federationHeartbeat.runOnce();
@@ -984,17 +1234,45 @@ function createClusterManager(options = {}) {
         createdAt: now,
         nodes: buildNodesFromPeers(peers, now),
       });
-      const versionFreezeState = computeVersionFreezeState(observedSnapshot);
-      observedPopulation = versionFreezeState.observedPopulation;
-      compatiblePopulation = versionFreezeState.compatiblePopulation;
-      freezeActive = versionFreezeState.freezeActive;
 
       lastObservedMembershipKey = snapshotMembershipKey(observedSnapshot);
-      lastPartitionEvaluation = partitionDetector.evaluateMembership({
-        stableHealthyNodeIds: stableSnapshot.healthyNodes.map((node) => node.nodeId),
-        observedHealthyNodeIds: observedSnapshot.healthyNodes.map((node) => node.nodeId),
-        now,
-      });
+      const stableHealthyNodeIds = stableSnapshot.healthyNodes.map((node) => node.nodeId);
+      const observedHealthyNodeIds = observedSnapshot.healthyNodes.map((node) => node.nodeId);
+      const stableSize = stableHealthyNodeIds.length;
+      const observedSize = observedHealthyNodeIds.length;
+      const detectorState = partitionDetector.getState();
+      const detectorPartitioned = Boolean(detectorState && detectorState.partitioned);
+      const strictMajorityPresent = stableSize <= 0 ? true : observedSize > stableSize / 2;
+
+      if (detectorPartitioned && !strictMajorityPresent) {
+        lastPartitionEvaluation = {
+          partitioned: true,
+          entered: false,
+          recovered: false,
+          reason: "majority_loss_guard",
+          timestamp: now,
+          stableMembershipKey: membershipKey(stableHealthyNodeIds),
+          stableSize,
+          observedMembershipKey: membershipKey(observedHealthyNodeIds),
+          observedSize,
+          partitionEnteredAt: parseNonNegativeInt(detectorState.partitionEnteredAt, 0),
+          partitionEntryBaselineSize: parseNonNegativeInt(detectorState.partitionEntryBaselineSize, 0),
+          recoveryMembershipKey: typeof detectorState.recoveryMembershipKey === "string" ? detectorState.recoveryMembershipKey : "",
+          recoveryStableTicks: parseNonNegativeInt(detectorState.recoveryStableTicks, 0),
+          recoveryThreshold: Math.ceil(Math.max(0, parseNonNegativeInt(detectorState.partitionEntryBaselineSize, 0)) / 2),
+          thresholdMet: false,
+          lastStableMembershipKey:
+            typeof detectorState.lastStableMembershipKey === "string" ? detectorState.lastStableMembershipKey : "",
+          lastStableMembershipSize: parseNonNegativeInt(detectorState.lastStableMembershipSize, stableSize),
+          restored: false,
+        };
+      } else {
+        lastPartitionEvaluation = partitionDetector.evaluateMembership({
+          stableHealthyNodeIds,
+          observedHealthyNodeIds,
+          now,
+        });
+      }
 
       if (lastPartitionEvaluation.entered) {
         metrics.increment("cluster.partition_detected");
@@ -1004,17 +1282,50 @@ function createClusterManager(options = {}) {
       }
 
       const partitioned = partitionDetector.isPartitioned();
+      const versionFreezeState = computeVersionFreezeState(observedSnapshot);
+      observedPopulation = versionFreezeState.observedPopulation;
+      compatiblePopulation = versionFreezeState.compatiblePopulation;
+
+      if (restoreBarrierActive && freezeHoldRestored) {
+        freezeActive = true;
+      } else if (freezeHoldRestored) {
+        if (partitioned || versionFreezeState.freezeActive) {
+          freezeActive = true;
+          resetFreezeHoldProgress();
+        } else {
+          const holdMembershipKey = snapshotMembershipKey(observedSnapshot);
+          if (freezeHoldPendingKey !== holdMembershipKey) {
+            freezeHoldPendingKey = holdMembershipKey;
+            freezeHoldFirstSeenAt = now;
+            freezeHoldStableTicks = holdMembershipKey ? 1 : 0;
+          } else if (holdMembershipKey) {
+            freezeHoldStableTicks += 1;
+          }
+
+          const holdWindowElapsed = now - freezeHoldFirstSeenAt >= convergenceWindowMs;
+          const holdStableTicksMet = freezeHoldStableTicks >= 2;
+          if (holdWindowElapsed && holdStableTicksMet) {
+            freezeHoldRestored = false;
+            freezeActive = false;
+            resetFreezeHoldProgress();
+          } else {
+            freezeActive = true;
+          }
+        }
+      } else {
+        freezeActive = versionFreezeState.freezeActive;
+        if (!freezeActive) {
+          resetFreezeHoldProgress();
+        }
+      }
+
       let convergenceDelayActive = 0;
 
-      if (stableSnapshot.version === 0) {
-        if (!partitioned && !freezeActive) {
-          promoteObservedToStable(now);
-          evaluateShardRebalance(stableSnapshot);
-          resetPendingPromotion();
-        } else {
-          resetPendingPromotion();
-          convergenceDelayActive = freezeActive ? 1 : 0;
-        }
+      // Restored stable snapshots remain authoritative; replacement only happens through promotion gates
+      // when the cluster is neither partitioned nor frozen and after the restore barrier is cleared.
+      if (restoreBarrierActive) {
+        resetPendingPromotion();
+        convergenceDelayActive = 1;
       } else if (partitioned || freezeActive) {
         resetPendingPromotion();
         convergenceDelayActive = freezeActive ? 1 : 0;
@@ -1025,28 +1336,38 @@ function createClusterManager(options = {}) {
         if (stableMembershipKey === observedMembershipKey) {
           resetPendingPromotion();
         } else {
-          if (pendingMembershipKey !== observedMembershipKey) {
-            pendingMembershipKey = observedMembershipKey;
-            pendingFirstSeenAt = now;
-            pendingStableTicks = 1;
-          } else {
-            pendingStableTicks += 1;
-          }
-
-          const windowElapsed = now - pendingFirstSeenAt >= convergenceWindowMs;
-          const stableTicksMet = pendingStableTicks >= 2;
-          if (windowElapsed && stableTicksMet) {
-            promoteObservedToStable(now);
-            evaluateShardRebalance(stableSnapshot);
+          if (!controlStateRestored && !stableMembershipKey) {
+            const promoted = promoteObservedToStable(now);
+            if (promoted) {
+              evaluateShardRebalance(stableSnapshot);
+            }
             resetPendingPromotion();
           } else {
-            convergenceDelayActive = 1;
+            if (pendingMembershipKey !== observedMembershipKey) {
+              pendingMembershipKey = observedMembershipKey;
+              pendingFirstSeenAt = now;
+              pendingStableTicks = 1;
+            } else {
+              pendingStableTicks += 1;
+            }
+
+            const windowElapsed = now - pendingFirstSeenAt >= convergenceWindowMs;
+            const stableTicksMet = pendingStableTicks >= 2;
+            if (windowElapsed && stableTicksMet) {
+              const promoted = promoteObservedToStable(now);
+              if (promoted) {
+                evaluateShardRebalance(stableSnapshot);
+              }
+              resetPendingPromotion();
+            } else {
+              convergenceDelayActive = 1;
+            }
           }
         }
       }
 
       const leaderComputation = recomputeLeaderFromStable({
-        suppressTransitions: partitioned || freezeActive,
+        suppressTransitions: partitioned || freezeActive || restoreBarrierActive,
       });
 
       publishClusterConfigGauges();
@@ -1060,6 +1381,13 @@ function createClusterManager(options = {}) {
         convergenceDelayActive,
         leaderComputation,
       });
+      scheduleClusterStatePersist("cluster_reconcile");
+      await clusterStateManager.flush();
+
+      if (strictMode && restoreBarrierActive) {
+        restoreBarrierActive = false;
+        restoreBarrierPending = false;
+      }
 
       return {
         ok: true,
@@ -1206,7 +1534,15 @@ function createClusterManager(options = {}) {
     running = true;
     federationHeartbeat.stop();
     try {
+      await ensureControlStateInitialized();
+      if (!restoreBarrierActive && restoreBarrierPending) {
+        restoreBarrierActive = true;
+      }
       await reconcile({ strictMode: true });
+      if (restoreBarrierActive) {
+        restoreBarrierActive = false;
+        restoreBarrierPending = false;
+      }
     } catch (error) {
       running = false;
       throw error;
@@ -1233,6 +1569,8 @@ function createClusterManager(options = {}) {
       timer = null;
     }
     federationHeartbeat.stop();
+    scheduleClusterStatePersist("cluster_stop");
+    void shutdownControlState().catch(() => {});
     return {
       ok: true,
       stopped: true,
@@ -1275,6 +1613,7 @@ function createClusterManager(options = {}) {
     heartbeatIntervalMs,
     leaderTimeoutMs,
     convergenceWindowMs,
+    statePath: clusterStatePath,
     start,
     stop,
     runOnce,
