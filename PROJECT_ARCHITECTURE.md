@@ -684,7 +684,25 @@ Bridge / Director Agent
 
 ---
 
-### 21. Burp Suite Integration (BionicLink)
+### 21. Operational Runbooks & Deployment Topology (Phase 19)
+
+**Playbook**: `/Users/trevorrobey/AI-Agent-BountyHunt/openclaw-bridge/deployment/operational-playbook.md`  
+**Security Model**: `/Users/trevorrobey/AI-Agent-BountyHunt/openclaw-bridge/deployment/security-model.md`  
+**Scaling**: `/Users/trevorrobey/AI-Agent-BountyHunt/openclaw-bridge/deployment/scaling-strategy.md`  
+**Disaster Recovery**: `/Users/trevorrobey/AI-Agent-BountyHunt/openclaw-bridge/deployment/disaster-recovery.md`  
+**Topology**: `/Users/trevorrobey/AI-Agent-BountyHunt/openclaw-bridge/deployment/topology-model.md`  
+**Preflight & Checks**: `preflight-validator.js`, `deploy-check.js` 
+**Purpose**: Prescriptive architecture guidance and operational runbooks prioritizing safety and reliability.
+
+#### Capabilities
+- **Preflight validator**: Pre-flight inspection scripts ensuring environment compliance
+- **SLO/SLI Target definitions**: Established p95 latency error budgets and reliability objectives
+- **Scaling strategy**: Prescriptive scale-up/scale-out node guidance
+- **Disaster Recovery**: Structured workflows for Single-AZ to Region-wide losses
+
+---
+
+### 22. Burp Suite Integration (BionicLink)
 
 **Extension**: BionicLink (custom Burp extension)  
 **Port**: 8090 (HTTP)  
@@ -942,9 +960,17 @@ User receives scan summary with findings
 │   │   ├── leader-election.js     # Deterministic leader election
 │   │   ├── cluster-manager.js     # Shard ownership, reconciliation, heartbeat
 │   │   └── partition-detector.js   # Network partition detection and containment
-│   ├── deployment/                # Deployment topology (Phase 17)
+│   ├── deployment/                # Deployment topology & runbooks (Phase 17, 19)
 │   │   ├── bootstrap-manager.js   # Node startup validation and metadata
-│   │   └── version-guard.js       # Version compatibility guard
+│   │   ├── version-guard.js       # Version compatibility guard
+│   │   ├── deploy-check.js        # Deployment readiness checks
+│   │   ├── preflight-validator.js # Pre-flight condition validation
+│   │   ├── operational-playbook.md# Deployment and operational runbook
+│   │   ├── scaling-strategy.md    # Cluster scale-up/out guidance
+│   │   ├── security-model.md      # Security domain model
+│   │   ├── topology-model.md      # Node placement models
+│   │   ├── disaster-recovery.md   # DR scenarios and procedures
+│   │   └── slo-sli-spec.md        # Latency and availability targets
 │   ├── simulation/                # Cluster simulation (Phase 18)
 │   │   ├── cluster-simulator.js   # Deterministic multi-node simulator
 │   │   └── fault-injector.js      # Fault injection interface
@@ -1242,6 +1268,6 @@ This architecture is designed for security researchers, bug bounty hunters, and 
 
 ---
 
-**Document Version**: 1.10  
-**Last Updated**: February 26, 2026  
+**Document Version**: 1.11  
+**Last Updated**: February 27, 2026  
 **Maintained By**: Trevor Robey

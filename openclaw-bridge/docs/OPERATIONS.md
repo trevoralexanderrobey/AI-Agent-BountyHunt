@@ -395,3 +395,26 @@ node -e "const { createClusterSimulator } = require('./simulation/cluster-simula
 Covers: partitions, equal splits, rolling upgrades, rapid flapping, restart scenarios, mixed load.
 
 Spec: `/Users/trevorrobey/AI-Agent-BountyHunt/openclaw-bridge/docs/cluster-simulation-spec.md`
+
+## Operational runbooks and deployment topologies (Phase 19)
+
+Prescriptive cluster operations rules, disaster recovery workflows, topology selections, scaling, and readiness commands:
+
+```bash
+cd "/Users/trevorrobey/AI-Agent-BountyHunt/openclaw-bridge"
+
+# Execute pre-flight environment checks
+node ./deployment/preflight-validator.js
+
+# Execute deployment config compatibility checks
+node ./deployment/deploy-check.js
+```
+
+Included playbooks:
+- Topology model: single-region, multi-AZ, active-passive, and active-active
+- Scaling nodes up and out under variable load
+- Security and threat models with trust boundaries
+- SLO/SLI tracking and response
+- Disaster recovery playbooks (node failure to full-region loss)
+
+Docs base: `/Users/trevorrobey/AI-Agent-BountyHunt/openclaw-bridge/deployment/`
