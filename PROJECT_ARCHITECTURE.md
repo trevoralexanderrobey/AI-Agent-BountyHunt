@@ -634,6 +634,7 @@ Bridge / Director Agent
 #### Recovery
 - Observed size ≥ `ceil(baseline / 2)` for 2 consecutive ticks
 - Convergence window (10s default) prevents flap-driven rebalance
+- State restoration (`exportState`/`restoreState`) enables preserving partition status across restarts
 
 #### Metrics
 - `cluster.partition_detected`, `cluster.partition_recovered`, `cluster.partition_state`
@@ -1241,6 +1242,6 @@ This architecture is designed for security researchers, bug bounty hunters, and 
 
 ---
 
-**Document Version**: 1.9  
-**Last Updated**: February 25, 2026  
+**Document Version**: 1.10  
+**Last Updated**: February 26, 2026  
 **Maintained By**: Trevor Robey

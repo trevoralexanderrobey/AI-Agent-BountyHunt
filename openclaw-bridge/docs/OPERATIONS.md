@@ -325,7 +325,7 @@ File-backed persistence for supervisor metadata across restarts:
 export STATE_STORE_PATH=/path/to/control-plane-state.json
 ```
 
-Persists: idempotency store, request queue, circuit breaker state, peer registry metadata.
+Persists: idempotency store, request queue, circuit breaker state, peer registry metadata, partition state.
 
 Recovery on startup:
 1. Loads and prunes expired entries automatically
@@ -365,6 +365,7 @@ Automatic partition detection and shard/leader freeze:
 - While partitioned: no snapshot promotion, no rebalance, no remote forwarding
 - Recovery requires restored membership stable for 2 consecutive ticks
 - Convergence window (10s) prevents flap-driven rebalance
+- Partition state persists across process restarts (via Phase 14 control plane storage)
 
 Spec: `/Users/trevorrobey/AI-Agent-BountyHunt/openclaw-bridge/docs/cluster-convergence-spec.md`
 
