@@ -324,10 +324,16 @@ class BaseToolAdapter {
     const requestedLimits = requestedLimitsResult.limits;
 
     let policyLimits;
+    const snapshotPolicy =
+      input && input.policySnapshot && typeof input.policySnapshot === "object" ? input.policySnapshot.policy : null;
+    const effectiveResourcePolicies =
+      snapshotPolicy && snapshotPolicy.resourceCaps && typeof snapshotPolicy.resourceCaps === "object"
+        ? snapshotPolicy.resourceCaps
+        : this.resourcePolicies || undefined;
     try {
       policyLimits = resolveResourceLimits(this.slug, {
         allowDefault: false,
-        policies: this.resourcePolicies || undefined,
+        policies: effectiveResourcePolicies,
       });
     } catch (error) {
       if (error && typeof error.code === "string") {
@@ -391,6 +397,7 @@ class BaseToolAdapter {
         toolSlug: this.slug,
         requestId,
         principalHash: context.principalHash,
+        policySnapshot: input && input.policySnapshot && typeof input.policySnapshot === "object" ? input.policySnapshot : null,
       }),
       timeout,
     );

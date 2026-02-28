@@ -471,6 +471,8 @@ module.exports = {
 };
 
 if (require.main === module) {
+  const bootstrapIsProduction = String(process.env.NODE_ENV || "").trim().toLowerCase() === "production";
+
   const server = createHttpServer({
     httpServer: {
       enabled: true,
@@ -533,6 +535,11 @@ if (require.main === module) {
         rollingUpgradeWindowMinutes: parsePositiveInt(process.env.EXECUTION_ROLLING_UPGRADE_WINDOW_MINUTES, 0),
         rolloutWindowStartedAt: process.env.EXECUTION_ROLLOUT_WINDOW_STARTED_AT || "",
         allowedConfigHashesByVersion: parseJsonObject(process.env.EXECUTION_ALLOWED_CONFIG_HASHES_BY_VERSION, {}),
+        policyVersion: parsePositiveInt(process.env.EXECUTION_POLICY_VERSION, 0),
+        policyManifestPath: bootstrapIsProduction ? "" : process.env.EXECUTION_POLICY_MANIFEST_PATH || "",
+        policySignaturePath: bootstrapIsProduction ? "" : process.env.EXECUTION_POLICY_SIGNATURE_PATH || "",
+        policyPublicKeyPath: bootstrapIsProduction ? "" : process.env.EXECUTION_POLICY_PUBLIC_KEY_PATH || "",
+        policyExpectedHash: process.env.EXECUTION_POLICY_EXPECTED_HASH || "",
       },
       security: {
         executionQuotaPerHour: parsePositiveInt(process.env.EXECUTION_QUOTA_PER_HOUR, 0),

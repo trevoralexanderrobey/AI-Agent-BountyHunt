@@ -144,12 +144,47 @@ function createExecutionQuotaStore(options = {}) {
   const logger = createSafeLogger(options.logger);
 
   const enabled = executionQuotaPerHour > 0 || executionBurstLimitPerMinute > 0;
+  const defaultQuotaSettings = {
+    executionQuotaPerHour,
+    executionBurstLimitPerMinute,
+    redisUrl,
+    redisPrefix,
+  };
 
   let client = options.client || null;
+  let clientRedisUrl = "";
   let connected = false;
 
-  async function ensureClient() {
-    if (!enabled) {
+  function resolveQuotaSettings(policySnapshot) {
+    const policy =
+      policySnapshot && typeof policySnapshot === "object" && policySnapshot.policy && typeof policySnapshot.policy === "object"
+        ? policySnapshot.policy
+        : null;
+    const quotaConfig = policy && typeof policy.quotaConfig === "object" ? policy.quotaConfig : null;
+
+    const resolvedExecutionQuotaPerHour = parsePositiveInteger(
+      quotaConfig && quotaConfig.executionQuotaPerHour,
+      defaultQuotaSettings.executionQuotaPerHour,
+    );
+    const resolvedExecutionBurstLimitPerMinute = parsePositiveInteger(
+      quotaConfig && quotaConfig.executionBurstLimitPerMinute,
+      defaultQuotaSettings.executionBurstLimitPerMinute,
+    );
+    const resolvedRedisUrl =
+      normalizeString(quotaConfig && quotaConfig.quotaRedisUrl) || defaultQuotaSettings.redisUrl;
+    const resolvedRedisPrefix =
+      normalizeString(quotaConfig && quotaConfig.quotaRedisPrefix) || defaultQuotaSettings.redisPrefix;
+
+    return {
+      executionQuotaPerHour: resolvedExecutionQuotaPerHour,
+      executionBurstLimitPerMinute: resolvedExecutionBurstLimitPerMinute,
+      redisUrl: resolvedRedisUrl,
+      redisPrefix: resolvedRedisPrefix || "openclaw:quota",
+    };
+  }
+
+  async function ensureClient(quotaSettings) {
+    if (!quotaSettings || (quotaSettings.executionQuotaPerHour <= 0 && quotaSettings.executionBurstLimitPerMinute <= 0)) {
       return null;
     }
 
@@ -158,17 +193,18 @@ function createExecutionQuotaStore(options = {}) {
         throw new Error("redis module is unavailable");
       }
 
-      if (!redisUrl) {
+      if (!quotaSettings.redisUrl) {
         throw new Error("quotaRedisUrl is required");
       }
 
       client = redisModule.createClient({
-        url: redisUrl,
+        url: quotaSettings.redisUrl,
         socket: {
           reconnectStrategy: false,
           connectTimeout: 3000,
         },
       });
+      clientRedisUrl = quotaSettings.redisUrl;
 
       client.on("error", (error) => {
         logger.error({
@@ -179,6 +215,10 @@ function createExecutionQuotaStore(options = {}) {
       });
     }
 
+    if (client && clientRedisUrl && quotaSettings.redisUrl && clientRedisUrl !== quotaSettings.redisUrl) {
+      throw new Error("quota redis URL changed at runtime");
+    }
+
     if (!connected && typeof client.connect === "function") {
       await client.connect();
       connected = true;
@@ -187,12 +227,13 @@ function createExecutionQuotaStore(options = {}) {
     return client;
   }
 
-  function buildKeys(principalId) {
+  function buildKeys(principalId, keyPrefix) {
     const principalHash = hashPrincipal(principalId);
+    const prefix = normalizeString(keyPrefix) || "openclaw:quota";
     return {
       principalHash,
-      hourKey: `${redisPrefix}:${principalHash}:hour`,
-      minuteKey: `${redisPrefix}:${principalHash}:minute`,
+      hourKey: `${prefix}:${principalHash}:hour`,
+      minuteKey: `${prefix}:${principalHash}:minute`,
     };
   }
 
@@ -206,7 +247,11 @@ function createExecutionQuotaStore(options = {}) {
   }
 
   async function consume(input = {}) {
-    if (!enabled) {
+    const quotaSettings = resolveQuotaSettings(input.policySnapshot);
+    const quotaEnabled =
+      quotaSettings.executionQuotaPerHour > 0 || quotaSettings.executionBurstLimitPerMinute > 0;
+
+    if (!quotaEnabled) {
       return makeResult(true, "QUOTA_DISABLED", "Execution quota is disabled", { skipped: true });
     }
 
@@ -224,7 +269,7 @@ function createExecutionQuotaStore(options = {}) {
 
     let resolvedClient;
     try {
-      resolvedClient = await ensureClient();
+      resolvedClient = await ensureClient(quotaSettings);
     } catch (error) {
       if (production) {
         const principalHash = hashPrincipal(principalId);
@@ -245,7 +290,7 @@ function createExecutionQuotaStore(options = {}) {
       });
     }
 
-    const keys = buildKeys(principalId);
+    const keys = buildKeys(principalId, quotaSettings.redisPrefix);
     const ttlMs = Math.max(3600_000, 2 * 3600_000);
 
     let response;
@@ -255,9 +300,9 @@ function createExecutionQuotaStore(options = {}) {
         arguments: [
           requestId,
           String(3600_000),
-          String(Math.max(0, executionQuotaPerHour)),
+          String(Math.max(0, quotaSettings.executionQuotaPerHour)),
           String(60_000),
-          String(Math.max(0, executionBurstLimitPerMinute)),
+          String(Math.max(0, quotaSettings.executionBurstLimitPerMinute)),
           String(ttlMs),
         ],
       });
@@ -316,8 +361,8 @@ function createExecutionQuotaStore(options = {}) {
   return {
     enabled,
     production,
-    executionQuotaPerHour,
-    executionBurstLimitPerMinute,
+    executionQuotaPerHour: defaultQuotaSettings.executionQuotaPerHour,
+    executionBurstLimitPerMinute: defaultQuotaSettings.executionBurstLimitPerMinute,
     consume,
     close,
   };

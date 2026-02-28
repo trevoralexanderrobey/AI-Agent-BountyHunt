@@ -25,7 +25,8 @@ const { validateResourceLimitsObject } = require("../execution/resource-policy.j
 const { createResourceArbiter, hashPrincipal } = require("../execution/resource-arbiter.js");
 const { createSecretManager } = require("../security/secret-manager.js");
 const { createExecutionQuotaStore } = require("../security/execution-quota-store.js");
-const { createExecutionConfigReconciler } = require("../config/reconciler.js");
+const { createPolicyRuntime } = require("../policy/policy-runtime.js");
+const { loadAndPublishPolicy } = require("../policy/policy-authority.js");
 
 const SKILL_CONFIG = Object.freeze({
   nmap: Object.freeze({
@@ -158,6 +159,18 @@ function resolveExecutionSettings(options = {}) {
     allowedConfigHashesByVersion: isPlainObject(execution.allowedConfigHashesByVersion)
       ? execution.allowedConfigHashesByVersion
       : {},
+    policyVersion: parsePositiveInt(execution.policyVersion, 0),
+    policyManifestPath: production
+      ? ""
+      : normalizeString(execution.policyManifestPath) || normalizeString(process.env.EXECUTION_POLICY_MANIFEST_PATH),
+    policySignaturePath: production
+      ? ""
+      : normalizeString(execution.policySignaturePath) || normalizeString(process.env.EXECUTION_POLICY_SIGNATURE_PATH),
+    policyPublicKeyPath: production
+      ? ""
+      : normalizeString(execution.policyPublicKeyPath) || normalizeString(process.env.EXECUTION_POLICY_PUBLIC_KEY_PATH),
+    policyExpectedHash:
+      normalizeString(execution.policyExpectedHash) || normalizeString(process.env.EXECUTION_POLICY_EXPECTED_HASH),
   };
 }
 
@@ -371,15 +384,64 @@ function createSupervisorV1(options = {}) {
           metrics,
           logger: options.logger || auditLogger,
         });
-  const executionConfigReconciler =
+  const policyRuntime =
     executionSettings.executionMode === "container" && executionSettings.containerRuntimeEnabled
-      ? options.executionConfigReconciler && typeof options.executionConfigReconciler.assertExecutionAllowed === "function"
-        ? options.executionConfigReconciler
-        : createExecutionConfigReconciler({
+      ? (() => {
+          if (
+            options.policyRuntime &&
+            typeof options.policyRuntime.assertExecutionAllowed === "function" &&
+            typeof options.policyRuntime.captureExecutionSnapshot === "function"
+          ) {
+            return options.policyRuntime;
+          }
+
+          if (options.executionConfigReconciler && typeof options.executionConfigReconciler.assertExecutionAllowed === "function") {
+            const legacy = options.executionConfigReconciler;
+            return {
+              activatePolicy: () => {},
+              captureExecutionSnapshot: () => ({
+                policy: null,
+                policyHash:
+                  legacy && typeof legacy.localMetadata === "function" && legacy.localMetadata()
+                    ? normalizeString(legacy.localMetadata().executionConfigHash)
+                    : "",
+                policyVersion:
+                  legacy && typeof legacy.localMetadata === "function" && legacy.localMetadata()
+                    ? parsePositiveInt(normalizeString(legacy.localMetadata().executionConfigVersion).replace(/^v/i, ""), 0)
+                    : 0,
+              }),
+              evaluate: (peers) =>
+                legacy && typeof legacy.evaluate === "function"
+                  ? legacy.evaluate(peers)
+                  : { ok: true, status: "aligned", criticalMismatches: [], warnings: [] },
+              assertExecutionAllowed: (peers) => legacy.assertExecutionAllowed(peers),
+              getActiveMetadata: () => {
+                const local = legacy && typeof legacy.localMetadata === "function" ? legacy.localMetadata() : {};
+                const executionConfigVersion = normalizeString(local.executionConfigVersion);
+                const parsedVersion = parsePositiveInt(executionConfigVersion.replace(/^v/i, ""), 0);
+                return {
+                  nodeId: normalizeString(local.nodeId) || nodePublication.nodeId,
+                  executionPolicyVersion: parsedVersion,
+                  executionPolicyHash: normalizeString(local.executionConfigHash).toLowerCase(),
+                  executionConfigVersion,
+                  executionConfigHash: normalizeString(local.executionConfigHash).toLowerCase(),
+                  expectedExecutionConfigVersion: normalizeString(local.expectedExecutionConfigVersion),
+                };
+              },
+              getLastSummary: () =>
+                legacy && typeof legacy.getLastSummary === "function"
+                  ? legacy.getLastSummary()
+                  : { ok: true, status: "aligned", criticalMismatches: [], warnings: [] },
+            };
+          }
+
+          return createPolicyRuntime({
             production: executionSettings.production,
             nodeId: nodePublication.nodeId,
-            execution: executionSettings,
-          })
+            metrics,
+            auditLogger,
+          });
+        })()
       : null;
   const executionQuotaStore =
     options.executionQuotaStore && typeof options.executionQuotaStore.consume === "function"
@@ -502,6 +564,9 @@ function createSupervisorV1(options = {}) {
   let statePersistenceInitialized = false;
   let suspendStatePersistence = false;
   let arbiterReconciledFromRuntime = false;
+  let policyLoadAttempted = false;
+  let policyLoadError = null;
+  let policyBundle = null;
   const stateManager = stateEnabled
     ? createStateManager({
         version: CONTROL_PLANE_STATE_VERSION,
@@ -796,10 +861,79 @@ function createSupervisorV1(options = {}) {
       return {
         peerId: typeof record.peerId === "string" ? record.peerId : "",
         status: typeof record.status === "string" ? record.status : "DOWN",
+        executionPolicyHash:
+          typeof record.executionPolicyHash === "string"
+            ? record.executionPolicyHash
+            : typeof record.executionConfigHash === "string"
+            ? record.executionConfigHash
+            : "",
+        executionPolicyVersion:
+          Number.isFinite(Number(record.executionPolicyVersion)) && Number(record.executionPolicyVersion) > 0
+            ? Number(record.executionPolicyVersion)
+            : parsePositiveInt(String(record.executionConfigVersion || "").replace(/^v/i, ""), 0),
         executionConfigHash: typeof record.executionConfigHash === "string" ? record.executionConfigHash : "",
         executionConfigVersion: typeof record.executionConfigVersion === "string" ? record.executionConfigVersion : "",
       };
     });
+  }
+
+  async function ensurePolicyAuthorityLoaded() {
+    if (!policyRuntime || typeof policyRuntime.activatePolicy !== "function") {
+      return {
+        ok: true,
+        skipped: true,
+      };
+    }
+
+    if (policyBundle) {
+      return {
+        ok: true,
+        bundle: policyBundle,
+      };
+    }
+
+    if (policyLoadAttempted && !policyBundle) {
+      if (executionSettings.production && policyLoadError) {
+        throw policyLoadError;
+      }
+      return {
+        ok: false,
+        error: policyLoadError,
+      };
+    }
+
+    policyLoadAttempted = true;
+    try {
+      policyBundle = loadAndPublishPolicy({
+        production: executionSettings.production,
+        nodeId: nodePublication.nodeId,
+        metrics,
+        auditLogger,
+        policyRuntime,
+        manifestPath: executionSettings.policyManifestPath,
+        signaturePath: executionSettings.policySignaturePath,
+        publicKeyPath: executionSettings.policyPublicKeyPath,
+        expectedHash: executionSettings.policyExpectedHash,
+        legacyExecution: executionSettings,
+        security: securitySettings,
+        observability: observabilitySettings,
+        allowLegacyNonProdFallback: true,
+      });
+
+      return {
+        ok: true,
+        bundle: policyBundle,
+      };
+    } catch (error) {
+      policyLoadError = error;
+      if (executionSettings.production) {
+        throw error;
+      }
+      return {
+        ok: false,
+        error,
+      };
+    }
   }
 
   async function ensureResourceArbiterReconciled() {
@@ -1285,6 +1419,10 @@ function createSupervisorV1(options = {}) {
     if (!clusterEnabled) {
       return;
     }
+    const metadata =
+      policyRuntime && typeof policyRuntime.getActiveMetadata === "function"
+        ? policyRuntime.getActiveMetadata()
+        : {};
 
     metrics.gauge("cluster.node_metadata", 1, {
       node_id: nodePublication.nodeId,
@@ -1293,6 +1431,12 @@ function createSupervisorV1(options = {}) {
       shard_count: nodePublication.shardCount,
       leader_timeout_ms: nodePublication.leaderTimeoutMs,
       heartbeat_interval_ms: nodePublication.heartbeatIntervalMs,
+      execution_policy_version:
+        Number.isFinite(Number(metadata.executionPolicyVersion)) && Number(metadata.executionPolicyVersion) > 0
+          ? Number(metadata.executionPolicyVersion)
+          : 0,
+      execution_policy_hash:
+        typeof metadata.executionPolicyHash === "string" ? metadata.executionPolicyHash : "",
     });
   }
 
@@ -2276,14 +2420,21 @@ function createSupervisorV1(options = {}) {
   async function initialize() {
     await ensureInitialized();
 
+    if (policyRuntime) {
+      await ensurePolicyAuthorityLoaded();
+    }
+
     if (!arbiterReconciledFromRuntime) {
       await ensureResourceArbiterReconciled();
     }
 
-    if (executionConfigReconciler) {
+    if (policyRuntime) {
       try {
-        const summary = executionConfigReconciler.evaluate(getExecutionPeersForReconciliation());
+        const summary = policyRuntime.evaluate(getExecutionPeersForReconciliation());
         if (!summary.ok) {
+          metrics.increment("policy.hash.mismatch", {
+            node_id: nodePublication.nodeId,
+          });
           metrics.increment("execution.config.mismatch", {
             node_id: nodePublication.nodeId,
             scope: "node",
@@ -2337,15 +2488,23 @@ function createSupervisorV1(options = {}) {
     let executionStartedAt = 0;
     let shouldObserveExecution = false;
     let clusterRoutingSnapshot = null;
+    let executionPolicySnapshot = null;
 
     try {
       authGuard.validate(context, requestId);
       rateLimiter.check(principalId, requestId);
+
+      if (policyRuntime) {
+        await ensurePolicyAuthorityLoaded();
+        executionPolicySnapshot = policyRuntime.captureExecutionSnapshot();
+      }
+
       if (executionQuotaStore && typeof executionQuotaStore.consume === "function") {
         const quotaDecision = await executionQuotaStore.consume({
           principalId,
           requestId,
           toolSlug: slug,
+          policySnapshot: executionPolicySnapshot,
         });
         if (!quotaDecision || quotaDecision.ok !== true) {
           const code = quotaDecision && typeof quotaDecision.code === "string" ? quotaDecision.code : "EXECUTION_QUOTA_EXCEEDED";
@@ -2446,10 +2605,18 @@ function createSupervisorV1(options = {}) {
             executionInput.resourceLimits = requestedLimits;
           }
 
-          if (executionConfigReconciler) {
+          if (policyRuntime) {
             try {
-              executionConfigReconciler.assertExecutionAllowed(getExecutionPeersForReconciliation());
+              policyRuntime.assertExecutionAllowed(getExecutionPeersForReconciliation());
             } catch (error) {
+              metrics.increment("policy.hash.mismatch", {
+                node_id: nodePublication.nodeId,
+                scope: "node",
+              });
+              metrics.increment("policy.version.skew", {
+                node_id: nodePublication.nodeId,
+                scope: "node",
+              });
               metrics.increment("execution.config.mismatch", {
                 node_id: nodePublication.nodeId,
                 scope: "node",
@@ -2477,6 +2644,7 @@ function createSupervisorV1(options = {}) {
                 principalHash: principalHashValue,
                 toolSlug: slug,
                 resourceLimits: validatedRequestedLimits.limits,
+                policySnapshot: executionPolicySnapshot,
               });
               arbiterLeaseId = lease.leaseId;
             } catch (error) {
@@ -2499,6 +2667,7 @@ function createSupervisorV1(options = {}) {
         try {
           toolResult = await validation.adapter.execute({
             ...executionInput,
+            policySnapshot: executionPolicySnapshot,
           });
         } finally {
           if (resourceArbiter && arbiterLeaseId) {
@@ -3167,11 +3336,12 @@ function createSupervisorV1(options = {}) {
       };
     });
 
-    const executionMetadata = executionConfigReconciler
-      ? executionConfigReconciler.localMetadata()
-      : {
-          nodeId: nodePublication.nodeId,
-        };
+    const executionMetadata =
+      policyRuntime && typeof policyRuntime.getActiveMetadata === "function"
+        ? policyRuntime.getActiveMetadata()
+        : {
+            nodeId: nodePublication.nodeId,
+          };
 
     return {
       ok: true,
@@ -3179,6 +3349,28 @@ function createSupervisorV1(options = {}) {
       skills,
       executionMetadata: {
         ...executionMetadata,
+        executionPolicyVersion:
+          Number.isFinite(Number(executionMetadata.executionPolicyVersion)) && Number(executionMetadata.executionPolicyVersion) > 0
+            ? Number(executionMetadata.executionPolicyVersion)
+            : 0,
+        executionPolicyHash:
+          typeof executionMetadata.executionPolicyHash === "string" ? executionMetadata.executionPolicyHash : "",
+        executionConfigVersion:
+          typeof executionMetadata.executionConfigVersion === "string"
+            ? executionMetadata.executionConfigVersion
+            : Number.isFinite(Number(executionMetadata.executionPolicyVersion)) && Number(executionMetadata.executionPolicyVersion) > 0
+            ? `v${Number(executionMetadata.executionPolicyVersion)}`
+            : "",
+        executionConfigHash:
+          typeof executionMetadata.executionConfigHash === "string"
+            ? executionMetadata.executionConfigHash
+            : typeof executionMetadata.executionPolicyHash === "string"
+            ? executionMetadata.executionPolicyHash
+            : "",
+        expectedExecutionConfigVersion:
+          typeof executionMetadata.expectedExecutionConfigVersion === "string"
+            ? executionMetadata.expectedExecutionConfigVersion
+            : normalizeString(executionSettings.expectedExecutionConfigVersion),
         thresholdScope: thresholdScope === "cluster" ? "cluster" : "node",
       },
     };
@@ -3189,13 +3381,35 @@ function createSupervisorV1(options = {}) {
   }
 
   function getExecutionMetadata() {
-    const local = executionConfigReconciler
-      ? executionConfigReconciler.localMetadata()
-      : {
-          nodeId: nodePublication.nodeId,
-        };
+    const local =
+      policyRuntime && typeof policyRuntime.getActiveMetadata === "function"
+        ? policyRuntime.getActiveMetadata()
+        : {
+            nodeId: nodePublication.nodeId,
+          };
     return {
       ...local,
+      executionPolicyVersion:
+        Number.isFinite(Number(local.executionPolicyVersion)) && Number(local.executionPolicyVersion) > 0
+          ? Number(local.executionPolicyVersion)
+          : 0,
+      executionPolicyHash: typeof local.executionPolicyHash === "string" ? local.executionPolicyHash : "",
+      executionConfigVersion:
+        typeof local.executionConfigVersion === "string"
+          ? local.executionConfigVersion
+          : Number.isFinite(Number(local.executionPolicyVersion)) && Number(local.executionPolicyVersion) > 0
+          ? `v${Number(local.executionPolicyVersion)}`
+          : "",
+      executionConfigHash:
+        typeof local.executionConfigHash === "string"
+          ? local.executionConfigHash
+          : typeof local.executionPolicyHash === "string"
+          ? local.executionPolicyHash
+          : "",
+      expectedExecutionConfigVersion:
+        typeof local.expectedExecutionConfigVersion === "string"
+          ? local.expectedExecutionConfigVersion
+          : normalizeString(executionSettings.expectedExecutionConfigVersion),
       thresholdScope: thresholdScope === "cluster" ? "cluster" : "node",
     };
   }

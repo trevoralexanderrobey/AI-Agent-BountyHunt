@@ -1,0 +1,49 @@
+{
+  "policyVersion": 1,
+  "executionMode": "container",
+  "containerRuntimeEnabled": true,
+  "resourceCaps": {
+    "curl": {
+      "cpuShares": 256,
+      "memoryLimitMb": 256,
+      "maxRuntimeSeconds": 30,
+      "maxOutputBytes": 5242880
+    }
+  },
+  "perToolConcurrencyLimits": {
+    "curl": 4
+  },
+  "nodeConcurrencyCaps": {
+    "maxConcurrentContainersPerNode": 16,
+    "nodeMemoryHardCapMb": 8192,
+    "nodeCpuHardCapShares": 8192
+  },
+  "registryAllowlist": [
+    "ghcr.io"
+  ],
+  "signatureEnforcement": {
+    "requireInProduction": true,
+    "requireInNonProduction": false
+  },
+  "quotaConfig": {
+    "executionQuotaPerHour": 120,
+    "executionBurstLimitPerMinute": 20,
+    "quotaRedisUrl": "redis://127.0.0.1:6379",
+    "quotaRedisPrefix": "openclaw:quota"
+  },
+  "arbitrationThresholds": {
+    "arbiterRebuildFailClosed": true
+  },
+  "observabilityThresholds": {
+    "circuitOpenRate": 0.2,
+    "executionRejectRate": 0.15,
+    "memoryPressureRate": 0.1
+  },
+  "policy": {
+    "allowedUpgradeWindowMinutes": 15
+  },
+  "metadata": {
+    "allowDowngradeFromVersions": [],
+    "allowDowngradeFromHashes": []
+  }
+}

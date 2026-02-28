@@ -1,8 +1,16 @@
 const test = require("node:test");
 const assert = require("node:assert/strict");
+const path = require("node:path");
+const fs = require("node:fs");
 
 const pkg = require("../../package.json");
 const { runPreflightValidation } = require("../../deployment/preflight-validator.js");
+const { computePolicyHash } = require("../../policy/execution-policy-manifest.js");
+
+const POLICY_MANIFEST_PATH = path.resolve(__dirname, "../../policy/execution-policy.json");
+const POLICY_SIGNATURE_PATH = path.resolve(__dirname, "../../policy/execution-policy.json.sig");
+const POLICY_PUBLIC_KEY_PATH = path.resolve(__dirname, "../../policy/execution-policy.pub.pem");
+const POLICY_EXPECTED_HASH = computePolicyHash(JSON.parse(fs.readFileSync(POLICY_MANIFEST_PATH, "utf8")));
 
 function validSandboxConfig() {
   return {
@@ -45,6 +53,10 @@ function baseProductionOptions(overrides = {}) {
       allowedConfigHashesByVersion: {
         v1: ["aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"],
       },
+      policyManifestPath: POLICY_MANIFEST_PATH,
+      policySignaturePath: POLICY_SIGNATURE_PATH,
+      policyPublicKeyPath: POLICY_PUBLIC_KEY_PATH,
+      policyExpectedHash: POLICY_EXPECTED_HASH,
       tools: {
         curl: {
           signatureVerified: true,
@@ -253,4 +265,32 @@ test("production container mode fails when phase 21 governance settings are miss
   assert.equal(codes.has("EXECUTION_QUOTA_REDIS_URL_REQUIRED"), true);
   assert.equal(codes.has("OBSERVABILITY_THRESHOLD_SCOPE_INVALID"), true);
   assert.equal(codes.has("OBSERVABILITY_ALERT_THRESHOLDS_INVALID"), true);
+});
+
+test("production container mode fails when signature path is overridden", async () => {
+  const result = await runPreflightValidation(
+    baseProductionOptions({
+      execution: {
+        ...baseProductionOptions().execution,
+        policySignaturePath: path.resolve(__dirname, "../../policy/does-not-exist.sig"),
+      },
+    }),
+  );
+
+  const codes = errorCodes(result);
+  assert.equal(codes.has("POLICY_PATH_OVERRIDE_FORBIDDEN"), true);
+});
+
+test("production container mode fails when policy artifact paths are overridden", async () => {
+  const result = await runPreflightValidation(
+    baseProductionOptions({
+      execution: {
+        ...baseProductionOptions().execution,
+        policyManifestPath: path.resolve(__dirname, "./tmp-policy.json"),
+      },
+    }),
+  );
+
+  const codes = errorCodes(result);
+  assert.equal(codes.has("POLICY_PATH_OVERRIDE_FORBIDDEN"), true);
 });

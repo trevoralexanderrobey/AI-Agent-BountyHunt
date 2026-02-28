@@ -9,6 +9,8 @@ const { validateEgressPolicy } = require("../execution/egress-policy.js");
 const { validateImageReference } = require("../execution/image-policy.js");
 const { SUPPORTED_BACKENDS } = require("../execution/container-runtime.js");
 const { resolveToolImageReference: resolveCatalogImageReference } = require("../execution/tool-image-catalog.js");
+const { validatePolicySchema, serializeCanonical, computePolicyHash } = require("../policy/execution-policy-manifest.js");
+const { verifyPolicySignature, getDefaultPolicyArtifactPaths } = require("../policy/policy-authority.js");
 const { createToolRegistry } = require("../tools/tool-registry.js");
 const { registerBatch1Tools } = require("../tools/adapters/index.js");
 const { registerBatch2Tools } = require("../tools/adapters/batch-2-index.js");
@@ -778,6 +780,135 @@ function validatePhase21ObservabilityConfig(observabilityConfig, errors, warning
   }
 }
 
+function validatePhase22PolicyGovernance(executionConfig, errors, warnings, isProduction, mode) {
+  if (mode !== "container") {
+    return;
+  }
+
+  const defaultPolicyPaths = getDefaultPolicyArtifactPaths();
+  const configuredManifestPath = normalizeString(executionConfig.policyManifestPath || process.env.EXECUTION_POLICY_MANIFEST_PATH);
+  const configuredSignaturePath = normalizeString(executionConfig.policySignaturePath || process.env.EXECUTION_POLICY_SIGNATURE_PATH);
+  const configuredPublicKeyPath = normalizeString(executionConfig.policyPublicKeyPath || process.env.EXECUTION_POLICY_PUBLIC_KEY_PATH);
+  const expectedHash = normalizeString(executionConfig.policyExpectedHash || process.env.EXECUTION_POLICY_EXPECTED_HASH).toLowerCase();
+  const manifestPath = isProduction ? defaultPolicyPaths.manifestPath : configuredManifestPath;
+  const signaturePath = isProduction ? defaultPolicyPaths.signaturePath : configuredSignaturePath;
+  const publicKeyPath = isProduction ? defaultPolicyPaths.publicKeyPath : configuredPublicKeyPath;
+
+  const collection = isProduction ? errors : warnings;
+
+  if (isProduction) {
+    const overrideChecks = [
+      {
+        label: "execution.policyManifestPath",
+        configuredPath: configuredManifestPath,
+        requiredPath: defaultPolicyPaths.manifestPath,
+      },
+      {
+        label: "execution.policySignaturePath",
+        configuredPath: configuredSignaturePath,
+        requiredPath: defaultPolicyPaths.signaturePath,
+      },
+      {
+        label: "execution.policyPublicKeyPath",
+        configuredPath: configuredPublicKeyPath,
+        requiredPath: defaultPolicyPaths.publicKeyPath,
+      },
+    ];
+    for (const check of overrideChecks) {
+      if (!check.configuredPath) {
+        continue;
+      }
+      if (resolvePath(check.configuredPath) !== resolvePath(check.requiredPath)) {
+        addIssue(errors, "POLICY_PATH_OVERRIDE_FORBIDDEN", "Policy artifact path override is forbidden in production", {
+          field: check.label,
+          configuredPath: resolvePath(check.configuredPath),
+          requiredPath: resolvePath(check.requiredPath),
+        });
+      }
+    }
+  }
+
+  if (!manifestPath) {
+    addIssue(collection, "POLICY_FILE_NOT_PRESENT", "execution.policyManifestPath is required for policy governance", {});
+    return;
+  }
+
+  const resolvedManifestPath = resolvePath(manifestPath);
+  if (!fs.existsSync(resolvedManifestPath)) {
+    addIssue(collection, "POLICY_FILE_NOT_PRESENT", "Policy manifest file is missing", {
+      manifestPath: resolvedManifestPath,
+    });
+    return;
+  }
+
+  if (isProduction) {
+    if (!signaturePath || !publicKeyPath) {
+      addIssue(errors, "POLICY_SIGNATURE_INVALID", "Policy signature and public key paths are required in production", {
+        signaturePath,
+        publicKeyPath,
+      });
+      return;
+    }
+    if (!expectedHash) {
+      addIssue(errors, "POLICY_HASH_MISMATCH", "execution.policyExpectedHash is required in production", {});
+      return;
+    }
+  }
+
+  let policy;
+  try {
+    policy = JSON.parse(fs.readFileSync(resolvedManifestPath, "utf8"));
+  } catch (error) {
+    addIssue(collection, "POLICY_SCHEMA_INVALID", "Policy manifest JSON could not be parsed", {
+      manifestPath: resolvedManifestPath,
+      reason: error && error.message ? error.message : String(error),
+    });
+    return;
+  }
+
+  const schemaValidation = validatePolicySchema(policy);
+  if (!schemaValidation.valid) {
+    addIssue(collection, "POLICY_SCHEMA_INVALID", "Policy schema validation failed", {
+      errors: schemaValidation.errors,
+    });
+    return;
+  }
+
+  let canonical;
+  let actualHash;
+  try {
+    canonical = serializeCanonical(policy);
+    actualHash = computePolicyHash(policy);
+  } catch (error) {
+    addIssue(collection, "POLICY_SCHEMA_INVALID", "Policy canonicalization failed", {
+      reason: error && error.message ? error.message : String(error),
+    });
+    return;
+  }
+
+  if (expectedHash && expectedHash !== actualHash) {
+    addIssue(collection, "POLICY_HASH_MISMATCH", "Policy hash does not match execution.policyExpectedHash", {
+      expectedHash,
+      actualHash,
+    });
+  }
+
+  if (signaturePath || publicKeyPath || isProduction) {
+    const verification = verifyPolicySignature({
+      canonicalJson: canonical,
+      signaturePath: signaturePath ? resolvePath(signaturePath) : "",
+      publicKeyPath: publicKeyPath ? resolvePath(publicKeyPath) : "",
+    });
+    if (!verification.ok) {
+      addIssue(collection, "POLICY_SIGNATURE_INVALID", "Policy signature verification failed", {
+        code: verification.code,
+        message: verification.message,
+        details: verification.details || {},
+      });
+    }
+  }
+}
+
 function resolveExecutionToolImageReference(executionConfig, slug, toolConfig) {
   const direct = normalizeString(toolConfig && toolConfig.image);
   if (direct) {
@@ -1522,6 +1653,13 @@ async function runPreflightValidation(options = {}) {
     productionMode.isProduction,
     executionValidation.mode,
   );
+  validatePhase22PolicyGovernance(
+    executionConfig,
+    errors,
+    warnings,
+    productionMode.isProduction,
+    executionValidation.mode,
+  );
   validatePhase21SecurityConfig(securityConfig, errors, productionMode.isProduction, executionValidation.mode);
   validatePhase21ObservabilityConfig(observabilityConfig, errors, warnings, productionMode.isProduction);
 
@@ -1554,6 +1692,10 @@ async function runPreflightValidation(options = {}) {
       knownExecutionTools: Array.from(knownToolSlugs).sort((a, b) => a.localeCompare(b)),
       executionConfigVersion: normalizeString(executionConfig.configVersion),
       expectedExecutionConfigVersion: normalizeString(executionConfig.expectedExecutionConfigVersion),
+      executionPolicyManifestPath: normalizeString(executionConfig.policyManifestPath),
+      executionPolicySignaturePath: normalizeString(executionConfig.policySignaturePath),
+      executionPolicyPublicKeyPath: normalizeString(executionConfig.policyPublicKeyPath),
+      executionPolicyExpectedHash: normalizeString(executionConfig.policyExpectedHash).toLowerCase(),
       observabilityThresholdScope: normalizeString(observabilityConfig.thresholdScope),
     },
   };

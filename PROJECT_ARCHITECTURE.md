@@ -750,7 +750,21 @@ Bridge / Director Agent
 
 ---
 
-### 25. Burp Suite Integration (BionicLink)
+### 25. Execution Policy Authority (Phase 22)
+
+**Policy Manifest**: `/Users/trevorrobey/AI-Agent-BountyHunt/openclaw-bridge/policy/execution-policy.json`  
+**Policy Runtime**: `/Users/trevorrobey/AI-Agent-BountyHunt/openclaw-bridge/policy/policy-runtime.js`  
+**Authority Controller**: `/Users/trevorrobey/AI-Agent-BountyHunt/openclaw-bridge/policy/policy-authority.js`  
+**Purpose**: Centralize, version, and cryptographically verify execution configurations and resource constraints.
+
+#### Capabilities
+- **Cryptographic Enforcement**: Enforces RSA signatures over a canonicalized JSON manifest ensuring tampering prevention.
+- **Centralized Scaffolding**: Unifies limits, quotas, thresholds, registry allowlists, and execution parameters into one artifact.
+- **Production Guardrails**: In production, forces signature checks and eliminates loose file overrides.
+
+---
+
+### 26. Burp Suite Integration (BionicLink)
 
 **Extension**: BionicLink (custom Burp extension)  
 **Port**: 8090 (HTTP)  
@@ -1033,6 +1047,11 @@ User receives scan summary with findings
 │   │   ├── container-audit.js     # Security profile/audit verification
 │   │   ├── tool-image-catalog.js  # SHA256 pinned container images
 │   │   └── resource-arbiter.js    # Node memory allocation and arbitration
+│   ├── policy/                    # Cryptographic Policy Authority (Phase 22)
+│   │   ├── execution-policy-manifest.js # Canonical schema definition
+│   │   ├── policy-authority.js    # Signature verification logic
+│   │   ├── policy-runtime.js      # Active policy mapping to env
+│   │   └── execution-policy.json  # Current signed configuration artifact
 │   ├── containers/                # Dockerfiles for containerized skills
 │   │   ├── nmap/                  # nmap skill
 │   │   ├── aircrack/              # Wireless testing
@@ -1342,6 +1361,6 @@ This architecture is designed for security researchers, bug bounty hunters, and 
 
 ---
 
-**Document Version**: 1.14  
+**Document Version**: 1.15  
 **Last Updated**: February 28, 2026  
 **Maintained By**: Trevor Robey

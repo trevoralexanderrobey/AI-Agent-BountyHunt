@@ -466,3 +466,11 @@ Resource allocation boundaries covering node-level safety during container or ho
 Specs: 
 - `/Users/trevorrobey/AI-Agent-BountyHunt/openclaw-bridge/docs/threat-model.md`
 - `/Users/trevorrobey/AI-Agent-BountyHunt/openclaw-bridge/docs/secret-governance.md`
+
+## Execution Policy Authority (Phase 22)
+
+Validates and loads cryptographically signed `execution-policy.json` representing all control constraints.
+
+- Replaces env checks with a signed configuration manifest parsed by `policy-authority.js`.
+- Generates canonical JSON to verify RSA signatures against `execution-policy.pub.pem`.
+- Modifying limits requires re-signing the canonical JSON via `verify-policy-artifact.js` tooling if in production.

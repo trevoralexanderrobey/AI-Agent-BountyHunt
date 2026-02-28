@@ -22,6 +22,15 @@ const REQUIRED_PHASE21_DOCS = [
   path.resolve(__dirname, "..", "docs", "execution-plane-activation-spec.md"),
 ];
 const REQUIRED_PHASE21_WORKFLOW = path.resolve(__dirname, "..", "..", ".github", "workflows", "container-build.yml");
+const REQUIRED_PHASE22_FILES = [
+  path.resolve(__dirname, "..", "policy", "execution-policy-manifest.js"),
+  path.resolve(__dirname, "..", "policy", "policy-authority.js"),
+  path.resolve(__dirname, "..", "policy", "policy-runtime.js"),
+  path.resolve(__dirname, "..", "policy", "execution-policy.json"),
+  path.resolve(__dirname, "..", "policy", "execution-policy.json.sig"),
+  path.resolve(__dirname, "..", "policy", "execution-policy.pub.pem"),
+  path.resolve(__dirname, "..", "policy", "verify-policy-artifact.js"),
+];
 
 function normalizeString(value) {
   return typeof value === "string" ? value.trim() : "";
@@ -160,6 +169,17 @@ async function runDeployCheck(options = {}) {
     });
   }
 
+  const phase22PolicyCheck = checkRequiredAbsoluteFiles(REQUIRED_PHASE22_FILES);
+  if (phase22PolicyCheck.missing.length > 0) {
+    errors.push({
+      code: "PHASE22_POLICY_GOVERNANCE_MISSING",
+      message: "One or more Phase 22 policy governance files are missing or empty",
+      details: {
+        missing: phase22PolicyCheck.missing,
+      },
+    });
+  }
+
   const result = {
     ready_for_production: errors.length === 0,
     warnings,
@@ -187,6 +207,11 @@ async function runDeployCheck(options = {}) {
         required: [REQUIRED_PHASE21_WORKFLOW],
         present: workflowCheck.present,
         missing: workflowCheck.missing,
+      },
+      phase22Policy: {
+        required: REQUIRED_PHASE22_FILES,
+        present: phase22PolicyCheck.present,
+        missing: phase22PolicyCheck.missing,
       },
     },
   };

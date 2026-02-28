@@ -70,6 +70,12 @@ function createPeerHeartbeat(options = {}) {
                 }
                 if (parsed && typeof parsed === "object") {
                   metadata = {
+                    executionPolicyHash:
+                      typeof parsed.execution_policy_hash === "string" ? parsed.execution_policy_hash : undefined,
+                    executionPolicyVersion:
+                      Number.isInteger(Number(parsed.execution_policy_version))
+                        ? Number(parsed.execution_policy_version)
+                        : undefined,
                     executionConfigHash:
                       typeof parsed.execution_config_hash === "string" ? parsed.execution_config_hash : undefined,
                     executionConfigVersion:
@@ -125,9 +131,19 @@ function createPeerHeartbeat(options = {}) {
             result && result.metadata && typeof result.metadata.executionConfigHash === "string"
               ? result.metadata.executionConfigHash
               : undefined,
+          executionPolicyHash:
+            result && result.metadata && typeof result.metadata.executionPolicyHash === "string"
+              ? result.metadata.executionPolicyHash
+              : undefined,
           executionConfigVersion:
             result && result.metadata && typeof result.metadata.executionConfigVersion === "string"
               ? result.metadata.executionConfigVersion
+              : undefined,
+          executionPolicyVersion:
+            result &&
+            result.metadata &&
+            Number.isInteger(Number(result.metadata.executionPolicyVersion))
+              ? Number(result.metadata.executionPolicyVersion)
               : undefined,
           expectedExecutionConfigVersion:
             result && result.metadata && typeof result.metadata.expectedExecutionConfigVersion === "string"

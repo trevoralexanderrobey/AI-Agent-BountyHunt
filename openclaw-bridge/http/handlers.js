@@ -161,6 +161,14 @@ function mapSupervisorError(error) {
   if (code === "EXECUTION_CONFIG_MISMATCH") {
     return { statusCode: 503, code: "EXECUTION_CONFIG_MISMATCH", message: "Execution config mismatch across nodes" };
   }
+  if (
+    code === "POLICY_SIGNATURE_INVALID" ||
+    code === "POLICY_SCHEMA_INVALID" ||
+    code === "POLICY_HASH_MISMATCH" ||
+    code === "POLICY_FILE_NOT_PRESENT"
+  ) {
+    return { statusCode: 503, code: "EXECUTION_CONFIG_MISMATCH", message: "Execution policy authority mismatch" };
+  }
   if (code === "SUPERVISOR_CAPACITY_EXCEEDED") {
     return { statusCode: 503, code: "INTERNAL_ERROR", message: "Service capacity exceeded" };
   }
@@ -541,6 +549,12 @@ function createHttpHandlers(options = {}) {
         active_instances: activeInstances,
         node_id: typeof executionMetadata.nodeId === "string" ? executionMetadata.nodeId : "node-unknown",
         scope: typeof executionMetadata.thresholdScope === "string" ? executionMetadata.thresholdScope : "node",
+        execution_policy_hash:
+          typeof executionMetadata.executionPolicyHash === "string" ? executionMetadata.executionPolicyHash : "",
+        execution_policy_version:
+          Number.isFinite(Number(executionMetadata.executionPolicyVersion)) && Number(executionMetadata.executionPolicyVersion) > 0
+            ? Number(executionMetadata.executionPolicyVersion)
+            : 0,
         execution_config_hash:
           typeof executionMetadata.executionConfigHash === "string" ? executionMetadata.executionConfigHash : "",
         execution_config_version:

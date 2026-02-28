@@ -10,6 +10,7 @@ on:
       - "openclaw-bridge/runtime/**"
       - "openclaw-bridge/tools/**"
       - "openclaw-bridge/execution/**"
+      - "openclaw-bridge/policy/**"
       - ".github/workflows/container-build.yml"
   workflow_dispatch:
 
@@ -40,6 +41,38 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+
+      - name: Validate signed execution policy artifact
+        shell: bash
+        run: |
+          set -euo pipefail
+          prev_manifest="$(mktemp)"
+          if git cat-file -e "HEAD^:openclaw-bridge/policy/execution-policy.json" 2>/dev/null; then
+            git show "HEAD^:openclaw-bridge/policy/execution-policy.json" > "$prev_manifest"
+            prev_args=(--previous-manifest "$prev_manifest")
+          else
+            prev_args=()
+          fi
+
+          node openclaw-bridge/policy/verify-policy-artifact.js \
+            --production true \
+            --manifest openclaw-bridge/policy/execution-policy.json \
+            --signature openclaw-bridge/policy/execution-policy.json.sig \
+            --public-key openclaw-bridge/policy/execution-policy.pub.pem \
+            "${prev_args[@]}"
+
+          policy_digest="$(shasum -a 256 openclaw-bridge/policy/execution-policy.json | awk '{print $1}')"
+          if [[ ! "$policy_digest" =~ ^[a-f0-9]{64}$ ]]; then
+            echo "Invalid policy digest output" >&2
+            exit 1
+          fi
+          printf '%s\n' "$policy_digest" > "policy-digest-${{ matrix.tool }}.txt"
+
+      - name: Upload policy digest artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: policy-digest-${{ matrix.tool }}
+          path: policy-digest-${{ matrix.tool }}.txt
 
       - name: Validate pinned Dockerfile references
         shell: bash

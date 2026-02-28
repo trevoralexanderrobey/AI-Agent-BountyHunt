@@ -22,7 +22,7 @@ const RUN_CONTAINER_REQUIRED_KEYS = Object.freeze([
   "sandboxConfig",
   "signatureVerified",
 ]);
-const RUN_CONTAINER_OPTIONAL_KEYS = Object.freeze(["inputArtifacts", "requestId", "principalHash"]);
+const RUN_CONTAINER_OPTIONAL_KEYS = Object.freeze(["inputArtifacts", "requestId", "principalHash", "policySnapshot"]);
 const RUN_CONTAINER_KEYS = Object.freeze([...RUN_CONTAINER_REQUIRED_KEYS, ...RUN_CONTAINER_OPTIONAL_KEYS]);
 
 const CONTAINER_LABEL_ENABLED = "com.openclaw.execution";
@@ -182,6 +182,36 @@ function resolveExecutionConfig(options) {
   };
 }
 
+function resolveExecutionConfigFromPolicySnapshot(policySnapshot, fallbackConfig) {
+  const policy =
+    policySnapshot && isPlainObject(policySnapshot) && isPlainObject(policySnapshot.policy)
+      ? policySnapshot.policy
+      : null;
+
+  if (!policy) {
+    return fallbackConfig;
+  }
+
+  const signatureEnforcement = isPlainObject(policy.signatureEnforcement) ? policy.signatureEnforcement : {};
+
+  return {
+    ...fallbackConfig,
+    resourcePolicies: isPlainObject(policy.resourceCaps) ? policy.resourceCaps : fallbackConfig.resourcePolicies,
+    allowedRegistries: Array.isArray(policy.registryAllowlist)
+      ? policy.registryAllowlist.slice()
+      : fallbackConfig.allowedRegistries,
+    requireSignatureVerificationInProduction: Object.prototype.hasOwnProperty.call(
+      signatureEnforcement,
+      "requireInProduction",
+    )
+      ? signatureEnforcement.requireInProduction === true
+      : fallbackConfig.requireSignatureVerificationInProduction,
+    requireSignatureVerification: Object.prototype.hasOwnProperty.call(signatureEnforcement, "requireInNonProduction")
+      ? signatureEnforcement.requireInNonProduction === true
+      : fallbackConfig.requireSignatureVerification,
+  };
+}
+
 function validateRunContainerInputShape(input) {
   if (!isPlainObject(input)) {
     throw makeFailure("INVALID_CONTAINER_REQUEST", "runContainer input must be an object");
@@ -239,6 +269,10 @@ function validateRunContainerInputShape(input) {
 
   if (Object.prototype.hasOwnProperty.call(input, "inputArtifacts")) {
     validateInputArtifacts(input.inputArtifacts);
+  }
+
+  if (Object.prototype.hasOwnProperty.call(input, "policySnapshot") && !isPlainObject(input.policySnapshot)) {
+    throw makeFailure("INVALID_CONTAINER_REQUEST", "policySnapshot must be an object when provided");
   }
 }
 
@@ -1244,6 +1278,7 @@ function createContainerRuntime(options = {}) {
   async function runContainer(input = {}) {
     ensureRuntimeEnabled();
     validateRunContainerInputShape(input);
+    const activeExecutionConfig = resolveExecutionConfigFromPolicySnapshot(input.policySnapshot, executionConfig);
 
     const toolSlug = normalizeString(input.toolSlug).toLowerCase();
     try {
@@ -1264,7 +1299,7 @@ function createContainerRuntime(options = {}) {
     }
 
     const policyLimits = resolveResourceLimits(toolSlug, {
-      policies: executionConfig.resourcePolicies,
+      policies: activeExecutionConfig.resourcePolicies,
       allowDefault: false,
     });
 
@@ -1290,7 +1325,7 @@ function createContainerRuntime(options = {}) {
       });
     }
 
-    const egressValidation = validateEgressPolicy(toolSlug, executionConfig.egressPolicies, {
+    const egressValidation = validateEgressPolicy(toolSlug, activeExecutionConfig.egressPolicies, {
       allowDefault: !production,
     });
     if (!egressValidation.valid) {
@@ -1301,11 +1336,11 @@ function createContainerRuntime(options = {}) {
     recordEgressEvent(toolSlug, egressValidation);
 
     const requireSignatureVerification = production
-      ? executionConfig.requireSignatureVerificationInProduction
-      : executionConfig.requireSignatureVerification;
+      ? activeExecutionConfig.requireSignatureVerificationInProduction
+      : activeExecutionConfig.requireSignatureVerification;
     const imageValidation = validateImageReference(input.image, {
       production,
-      allowedRegistries: executionConfig.allowedRegistries,
+      allowedRegistries: activeExecutionConfig.allowedRegistries,
       requireDigestPinning: true,
       requireSignatureVerification,
       signatureVerified: input.signatureVerified,
@@ -1316,7 +1351,7 @@ function createContainerRuntime(options = {}) {
       });
     }
 
-    const runtimeUser = normalizeString(executionConfig.nonRootUser).toLowerCase();
+    const runtimeUser = normalizeString(activeExecutionConfig.nonRootUser).toLowerCase();
     if (!runtimeUser || runtimeUser === "root" || runtimeUser === "0") {
       throw makeFailure("SANDBOX_POLICY_VIOLATION", "Container runtime requires a non-root execution user");
     }

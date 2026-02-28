@@ -134,6 +134,46 @@ function normalizeToolLimits(rawMap) {
   return map;
 }
 
+function resolveRuntimeCaps(policySnapshot, defaults) {
+  const policy = policySnapshot && typeof policySnapshot === "object" ? policySnapshot.policy : null;
+  const nodeCaps = policy && isPlainObject(policy.nodeConcurrencyCaps) ? policy.nodeConcurrencyCaps : null;
+  const perToolLimits = policy && isPlainObject(policy.perToolConcurrencyLimits) ? policy.perToolConcurrencyLimits : null;
+
+  let maxConcurrentContainersPerNode = parsePositiveInteger(
+    nodeCaps && nodeCaps.maxConcurrentContainersPerNode,
+    defaults.maxConcurrentContainersPerNode,
+  );
+  if (!Number.isFinite(maxConcurrentContainersPerNode)) {
+    maxConcurrentContainersPerNode = Number.MAX_SAFE_INTEGER;
+  }
+
+  let nodeMemoryHardCapMb = parsePositiveInteger(
+    nodeCaps && nodeCaps.nodeMemoryHardCapMb,
+    defaults.nodeMemoryHardCapMb,
+  );
+  if (!Number.isFinite(nodeMemoryHardCapMb)) {
+    nodeMemoryHardCapMb = Number.MAX_SAFE_INTEGER;
+  }
+
+  let nodeCpuHardCapShares = parsePositiveInteger(
+    nodeCaps && nodeCaps.nodeCpuHardCapShares,
+    defaults.nodeCpuHardCapShares,
+  );
+  if (!Number.isFinite(nodeCpuHardCapShares)) {
+    nodeCpuHardCapShares = Number.MAX_SAFE_INTEGER;
+  }
+
+  const toolConcurrencyLimits =
+    perToolLimits && isPlainObject(perToolLimits) ? normalizeToolLimits(perToolLimits) : defaults.toolConcurrencyLimits;
+
+  return {
+    maxConcurrentContainersPerNode,
+    nodeMemoryHardCapMb,
+    nodeCpuHardCapShares,
+    toolConcurrencyLimits,
+  };
+}
+
 function createResourceArbiter(options = {}) {
   const execution = isPlainObject(options.execution) ? options.execution : {};
   const metrics = createSafeMetrics(options.metrics);
@@ -160,6 +200,13 @@ function createResourceArbiter(options = {}) {
   }
 
   const toolConcurrencyLimits = normalizeToolLimits(execution.toolConcurrencyLimits);
+
+  const defaultCaps = {
+    maxConcurrentContainersPerNode,
+    nodeMemoryHardCapMb,
+    nodeCpuHardCapShares,
+    toolConcurrencyLimits,
+  };
 
   const leases = new Map();
   const toolLeaseCounts = new Map();
@@ -239,6 +286,7 @@ function createResourceArbiter(options = {}) {
       limits,
       principalId: normalizeString(input.principalId) || "anonymous",
       principalHash: normalizeString(input.principalHash) || hashPrincipal(input.principalId),
+      policySnapshot: input.policySnapshot && typeof input.policySnapshot === "object" ? input.policySnapshot : null,
     };
   }
 
@@ -263,15 +311,16 @@ function createResourceArbiter(options = {}) {
       principalHash,
       projection,
       limits: normalizeResourceLimits(input.resourceLimits),
-      maxConcurrentContainersPerNode,
-      nodeMemoryHardCapMb,
-      nodeCpuHardCapShares,
-      toolLimit: toolConcurrencyLimits[normalizeString(input.toolSlug).toLowerCase()] || null,
+      maxConcurrentContainersPerNode: input.runtimeCaps.maxConcurrentContainersPerNode,
+      nodeMemoryHardCapMb: input.runtimeCaps.nodeMemoryHardCapMb,
+      nodeCpuHardCapShares: input.runtimeCaps.nodeCpuHardCapShares,
+      toolLimit: input.runtimeCaps.toolConcurrencyLimits[normalizeString(input.toolSlug).toLowerCase()] || null,
     });
   }
 
   function tryAcquire(input = {}) {
     const normalized = validateAcquireInput(input);
+    const runtimeCaps = resolveRuntimeCaps(normalized.policySnapshot, defaultCaps);
     const leaseId = uuidV5(normalized.requestId, namespace);
 
     const existing = leases.get(leaseId);
@@ -286,7 +335,7 @@ function createResourceArbiter(options = {}) {
 
     const projection = getProjectedState(normalized.toolSlug, normalized.limits);
 
-    if (projection.projectedNodeCount > maxConcurrentContainersPerNode) {
+    if (projection.projectedNodeCount > runtimeCaps.maxConcurrentContainersPerNode) {
       reject(
         "NODE_CAPACITY_EXCEEDED",
         "Node concurrency cap exceeded",
@@ -294,12 +343,13 @@ function createResourceArbiter(options = {}) {
           ...input,
           principalHash: normalized.principalHash,
           toolSlug: normalized.toolSlug,
+          runtimeCaps,
         },
         projection,
       );
     }
 
-    const toolLimit = toolConcurrencyLimits[normalized.toolSlug];
+    const toolLimit = runtimeCaps.toolConcurrencyLimits[normalized.toolSlug];
     if (toolLimit && projection.projectedToolCount > toolLimit) {
       reject(
         "TOOL_CONCURRENCY_LIMIT_EXCEEDED",
@@ -308,12 +358,13 @@ function createResourceArbiter(options = {}) {
           ...input,
           principalHash: normalized.principalHash,
           toolSlug: normalized.toolSlug,
+          runtimeCaps,
         },
         projection,
       );
     }
 
-    if (projection.projectedMemoryMb > nodeMemoryHardCapMb) {
+    if (projection.projectedMemoryMb > runtimeCaps.nodeMemoryHardCapMb) {
       reject(
         "NODE_MEMORY_PRESSURE_EXCEEDED",
         "Node memory hard cap exceeded",
@@ -321,12 +372,13 @@ function createResourceArbiter(options = {}) {
           ...input,
           principalHash: normalized.principalHash,
           toolSlug: normalized.toolSlug,
+          runtimeCaps,
         },
         projection,
       );
     }
 
-    if (projection.projectedCpuShares > nodeCpuHardCapShares) {
+    if (projection.projectedCpuShares > runtimeCaps.nodeCpuHardCapShares) {
       reject(
         "NODE_CPU_SATURATION_EXCEEDED",
         "Node CPU hard cap exceeded",
@@ -334,6 +386,7 @@ function createResourceArbiter(options = {}) {
           ...input,
           principalHash: normalized.principalHash,
           toolSlug: normalized.toolSlug,
+          runtimeCaps,
         },
         projection,
       );

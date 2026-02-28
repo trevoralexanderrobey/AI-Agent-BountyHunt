@@ -64,6 +64,14 @@ function normalizeMetadataVersion(value) {
   return typeof value === "string" ? value.trim() : "";
 }
 
+function normalizePolicyVersion(value) {
+  const parsed = Number.parseInt(String(value ?? "").trim(), 10);
+  if (!Number.isFinite(parsed) || parsed <= 0) {
+    return 0;
+  }
+  return parsed;
+}
+
 function sanitizePeer(peerId, entry, includeSecret = false) {
   const base = {
     peerId,
@@ -73,7 +81,9 @@ function sanitizePeer(peerId, entry, includeSecret = false) {
     lastLatencyMs: entry.lastLatencyMs,
     lastHeartbeat: entry.lastHeartbeat,
     executionConfigHash: entry.executionConfigHash,
+    executionPolicyHash: entry.executionPolicyHash,
     executionConfigVersion: entry.executionConfigVersion,
+    executionPolicyVersion: entry.executionPolicyVersion,
     expectedExecutionConfigVersion: entry.expectedExecutionConfigVersion,
     nodeId: entry.nodeId,
   };
@@ -130,7 +140,9 @@ function createPeerRegistry(options = {}) {
       lastLatencyMs,
       lastHeartbeat,
       executionConfigHash: normalizeExecutionConfigHash(config.executionConfigHash),
+      executionPolicyHash: normalizeExecutionConfigHash(config.executionPolicyHash),
       executionConfigVersion: normalizeMetadataVersion(config.executionConfigVersion),
+      executionPolicyVersion: normalizePolicyVersion(config.executionPolicyVersion),
       expectedExecutionConfigVersion: normalizeMetadataVersion(config.expectedExecutionConfigVersion),
       nodeId: normalizeMetadataVersion(config.nodeId),
     };
@@ -230,8 +242,14 @@ function createPeerRegistry(options = {}) {
     if (typeof health.executionConfigHash === "string") {
       entry.executionConfigHash = normalizeExecutionConfigHash(health.executionConfigHash);
     }
+    if (typeof health.executionPolicyHash === "string") {
+      entry.executionPolicyHash = normalizeExecutionConfigHash(health.executionPolicyHash);
+    }
     if (typeof health.executionConfigVersion === "string") {
       entry.executionConfigVersion = normalizeMetadataVersion(health.executionConfigVersion);
+    }
+    if (typeof health.executionPolicyVersion !== "undefined") {
+      entry.executionPolicyVersion = normalizePolicyVersion(health.executionPolicyVersion);
     }
     if (typeof health.expectedExecutionConfigVersion === "string") {
       entry.expectedExecutionConfigVersion = normalizeMetadataVersion(health.expectedExecutionConfigVersion);
@@ -256,7 +274,9 @@ function createPeerRegistry(options = {}) {
         lastLatencyMs: entry.lastLatencyMs,
         lastHeartbeat: entry.lastHeartbeat,
         executionConfigHash: entry.executionConfigHash,
+        executionPolicyHash: entry.executionPolicyHash,
         executionConfigVersion: entry.executionConfigVersion,
+        executionPolicyVersion: entry.executionPolicyVersion,
         expectedExecutionConfigVersion: entry.expectedExecutionConfigVersion,
         nodeId: entry.nodeId,
       }));
@@ -294,7 +314,9 @@ function createPeerRegistry(options = {}) {
       const lastHeartbeat = Number.isFinite(Number(item.lastHeartbeat)) ? Math.max(0, Number(item.lastHeartbeat)) : 0;
       const status = item.status === STATUS_UP || item.status === STATUS_DOWN ? item.status : STATUS_DOWN;
       const executionConfigHash = normalizeExecutionConfigHash(item.executionConfigHash);
+      const executionPolicyHash = normalizeExecutionConfigHash(item.executionPolicyHash);
       const executionConfigVersion = normalizeMetadataVersion(item.executionConfigVersion);
+      const executionPolicyVersion = normalizePolicyVersion(item.executionPolicyVersion);
       const expectedExecutionConfigVersion = normalizeMetadataVersion(item.expectedExecutionConfigVersion);
       const nodeId = normalizeMetadataVersion(item.nodeId);
 
@@ -307,7 +329,9 @@ function createPeerRegistry(options = {}) {
           lastLatencyMs,
           lastHeartbeat,
           executionConfigHash,
+          executionPolicyHash,
           executionConfigVersion,
+          executionPolicyVersion,
           expectedExecutionConfigVersion,
           nodeId,
         });
@@ -320,7 +344,9 @@ function createPeerRegistry(options = {}) {
       existing.lastLatencyMs = lastLatencyMs;
       existing.lastHeartbeat = lastHeartbeat;
       existing.executionConfigHash = executionConfigHash;
+      existing.executionPolicyHash = executionPolicyHash;
       existing.executionConfigVersion = executionConfigVersion;
+      existing.executionPolicyVersion = executionPolicyVersion;
       existing.expectedExecutionConfigVersion = expectedExecutionConfigVersion;
       existing.nodeId = nodeId;
       if (existing.authToken) {
