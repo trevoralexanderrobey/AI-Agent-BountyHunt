@@ -19,6 +19,7 @@ class BaseToolAdapter {
     this.containerImages =
       config && config.containerImages && typeof config.containerImages === "object" ? config.containerImages : null;
     this.production = Boolean(config && config.production === true);
+    this.secretManager = config && config.secretManager && typeof config.secretManager === "object" ? config.secretManager : null;
   }
 
   getResourceLimits() {
@@ -351,15 +352,55 @@ class BaseToolAdapter {
       throw this.makeError("INVALID_CONTAINER_REQUEST", "Container invocation must include image");
     }
 
-    return this.withTimeout(
+    const context = {
+      toolSlug: this.slug,
+      requestId,
+      principalHash: input && typeof input.principalHash === "string" ? input.principalHash : "",
+    };
+    const invocationEnv = request.env && typeof request.env === "object" ? request.env : {};
+    let effectiveEnv = { ...invocationEnv };
+    let secretValues = [];
+    if (this.secretManager && typeof this.secretManager.prepareExecutionSecrets === "function") {
+      const prepared = this.secretManager.prepareExecutionSecrets(
+        input && input.executionSecrets && typeof input.executionSecrets === "object" ? input.executionSecrets : {},
+        context,
+      );
+      if (prepared && prepared.env && typeof prepared.env === "object") {
+        effectiveEnv = {
+          ...effectiveEnv,
+          ...prepared.env,
+        };
+      }
+      if (prepared && Array.isArray(prepared.secretValues)) {
+        secretValues = prepared.secretValues.slice();
+      }
+    }
+
+    if (this.secretManager && typeof this.secretManager.assertNoFilesystemSecretArtifacts === "function") {
+      this.secretManager.assertNoFilesystemSecretArtifacts(
+        Array.isArray(request.inputArtifacts) ? request.inputArtifacts : [],
+        secretValues,
+      );
+    }
+
+    const runtimeResult = await this.withTimeout(
       this.containerRuntime.runContainer({
         ...request,
+        env: effectiveEnv,
         resourceLimits: requestedLimits,
         toolSlug: this.slug,
         requestId,
+        principalHash: context.principalHash,
       }),
       timeout,
     );
+
+    if (this.secretManager && typeof this.secretManager.redactToolOutput === "function") {
+      const redacted = this.secretManager.redactToolOutput(runtimeResult, secretValues, context);
+      return redacted && Object.prototype.hasOwnProperty.call(redacted, "payload") ? redacted.payload : runtimeResult;
+    }
+
+    return runtimeResult;
   }
 
   normalizeRequestedResourceLimits(resourceLimits) {

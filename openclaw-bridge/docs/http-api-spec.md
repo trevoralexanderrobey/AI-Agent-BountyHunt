@@ -1,8 +1,8 @@
-# HTTP API Spec (Phase 10)
+# HTTP API Spec (Phase 21)
 
 ## Scope
 
-This document defines the external HTTP ingress layer that wraps Supervisor v1.
+This document defines the external HTTP ingress layer that wraps Supervisor v1 with Phase 21 governance controls.
 
 - Implementation files:
   - `/Users/trevorrobey/AI-Agent-BountyHunt/openclaw-bridge/http/server.js`
@@ -70,6 +70,15 @@ Header forwarding:
 - `X-Request-Id` used if valid (`<=128`) or generated.
 - `X-Principal-Id` forwarded as `principalId`.
 - `X-API-Version` optional; defaults to `v1`.
+- `X-Principal-Id` is mandatory for execution (identity required).
+
+### API Hardening Requirements
+
+1. Authentication required when auth is enabled.
+2. Identity required on every execution request.
+3. Deterministic request body size limit (`maxBodyBytes`).
+4. Per-user burst quota and hourly quota enforced by centralized quota store.
+5. Structured execution audit logs for auth, quota, execution, and egress decision points.
 
 Success response (`200`):
 
@@ -103,9 +112,9 @@ Error response:
 Mapped status/code:
 
 1. `400` -> `INVALID_REQUEST`
-2. `401` -> `UNAUTHORIZED`
-3. `429` -> `RATE_LIMIT_EXCEEDED`
-4. `503` -> `CIRCUIT_BREAKER_OPEN` (and service-unavailable paths)
+2. `401` -> `UNAUTHORIZED`, `UNAUTHENTICATED_EXECUTION`
+3. `429` -> `RATE_LIMIT_EXCEEDED`, `EXECUTION_RATE_LIMIT_EXCEEDED`, `EXECUTION_QUOTA_EXCEEDED`
+4. `503` -> `CIRCUIT_BREAKER_OPEN`, `NODE_CAPACITY_EXCEEDED`, `TOOL_CONCURRENCY_LIMIT_EXCEEDED`, `NODE_MEMORY_PRESSURE_EXCEEDED`, `NODE_CPU_SATURATION_EXCEEDED`, `EXECUTION_CONFIG_MISMATCH`
 5. `500` -> `INTERNAL_ERROR`
 
 ### `GET /health`
@@ -118,7 +127,12 @@ Mapped status/code:
   "timestamp": "2026-02-25T00:00:00.000Z",
   "supervisor_ready": true,
   "queue_length": 0,
-  "active_instances": 0
+  "active_instances": 0,
+  "node_id": "node-a",
+  "scope": "node",
+  "execution_config_hash": "sha256...",
+  "execution_config_version": "v1",
+  "expected_execution_config_version": "v1"
 }
 ```
 

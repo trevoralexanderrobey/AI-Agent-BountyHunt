@@ -734,7 +734,23 @@ Bridge / Director Agent
 
 ---
 
-### 24. Burp Suite Integration (BionicLink)
+### 24. Execution-Plane Governance & Resource Control (Phase 21)
+
+**Resource Arbiter**: `/Users/trevorrobey/AI-Agent-BountyHunt/openclaw-bridge/execution/resource-arbiter.js`  
+**Execution Quotas**: `/Users/trevorrobey/AI-Agent-BountyHunt/openclaw-bridge/security/execution-quota-store.js`  
+**Secret Manager**: `/Users/trevorrobey/AI-Agent-BountyHunt/openclaw-bridge/security/secret-manager.js`  
+**Specs**: `threat-model.md`, `secret-governance.md`  
+**Purpose**: Protect node capacity and prevent sensitive credential leakage during container execution.
+
+#### Capabilities
+- **Execution Quotas**: Hourly quotas and burst caps protecting the cluster from abuse.
+- **Resource Arbiter**: Deterministic memory mapping and allocation avoiding OOM events on concurrent executions.
+- **Secret Governance**: Runtime-only `env` injection preventing leakage in snapshots or on-disk.
+- **Threat Model**: Explicit documented defenses governing SSRF, Sandbox Breakouts, and Output Leaks.
+
+---
+
+### 25. Burp Suite Integration (BionicLink)
 
 **Extension**: BionicLink (custom Burp extension)  
 **Port**: 8090 (HTTP)  
@@ -953,12 +969,13 @@ User receives scan summary with findings
 │   │   └── supervisor-v1.js       # Supervisor v1 (routing, pooling, lifecycle)
 │   ├── observability/              # Telemetry system
 │   │   └── metrics.js             # In-memory metrics (counters, histograms, gauges)
-│   ├── security/                  # Security controls
-│   │   ├── auth.js                # Auth guard (constant-time bearer validation)
-│   │   ├── rate-limit.js          # Per-caller token bucket rate limiter
-│   │   ├── tls-config.js          # TLS/mTLS configuration
-│   │   ├── request-signing.js     # HMAC-SHA256 request signature verification
-│   │   └── audit-logger.js        # Structured append-only audit logging
+│   ├── security/                  # Security integrations (Phase 9, 21)
+│   │   ├── auth-guard.js          # Authentication validation (Constant-time)
+│   │   ├── audit-logger.js        # Audit logging sink (Phase 11)
+│   │   ├── request-signing.js     # HMAC signature validation
+│   │   ├── tls-config.js          # TLS 1.2+/mTLS config validation
+│   │   ├── secret-manager.js      # Memory-only secret injection mapping
+│   │   └── execution-quota-store.js # Rate limiting and quota bounds
 │   ├── http/                      # HTTP API ingress (Phase 10)
 │   │   ├── server.js              # HTTP server with graceful shutdown
 │   │   └── handlers.js            # Route handlers (/api/v1/execute, /health, /metrics)
@@ -1014,7 +1031,8 @@ User receives scan summary with findings
 │   │   ├── egress-policy.js       # Outbound network connectivity rules
 │   │   ├── image-policy.js        # Digest pinning and registry verification
 │   │   ├── container-audit.js     # Security profile/audit verification
-│   │   └── tool-image-catalog.js  # SHA256 pinned container images
+│   │   ├── tool-image-catalog.js  # SHA256 pinned container images
+│   │   └── resource-arbiter.js    # Node memory allocation and arbitration
 │   ├── containers/                # Dockerfiles for containerized skills
 │   │   ├── nmap/                  # nmap skill
 │   │   ├── aircrack/              # Wireless testing
@@ -1081,6 +1099,8 @@ User receives scan summary with findings
 │   │   ├── cluster-simulation-spec.md   # Multi-node simulation harness
 │   │   ├── execution-plane-hardening-spec.md # Execution plane hardening policies
 │   │   ├── execution-plane-activation-spec.md # Container execution logic spec
+│   │   ├── threat-model.md        # Execution threat library
+│   │   ├── secret-governance.md   # Secret leakage governance policy
 │   │   ├── API.md                 # API contract
 │   │   ├── BURP_INTEGRATION.md    # Burp setup guide
 │   │   ├── LLDB_TRIAGE.md         # LLDB setup guide
@@ -1322,6 +1342,6 @@ This architecture is designed for security researchers, bug bounty hunters, and 
 
 ---
 
-**Document Version**: 1.13  
-**Last Updated**: February 27, 2026  
+**Document Version**: 1.14  
+**Last Updated**: February 28, 2026  
 **Maintained By**: Trevor Robey

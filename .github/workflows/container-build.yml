@@ -1,0 +1,184 @@
+name: Container Supply Chain
+
+on:
+  push:
+    branches:
+      - main
+      - master
+    paths:
+      - "openclaw-bridge/containers/**"
+      - "openclaw-bridge/runtime/**"
+      - "openclaw-bridge/tools/**"
+      - "openclaw-bridge/execution/**"
+      - ".github/workflows/container-build.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  packages: write
+  id-token: write
+  attestations: write
+
+jobs:
+  build-scan-sign:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        tool:
+          - aircrack
+          - curl
+          - ffuf
+          - hashcat
+          - msfvenom
+          - nikto
+          - nmap
+          - nslookup
+          - sqlmap
+          - whois
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Validate pinned Dockerfile references
+        shell: bash
+        run: |
+          set -euo pipefail
+          dockerfile="openclaw-bridge/containers/${{ matrix.tool }}/Dockerfile"
+          if grep -En "FROM .*:latest" "$dockerfile"; then
+            echo "':latest' is not allowed in Dockerfile" >&2
+            exit 1
+          fi
+          if ! grep -En "^FROM .*@sha256:[a-f0-9]{64}$" "$dockerfile"; then
+            echo "FROM lines must be digest pinned" >&2
+            exit 1
+          fi
+
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v3
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Prepare image metadata
+        id: meta
+        shell: bash
+        run: |
+          set -euo pipefail
+          image="ghcr.io/${GITHUB_REPOSITORY_OWNER,,}/openclaw-bridge-${{ matrix.tool }}"
+          tag="${GITHUB_SHA}"
+          if [[ "$tag" == "latest" ]]; then
+            echo "latest tag is forbidden" >&2
+            exit 1
+          fi
+          echo "image=$image" >> "$GITHUB_OUTPUT"
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+
+      - name: Build and push image
+        id: build
+        uses: docker/build-push-action@v6
+        with:
+          context: openclaw-bridge
+          file: openclaw-bridge/containers/${{ matrix.tool }}/Dockerfile
+          push: true
+          provenance: true
+          sbom: true
+          tags: |
+            ${{ steps.meta.outputs.image }}:${{ steps.meta.outputs.tag }}
+          labels: |
+            org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
+            org.opencontainers.image.revision=${{ github.sha }}
+
+      - name: Enforce immutable digest output
+        shell: bash
+        run: |
+          set -euo pipefail
+          digest="${{ steps.build.outputs.digest }}"
+          if [[ -z "$digest" ]]; then
+            echo "Build digest is missing" >&2
+            exit 1
+          fi
+          if [[ "$digest" != sha256:* ]]; then
+            echo "Digest must be sha256" >&2
+            exit 1
+          fi
+
+      - name: Install Trivy
+        uses: aquasecurity/setup-trivy@v0.2.4
+
+      - name: CVE scan (fail on high/critical)
+        shell: bash
+        run: |
+          set -euo pipefail
+          image_ref="${{ steps.meta.outputs.image }}@${{ steps.build.outputs.digest }}"
+          trivy image --scanners vuln --severity HIGH,CRITICAL --exit-code 1 "$image_ref"
+
+      - name: Secret scan image layers
+        shell: bash
+        run: |
+          set -euo pipefail
+          image_ref="${{ steps.meta.outputs.image }}@${{ steps.build.outputs.digest }}"
+          trivy image --scanners secret --severity HIGH,CRITICAL --exit-code 1 "$image_ref"
+
+      - name: Enforce no embedded secrets in layers
+        shell: bash
+        run: |
+          set -euo pipefail
+          image_ref="${{ steps.meta.outputs.image }}@${{ steps.build.outputs.digest }}"
+          tmpdir="$(mktemp -d)"
+          trap 'rm -rf "$tmpdir"' EXIT
+          docker pull "$image_ref"
+          docker save "$image_ref" -o "$tmpdir/image.tar"
+          mkdir -p "$tmpdir/unpack"
+          tar -xf "$tmpdir/image.tar" -C "$tmpdir/unpack"
+          mapfile -t layers < <(find "$tmpdir/unpack" -name layer.tar | sort)
+          for layer in "${layers[@]}"; do
+            if tar -tf "$layer" | grep -E '(^|/)\.env($|/)' >/dev/null; then
+              echo "Forbidden .env file detected in image layer" >&2
+              exit 1
+            fi
+            if tar -xOf "$layer" 2>/dev/null | grep -aE 'BEGIN (RSA|EC|OPENSSH|PRIVATE) KEY|AKIA[0-9A-Z]{16}|gh[pousr]_[A-Za-z0-9_]{20,255}' >/dev/null; then
+              echo "Forbidden secret pattern detected in image layer bytes" >&2
+              exit 1
+            fi
+          done
+
+      - name: Generate SPDX SBOM
+        shell: bash
+        run: |
+          set -euo pipefail
+          image_ref="${{ steps.meta.outputs.image }}@${{ steps.build.outputs.digest }}"
+          trivy image --format spdx-json --output "sbom-${{ matrix.tool }}.spdx.json" "$image_ref"
+
+      - name: Upload SBOM artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: sbom-${{ matrix.tool }}
+          path: sbom-${{ matrix.tool }}.spdx.json
+
+      - name: Install Cosign
+        uses: sigstore/cosign-installer@v3.8.1
+
+      - name: Sign image (keyless)
+        shell: bash
+        env:
+          COSIGN_EXPERIMENTAL: "1"
+        run: |
+          set -euo pipefail
+          image_ref="${{ steps.meta.outputs.image }}@${{ steps.build.outputs.digest }}"
+          cosign sign --yes "$image_ref"
+
+      - name: Attest build provenance
+        uses: actions/attest-build-provenance@v2
+        with:
+          subject-name: ${{ steps.meta.outputs.image }}
+          subject-digest: ${{ steps.build.outputs.digest }}
+          push-to-registry: true

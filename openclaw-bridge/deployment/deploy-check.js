@@ -14,6 +14,14 @@ const REQUIRED_DEPLOYMENT_DOCS = [
 ];
 
 const REQUIRED_TOOLING_FILES = ["preflight-validator.js", "deploy-check.js"];
+const REQUIRED_PHASE21_DOCS = [
+  path.resolve(__dirname, "..", "docs", "secret-governance.md"),
+  path.resolve(__dirname, "..", "docs", "threat-model.md"),
+  path.resolve(__dirname, "..", "docs", "observability-spec.md"),
+  path.resolve(__dirname, "..", "docs", "http-api-spec.md"),
+  path.resolve(__dirname, "..", "docs", "execution-plane-activation-spec.md"),
+];
+const REQUIRED_PHASE21_WORKFLOW = path.resolve(__dirname, "..", "..", ".github", "workflows", "container-build.yml");
 
 function normalizeString(value) {
   return typeof value === "string" ? value.trim() : "";
@@ -70,6 +78,24 @@ function checkRequiredFiles(baseDir, fileNames) {
   return { missing, present };
 }
 
+function checkRequiredAbsoluteFiles(paths) {
+  const missing = [];
+  const present = [];
+  for (const absolutePath of paths) {
+    if (!fs.existsSync(absolutePath)) {
+      missing.push({ path: absolutePath });
+      continue;
+    }
+    const stat = fs.statSync(absolutePath);
+    if (!stat.isFile() || stat.size === 0) {
+      missing.push({ path: absolutePath });
+      continue;
+    }
+    present.push({ path: absolutePath });
+  }
+  return { missing, present };
+}
+
 async function runDeployCheck(options = {}) {
   const deploymentDir = path.resolve(__dirname);
   const errors = [];
@@ -112,6 +138,28 @@ async function runDeployCheck(options = {}) {
     });
   }
 
+  const phase21DocsCheck = checkRequiredAbsoluteFiles(REQUIRED_PHASE21_DOCS);
+  if (phase21DocsCheck.missing.length > 0) {
+    errors.push({
+      code: "PHASE21_GOVERNANCE_DOC_MISSING",
+      message: "One or more Phase 21 governance documents are missing or empty",
+      details: {
+        missing: phase21DocsCheck.missing,
+      },
+    });
+  }
+
+  const workflowCheck = checkRequiredAbsoluteFiles([REQUIRED_PHASE21_WORKFLOW]);
+  if (workflowCheck.missing.length > 0) {
+    errors.push({
+      code: "PHASE21_WORKFLOW_MISSING",
+      message: "Phase 21 container build workflow is missing or empty",
+      details: {
+        missing: workflowCheck.missing,
+      },
+    });
+  }
+
   const result = {
     ready_for_production: errors.length === 0,
     warnings,
@@ -129,6 +177,16 @@ async function runDeployCheck(options = {}) {
         required: REQUIRED_TOOLING_FILES,
         present: toolsCheck.present,
         missing: toolsCheck.missing,
+      },
+      phase21Docs: {
+        required: REQUIRED_PHASE21_DOCS,
+        present: phase21DocsCheck.present,
+        missing: phase21DocsCheck.missing,
+      },
+      workflow: {
+        required: [REQUIRED_PHASE21_WORKFLOW],
+        present: workflowCheck.present,
+        missing: workflowCheck.missing,
       },
     },
   };

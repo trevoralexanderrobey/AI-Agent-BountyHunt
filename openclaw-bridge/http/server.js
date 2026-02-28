@@ -55,6 +55,19 @@ function parseCsvOrUndefined(value) {
   return parsed.length > 0 ? parsed : undefined;
 }
 
+function parseJsonObject(value, fallback = {}) {
+  if (typeof value !== "string" || value.trim().length === 0) {
+    return fallback;
+  }
+  try {
+    const parsed = JSON.parse(value);
+    if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
+      return parsed;
+    }
+  } catch {}
+  return fallback;
+}
+
 function normalizeExecutionMode(value) {
   const normalized = typeof value === "string" ? value.trim().toLowerCase() : "";
   return normalized === "container" ? "container" : "host";
@@ -157,6 +170,7 @@ function createHttpServer(options = {}) {
     logger,
     authEnabled,
     isShuttingDown: () => state.shuttingDown,
+    maxBodyBytes,
   });
   const prometheusExporter = createPrometheusExporter({
     snapshot: () => {
@@ -509,6 +523,26 @@ if (require.main === module) {
         externalNetworkName: process.env.EXECUTION_EXTERNAL_NETWORK_NAME,
         internalNetworkName: process.env.EXECUTION_INTERNAL_NETWORK_NAME,
         nonRootUser: process.env.EXECUTION_CONTAINER_NON_ROOT_USER,
+        maxConcurrentContainersPerNode: parsePositiveInt(process.env.EXECUTION_MAX_CONCURRENT_CONTAINERS_PER_NODE, null),
+        toolConcurrencyLimits: parseJsonObject(process.env.EXECUTION_TOOL_CONCURRENCY_LIMITS, {}),
+        nodeMemoryHardCapMb: parsePositiveInt(process.env.EXECUTION_NODE_MEMORY_HARD_CAP_MB, null),
+        nodeCpuHardCapShares: parsePositiveInt(process.env.EXECUTION_NODE_CPU_HARD_CAP_SHARES, null),
+        egressAnomalyThresholdPerMinute: parsePositiveInt(process.env.EXECUTION_EGRESS_ANOMALY_THRESHOLD_PER_MINUTE, 100),
+        configVersion: process.env.EXECUTION_CONFIG_VERSION || "",
+        expectedExecutionConfigVersion: process.env.EXPECTED_EXECUTION_CONFIG_VERSION || "",
+        rollingUpgradeWindowMinutes: parsePositiveInt(process.env.EXECUTION_ROLLING_UPGRADE_WINDOW_MINUTES, 0),
+        rolloutWindowStartedAt: process.env.EXECUTION_ROLLOUT_WINDOW_STARTED_AT || "",
+        allowedConfigHashesByVersion: parseJsonObject(process.env.EXECUTION_ALLOWED_CONFIG_HASHES_BY_VERSION, {}),
+      },
+      security: {
+        executionQuotaPerHour: parsePositiveInt(process.env.EXECUTION_QUOTA_PER_HOUR, 0),
+        executionBurstLimitPerMinute: parsePositiveInt(process.env.EXECUTION_BURST_LIMIT_PER_MINUTE, 0),
+        quotaRedisUrl: process.env.EXECUTION_QUOTA_REDIS_URL || "",
+        quotaRedisPrefix: process.env.EXECUTION_QUOTA_REDIS_PREFIX || "openclaw:quota",
+      },
+      observability: {
+        thresholdScope: process.env.OBSERVABILITY_THRESHOLD_SCOPE || "node",
+        alertThresholds: parseJsonObject(process.env.OBSERVABILITY_ALERT_THRESHOLDS, {}),
       },
     },
     tls: {

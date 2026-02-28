@@ -1,32 +1,60 @@
-# Observability Spec
+# Observability Spec (Phase 21)
 
 ## Scope
 
-Phase 8 adds deterministic, in-memory telemetry to Supervisor v1 and Spawner v2.
+Phase 21 standardizes execution-plane observability for multi-node governance.
 
-- No runtime contract changes.
-- No JSON-RPC protocol changes.
-- No external exporters.
-- No file/network I/O from metrics code.
+1. Metrics remain deterministic and in-memory.
+2. Threshold evaluation scope is explicit and node-local in this phase.
+3. No control-plane routing semantics are changed by telemetry.
 
-## Module
+## Required Phase 21 Metrics
 
-- Metrics module: `/Users/trevorrobey/AI-Agent-BountyHunt/openclaw-bridge/observability/metrics.js`
-- Export: `createMetrics()`
+Every node must emit:
 
-API:
+1. `tool.container.duration`
+2. `tool.container.memory_usage`
+3. `tool.container.cpu_usage`
+4. `tool.execution.rejected`
+5. `circuit.open`
+6. `orphan.cleanup`
+7. `container.orphan.cleaned`
+8. `secret.access`
 
-1. `increment(counterName, labels?)`
-2. `observe(histogramName, value, labels?)`
-3. `gauge(name, value, labels?)`
-4. `snapshot()`
-5. `reset()`
+Additional egress observability:
 
-## Determinism
+1. `tool.container.egress.external_event`
+2. `tool.container.egress.anomaly`
 
-- Labels are canonicalized with lexicographically sorted keys.
-- Snapshot output is sorted by metric name and canonicalized labels.
-- Snapshot shape is always:
+## Rejection Metric Contract
+
+`tool.execution.rejected` labels must include:
+
+1. `reason`
+2. `node_id`
+3. `tool`
+4. `principal_hash`
+
+## Alert Threshold Configuration
+
+`observability.alertThresholds`:
+
+1. `circuitOpenRate`
+2. `executionRejectRate`
+3. `memoryPressureRate`
+
+`observability.thresholdScope` must be `node` in Phase 21.
+
+Alert payload labels:
+
+1. `scope=node`
+2. `node_id`
+3. `alert_type`
+
+## Determinism and Safety
+
+1. Label keys are canonicalized and sorted.
+2. Snapshot shape is stable:
 
 ```json
 {
@@ -36,93 +64,5 @@ API:
 }
 ```
 
-## Histogram Model
-
-Fixed bucket boundaries:
-
-`[10, 50, 100, 250, 500, 1000, 2500, 5000, 10000, +Inf]`
-
-Observation rules:
-
-- Ignore values where `!Number.isFinite(value)`.
-- Ignore values where `value < 0`.
-- Invalid observations must never throw.
-
-## Safety Guarantees
-
-- `increment`, `observe`, and `gauge` are non-throwing.
-- Invalid names/labels/values are ignored or normalized.
-- Metrics failures must never alter execution flow.
-- Metrics must not contain tokens, authorization headers, job payloads, or container network addresses.
-
-## Namespace Ownership
-
-### Supervisor namespace (`supervisor.*`)
-
-Owned by Supervisor routing decisions and pool lifecycle accounting.
-
-Counters:
-
-1. `supervisor.executions.total`
-2. `supervisor.executions.success`
-3. `supervisor.executions.error`
-4. `supervisor.executions.capacity_rejected`
-5. `supervisor.spawn.attempt`
-6. `supervisor.spawn.success`
-7. `supervisor.spawn.failure`
-8. `supervisor.instance.reaped`
-9. `supervisor.instance.terminated`
-10. `supervisor.instance.failed`
-
-Histograms:
-
-1. `supervisor.execution.duration_ms`
-2. `supervisor.spawn.duration_ms`
-
-Gauges:
-
-1. `supervisor.instances.total`
-2. `supervisor.instances.ready`
-3. `supervisor.instances.busy`
-4. `supervisor.pending_spawns`
-
-### Spawner namespace (`spawner.*`)
-
-Owned by Spawner container lifecycle events.
-
-Counters:
-
-1. `spawner.spawn.attempt`
-2. `spawner.spawn.success`
-3. `spawner.spawn.failure`
-4. `spawner.terminate.success`
-5. `spawner.terminate.failure`
-6. `spawner.health.timeout`
-
-Histograms:
-
-1. `spawner.spawn.duration_ms`
-
-## Drift Rules
-
-- Supervisor spawn metrics are incremented once per logical routing spawn decision.
-- Spawner spawn metrics are incremented once per spawner lifecycle outcome.
-- Health probe retries do not increment spawn attempt counters.
-- Cross-namespace duplication is allowed; within-namespace duplication for a single event is not.
-
-## Integration
-
-Supervisor:
-
-```js
-const supervisor = createSupervisorV1({ metrics });
-const snapshot = supervisor.getMetrics();
-```
-
-Spawner:
-
-```js
-const spawner = createSpawnerV2({ metrics });
-```
-
-If no metrics object is injected, both modules operate with safe no-op metrics behavior.
+3. Invalid metric operations must not throw.
+4. Secrets and auth material must never be included in labels.

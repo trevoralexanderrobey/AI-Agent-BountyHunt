@@ -448,3 +448,21 @@ OPENCLAW_CONTAINER_RUNTIME_ENABLED=true
 - Tools use `container-tool-runner.js` if enabled and fallback to host execution if rejected
 
 Spec: `/Users/trevorrobey/AI-Agent-BountyHunt/openclaw-bridge/docs/execution-plane-activation-spec.md`
+
+## Execution governance and resource control (Phase 21)
+
+Resource allocation boundaries covering node-level safety during container or host execution.
+
+- Global Quotas: 
+  - Regulated hourly burst rate
+  - Execution attempts tracked by principal and origin
+- Secret Governance: 
+  - Secrets injected into runtime ENV bounds via `secret-manager.js`
+  - Prevents secrets touching disk or snapshots
+- Arbitration: 
+  - Bounded concurrency matching total system memory capacity
+  - Automatic `release` idempotency in execution failures
+
+Specs: 
+- `/Users/trevorrobey/AI-Agent-BountyHunt/openclaw-bridge/docs/threat-model.md`
+- `/Users/trevorrobey/AI-Agent-BountyHunt/openclaw-bridge/docs/secret-governance.md`

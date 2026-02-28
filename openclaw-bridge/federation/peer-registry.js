@@ -52,6 +52,18 @@ function normalizeUrl(value) {
   }
 }
 
+function normalizeExecutionConfigHash(value) {
+  const normalized = typeof value === "string" ? value.trim().toLowerCase() : "";
+  if (!normalized) {
+    return "";
+  }
+  return /^[a-f0-9]{64}$/.test(normalized) ? normalized : "";
+}
+
+function normalizeMetadataVersion(value) {
+  return typeof value === "string" ? value.trim() : "";
+}
+
 function sanitizePeer(peerId, entry, includeSecret = false) {
   const base = {
     peerId,
@@ -60,6 +72,10 @@ function sanitizePeer(peerId, entry, includeSecret = false) {
     capabilities: [...entry.capabilities],
     lastLatencyMs: entry.lastLatencyMs,
     lastHeartbeat: entry.lastHeartbeat,
+    executionConfigHash: entry.executionConfigHash,
+    executionConfigVersion: entry.executionConfigVersion,
+    expectedExecutionConfigVersion: entry.expectedExecutionConfigVersion,
+    nodeId: entry.nodeId,
   };
 
   if (includeSecret) {
@@ -113,6 +129,10 @@ function createPeerRegistry(options = {}) {
       capabilities,
       lastLatencyMs,
       lastHeartbeat,
+      executionConfigHash: normalizeExecutionConfigHash(config.executionConfigHash),
+      executionConfigVersion: normalizeMetadataVersion(config.executionConfigVersion),
+      expectedExecutionConfigVersion: normalizeMetadataVersion(config.expectedExecutionConfigVersion),
+      nodeId: normalizeMetadataVersion(config.nodeId),
     };
 
     peers.set(peerId, entry);
@@ -207,6 +227,18 @@ function createPeerRegistry(options = {}) {
     if (Array.isArray(health.capabilities)) {
       entry.capabilities = normalizeCapabilities(health.capabilities);
     }
+    if (typeof health.executionConfigHash === "string") {
+      entry.executionConfigHash = normalizeExecutionConfigHash(health.executionConfigHash);
+    }
+    if (typeof health.executionConfigVersion === "string") {
+      entry.executionConfigVersion = normalizeMetadataVersion(health.executionConfigVersion);
+    }
+    if (typeof health.expectedExecutionConfigVersion === "string") {
+      entry.expectedExecutionConfigVersion = normalizeMetadataVersion(health.expectedExecutionConfigVersion);
+    }
+    if (typeof health.nodeId === "string") {
+      entry.nodeId = normalizeMetadataVersion(health.nodeId);
+    }
 
     peers.set(peerId, entry);
     emitChange();
@@ -223,6 +255,10 @@ function createPeerRegistry(options = {}) {
         capabilities: [...entry.capabilities],
         lastLatencyMs: entry.lastLatencyMs,
         lastHeartbeat: entry.lastHeartbeat,
+        executionConfigHash: entry.executionConfigHash,
+        executionConfigVersion: entry.executionConfigVersion,
+        expectedExecutionConfigVersion: entry.expectedExecutionConfigVersion,
+        nodeId: entry.nodeId,
       }));
   }
 
@@ -257,6 +293,10 @@ function createPeerRegistry(options = {}) {
       const lastLatencyMs = Number.isFinite(Number(item.lastLatencyMs)) ? Math.max(0, Number(item.lastLatencyMs)) : 0;
       const lastHeartbeat = Number.isFinite(Number(item.lastHeartbeat)) ? Math.max(0, Number(item.lastHeartbeat)) : 0;
       const status = item.status === STATUS_UP || item.status === STATUS_DOWN ? item.status : STATUS_DOWN;
+      const executionConfigHash = normalizeExecutionConfigHash(item.executionConfigHash);
+      const executionConfigVersion = normalizeMetadataVersion(item.executionConfigVersion);
+      const expectedExecutionConfigVersion = normalizeMetadataVersion(item.expectedExecutionConfigVersion);
+      const nodeId = normalizeMetadataVersion(item.nodeId);
 
       if (!existing) {
         peers.set(peerId, {
@@ -266,6 +306,10 @@ function createPeerRegistry(options = {}) {
           capabilities,
           lastLatencyMs,
           lastHeartbeat,
+          executionConfigHash,
+          executionConfigVersion,
+          expectedExecutionConfigVersion,
+          nodeId,
         });
         created += 1;
         continue;
@@ -275,6 +319,10 @@ function createPeerRegistry(options = {}) {
       existing.capabilities = capabilities;
       existing.lastLatencyMs = lastLatencyMs;
       existing.lastHeartbeat = lastHeartbeat;
+      existing.executionConfigHash = executionConfigHash;
+      existing.executionConfigVersion = executionConfigVersion;
+      existing.expectedExecutionConfigVersion = expectedExecutionConfigVersion;
+      existing.nodeId = nodeId;
       if (existing.authToken) {
         existing.status = status;
       } else {

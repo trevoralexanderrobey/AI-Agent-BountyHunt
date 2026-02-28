@@ -21,6 +21,11 @@ const { registerBatch3Tools } = require("../tools/adapters/batch-3-index.js");
 const { createToolRegistry } = require("../tools/tool-registry.js");
 const { createToolValidator } = require("../tools/tool-validator.js");
 const { createContainerRuntime } = require("../execution/container-runtime.js");
+const { validateResourceLimitsObject } = require("../execution/resource-policy.js");
+const { createResourceArbiter, hashPrincipal } = require("../execution/resource-arbiter.js");
+const { createSecretManager } = require("../security/secret-manager.js");
+const { createExecutionQuotaStore } = require("../security/execution-quota-store.js");
+const { createExecutionConfigReconciler } = require("../config/reconciler.js");
 
 const SKILL_CONFIG = Object.freeze({
   nmap: Object.freeze({
@@ -72,6 +77,14 @@ function parseBoolean(value, fallback = false) {
     }
   }
   return fallback;
+}
+
+function parsePositiveInt(value, fallback) {
+  const parsed = Number.parseInt(String(value ?? "").trim(), 10);
+  if (!Number.isFinite(parsed) || parsed <= 0) {
+    return fallback;
+  }
+  return parsed;
 }
 
 function isPlainObject(value) {
@@ -133,6 +146,18 @@ function resolveExecutionSettings(options = {}) {
     externalNetworkName: normalizeString(execution.externalNetworkName),
     internalNetworkName: normalizeString(execution.internalNetworkName),
     nonRootUser: normalizeString(execution.nonRootUser),
+    maxConcurrentContainersPerNode: parsePositiveInt(execution.maxConcurrentContainersPerNode, null),
+    toolConcurrencyLimits: isPlainObject(execution.toolConcurrencyLimits) ? execution.toolConcurrencyLimits : {},
+    nodeMemoryHardCapMb: parsePositiveInt(execution.nodeMemoryHardCapMb, null),
+    nodeCpuHardCapShares: parsePositiveInt(execution.nodeCpuHardCapShares, null),
+    egressAnomalyThresholdPerMinute: parsePositiveInt(execution.egressAnomalyThresholdPerMinute, 100),
+    configVersion: normalizeString(execution.configVersion),
+    expectedExecutionConfigVersion: normalizeString(execution.expectedExecutionConfigVersion),
+    rollingUpgradeWindowMinutes: parsePositiveInt(execution.rollingUpgradeWindowMinutes, 0),
+    rolloutWindowStartedAt: normalizeString(execution.rolloutWindowStartedAt),
+    allowedConfigHashesByVersion: isPlainObject(execution.allowedConfigHashesByVersion)
+      ? execution.allowedConfigHashesByVersion
+      : {},
   };
 }
 
@@ -301,6 +326,10 @@ function createSupervisorV1(options = {}) {
         : undefined,
   });
   const executionSettings = resolveExecutionSettings(options);
+  const securitySettings = isPlainObject(options.security) ? options.security : {};
+  const observabilitySettings = isPlainObject(options.observability) ? options.observability : {};
+  const alertThresholds = isPlainObject(observabilitySettings.alertThresholds) ? observabilitySettings.alertThresholds : {};
+  const thresholdScope = normalizeString(observabilitySettings.thresholdScope).toLowerCase() === "cluster" ? "cluster" : "node";
   const containerRuntime =
     executionSettings.executionMode === "container" && executionSettings.containerRuntimeEnabled
       ? options.containerRuntime && typeof options.containerRuntime.runContainer === "function"
@@ -319,9 +348,49 @@ function createSupervisorV1(options = {}) {
               externalNetworkName: executionSettings.externalNetworkName,
               internalNetworkName: executionSettings.internalNetworkName,
               nonRootUser: executionSettings.nonRootUser,
+              egressAnomalyThresholdPerMinute: executionSettings.egressAnomalyThresholdPerMinute,
             },
+            logger: options.logger,
           })
       : null;
+  const resourceArbiter =
+    executionSettings.executionMode === "container" && executionSettings.containerRuntimeEnabled
+      ? options.resourceArbiter && typeof options.resourceArbiter.tryAcquire === "function"
+        ? options.resourceArbiter
+        : createResourceArbiter({
+            execution: executionSettings,
+            metrics,
+            logger: options.logger || auditLogger,
+            nodeId: nodePublication.nodeId,
+          })
+      : null;
+  const secretManager =
+    options.secretManager && typeof options.secretManager.prepareExecutionSecrets === "function"
+      ? options.secretManager
+      : createSecretManager({
+          metrics,
+          logger: options.logger || auditLogger,
+        });
+  const executionConfigReconciler =
+    executionSettings.executionMode === "container" && executionSettings.containerRuntimeEnabled
+      ? options.executionConfigReconciler && typeof options.executionConfigReconciler.assertExecutionAllowed === "function"
+        ? options.executionConfigReconciler
+        : createExecutionConfigReconciler({
+            production: executionSettings.production,
+            nodeId: nodePublication.nodeId,
+            execution: executionSettings,
+          })
+      : null;
+  const executionQuotaStore =
+    options.executionQuotaStore && typeof options.executionQuotaStore.consume === "function"
+      ? options.executionQuotaStore
+      : createExecutionQuotaStore({
+          production: executionSettings.production,
+          nodeId: nodePublication.nodeId,
+          security: securitySettings,
+          metrics,
+          logger: options.logger || auditLogger,
+        });
   const externalToolRegistry = options.toolRegistry && typeof options.toolRegistry.get === "function" ? options.toolRegistry : null;
   const toolRegistry = externalToolRegistry || createToolRegistry({ strict: false });
   registerBatch1Tools(toolRegistry);
@@ -432,6 +501,7 @@ function createSupervisorV1(options = {}) {
   let queueProcessorActive = false;
   let statePersistenceInitialized = false;
   let suspendStatePersistence = false;
+  let arbiterReconciledFromRuntime = false;
   const stateManager = stateEnabled
     ? createStateManager({
         version: CONTROL_PLANE_STATE_VERSION,
@@ -457,14 +527,6 @@ function createSupervisorV1(options = {}) {
         },
       })
     : null;
-
-  function parsePositiveInt(value, fallback) {
-    const parsed = Number.parseInt(String(value ?? "").trim(), 10);
-    if (!Number.isFinite(parsed) || parsed <= 0) {
-      return fallback;
-    }
-    return parsed;
-  }
 
   function parseNonNegativeInt(value, fallback) {
     const parsed = Number.parseInt(String(value ?? "").trim(), 10);
@@ -540,6 +602,7 @@ function createSupervisorV1(options = {}) {
       adapter.imagePolicies = executionSettings.imagePolicies;
       adapter.containerImages = executionSettings.images;
       adapter.production = executionSettings.production;
+      adapter.secretManager = secretManager;
     }
   }
 
@@ -602,6 +665,186 @@ function createSupervisorV1(options = {}) {
     }
 
     return null;
+  }
+
+  function resolveExecutionSecretsForTool(slug, requestContext) {
+    const contextSecrets =
+      requestContext && isPlainObject(requestContext.executionSecrets) ? requestContext.executionSecrets : {};
+    const toolConfig = readToolContainerConfig(slug);
+    const toolSecrets = isPlainObject(toolConfig.runtimeSecrets) ? toolConfig.runtimeSecrets : {};
+    return {
+      ...toolSecrets,
+      ...contextSecrets,
+    };
+  }
+
+  function emitExecutionRejectedMetric(reasonCode, slug, principalId) {
+    metrics.increment("tool.execution.rejected", {
+      reason: reasonCode || "EXECUTION_REJECTED",
+      node_id: nodePublication.nodeId,
+      tool: normalizeString(slug).toLowerCase() || "unknown",
+      principal_hash: hashPrincipal(principalId || "anonymous"),
+    });
+  }
+
+  function aggregateCounterValue(snapshot, metricName, predicate = null) {
+    if (!snapshot || !Array.isArray(snapshot.counters)) {
+      return 0;
+    }
+    let total = 0;
+    for (const entry of snapshot.counters) {
+      if (!entry || entry.name !== metricName) {
+        continue;
+      }
+      if (predicate && !predicate(entry)) {
+        continue;
+      }
+      const value = Number(entry.value);
+      if (!Number.isFinite(value) || value < 0) {
+        continue;
+      }
+      total += value;
+    }
+    return total;
+  }
+
+  function emitThresholdAlert(alertType, observedRate, threshold) {
+    metrics.increment("observability.alert", {
+      scope: "node",
+      node_id: nodePublication.nodeId,
+      alert_type: alertType,
+      threshold: String(threshold),
+    });
+    safeAudit({
+      event: "observability_threshold_alert",
+      principal_id: "system",
+      slug: "",
+      request_id: "",
+      status: "failure",
+      details: {
+        scope: "node",
+        node_id: nodePublication.nodeId,
+        alertType,
+        observedRate,
+        threshold,
+      },
+    });
+  }
+
+  function evaluateNodeAlertThresholds() {
+    if (thresholdScope !== "node") {
+      return;
+    }
+
+    const rejectRateThreshold = Number(alertThresholds.executionRejectRate);
+    const circuitOpenRateThreshold = Number(alertThresholds.circuitOpenRate);
+    const memoryPressureRateThreshold = Number(alertThresholds.memoryPressureRate);
+
+    const hasAnyThreshold = [rejectRateThreshold, circuitOpenRateThreshold, memoryPressureRateThreshold].some(
+      (value) => Number.isFinite(value) && value >= 0,
+    );
+    if (!hasAnyThreshold) {
+      return;
+    }
+
+    const snapshot = metrics.snapshot();
+    const totalExecutions = aggregateCounterValue(snapshot, "supervisor.executions.total");
+    if (totalExecutions <= 0) {
+      return;
+    }
+
+    if (Number.isFinite(rejectRateThreshold) && rejectRateThreshold >= 0) {
+      const rejected = aggregateCounterValue(snapshot, "tool.execution.rejected", (entry) => {
+        const labels = entry && entry.labels && typeof entry.labels === "object" ? entry.labels : {};
+        return labels.node_id === nodePublication.nodeId;
+      });
+      const rejectRate = rejected / totalExecutions;
+      if (rejectRate >= rejectRateThreshold) {
+        emitThresholdAlert("executionRejectRate", rejectRate, rejectRateThreshold);
+      }
+    }
+
+    if (Number.isFinite(circuitOpenRateThreshold) && circuitOpenRateThreshold >= 0) {
+      const circuitOpen = aggregateCounterValue(snapshot, "supervisor.executions.error", (entry) => {
+        const labels = entry && entry.labels && typeof entry.labels === "object" ? entry.labels : {};
+        return labels.reason === "circuit_open";
+      });
+      const circuitOpenRate = circuitOpen / totalExecutions;
+      if (circuitOpenRate >= circuitOpenRateThreshold) {
+        emitThresholdAlert("circuitOpenRate", circuitOpenRate, circuitOpenRateThreshold);
+      }
+    }
+
+    if (Number.isFinite(memoryPressureRateThreshold) && memoryPressureRateThreshold >= 0) {
+      const memoryPressureRejects = aggregateCounterValue(snapshot, "tool.execution.rejected", (entry) => {
+        const labels = entry && entry.labels && typeof entry.labels === "object" ? entry.labels : {};
+        return labels.reason === "NODE_MEMORY_PRESSURE_EXCEEDED" && labels.node_id === nodePublication.nodeId;
+      });
+      const memoryPressureRate = memoryPressureRejects / totalExecutions;
+      if (memoryPressureRate >= memoryPressureRateThreshold) {
+        emitThresholdAlert("memoryPressureRate", memoryPressureRate, memoryPressureRateThreshold);
+      }
+    }
+  }
+
+  function getExecutionPeersForReconciliation() {
+    if (!federationPeerRegistry || typeof federationPeerRegistry.listPeers !== "function") {
+      return [];
+    }
+    return federationPeerRegistry.listPeers().map((peer) => {
+      const record = peer && typeof peer === "object" ? peer : {};
+      return {
+        peerId: typeof record.peerId === "string" ? record.peerId : "",
+        status: typeof record.status === "string" ? record.status : "DOWN",
+        executionConfigHash: typeof record.executionConfigHash === "string" ? record.executionConfigHash : "",
+        executionConfigVersion: typeof record.executionConfigVersion === "string" ? record.executionConfigVersion : "",
+      };
+    });
+  }
+
+  async function ensureResourceArbiterReconciled() {
+    if (arbiterReconciledFromRuntime || !resourceArbiter || typeof resourceArbiter.reconstructFromActiveExecutions !== "function") {
+      if (!resourceArbiter) {
+        arbiterReconciledFromRuntime = true;
+      }
+      return {
+        ok: arbiterReconciledFromRuntime,
+      };
+    }
+
+    let rebuildResult = null;
+    try {
+      rebuildResult = await resourceArbiter.reconstructFromActiveExecutions(containerRuntime || []);
+    } catch (error) {
+      rebuildResult = {
+        ok: false,
+        reason: error && error.message ? error.message : String(error),
+      };
+    }
+
+    if (rebuildResult && rebuildResult.ok === true) {
+      arbiterReconciledFromRuntime = true;
+      return {
+        ok: true,
+      };
+    }
+
+    metrics.increment("resource.arbiter.rebuild.failed", {
+      node_id: nodePublication.nodeId,
+    });
+
+    if (executionSettings.production) {
+      throw makeFailure("NODE_CAPACITY_EXCEEDED", "Resource arbiter reconstruction failed during startup", {
+        reason:
+          rebuildResult && typeof rebuildResult.reason === "string"
+            ? rebuildResult.reason
+            : "resource_arbiter_rebuild_failed",
+      });
+    }
+
+    return {
+      ok: false,
+    };
   }
 
   function makeFailure(code, message, details) {
@@ -2032,6 +2275,23 @@ function createSupervisorV1(options = {}) {
 
   async function initialize() {
     await ensureInitialized();
+
+    if (!arbiterReconciledFromRuntime) {
+      await ensureResourceArbiterReconciled();
+    }
+
+    if (executionConfigReconciler) {
+      try {
+        const summary = executionConfigReconciler.evaluate(getExecutionPeersForReconciliation());
+        if (!summary.ok) {
+          metrics.increment("execution.config.mismatch", {
+            node_id: nodePublication.nodeId,
+            scope: "node",
+          });
+        }
+      } catch {}
+    }
+
     publishNodeMetadataGauge();
     if (stateManager && !statePersistenceInitialized) {
       const loadResult = await stateManager.initialize();
@@ -2081,6 +2341,19 @@ function createSupervisorV1(options = {}) {
     try {
       authGuard.validate(context, requestId);
       rateLimiter.check(principalId, requestId);
+      if (executionQuotaStore && typeof executionQuotaStore.consume === "function") {
+        const quotaDecision = await executionQuotaStore.consume({
+          principalId,
+          requestId,
+          toolSlug: slug,
+        });
+        if (!quotaDecision || quotaDecision.ok !== true) {
+          const code = quotaDecision && typeof quotaDecision.code === "string" ? quotaDecision.code : "EXECUTION_QUOTA_EXCEEDED";
+          throw makeFailure(code, quotaDecision && quotaDecision.message ? quotaDecision.message : "Execution quota exceeded", {
+            quota: quotaDecision && quotaDecision.details ? quotaDecision.details : {},
+          });
+        }
+      }
       safeAudit({
         event: "execute",
         principal_id: principalId,
@@ -2153,19 +2426,88 @@ function createSupervisorV1(options = {}) {
           timeout: requestTimeoutMs,
           requestId,
         };
+        let arbiterLeaseId = "";
         const adapterExecutionMode =
           validation.adapter && validation.adapter.executionMode === "container" ? "container" : "host";
         if (adapterExecutionMode === "container") {
+          if (!arbiterReconciledFromRuntime) {
+            await ensureResourceArbiterReconciled();
+          }
+          if (resourceArbiter && !arbiterReconciledFromRuntime) {
+            emitExecutionRejectedMetric("NODE_CAPACITY_EXCEEDED", slug, principalId);
+            throw makeFailure("NODE_CAPACITY_EXCEEDED", "Resource arbiter state is not reconciled");
+          }
           const eligibility = resolveContainerExecutionEligibility();
           const requestedLimits = resolveRequestedContainerLimits(slug, params, context);
+          const principalHashValue = hashPrincipal(principalId);
           executionInput.executionEligibility = eligibility;
+          executionInput.principalHash = principalHashValue;
           if (requestedLimits) {
             executionInput.resourceLimits = requestedLimits;
           }
+
+          if (executionConfigReconciler) {
+            try {
+              executionConfigReconciler.assertExecutionAllowed(getExecutionPeersForReconciliation());
+            } catch (error) {
+              metrics.increment("execution.config.mismatch", {
+                node_id: nodePublication.nodeId,
+                scope: "node",
+              });
+              emitExecutionRejectedMetric("EXECUTION_CONFIG_MISMATCH", slug, principalId);
+              throw makeFailure("EXECUTION_CONFIG_MISMATCH", "Execution config mismatch detected", {
+                reason: error && error.message ? error.message : "Execution config mismatch",
+                details: error && error.details ? error.details : {},
+              });
+            }
+          }
+
+          const validatedRequestedLimits = requestedLimits
+            ? validateResourceLimitsObject(requestedLimits, {
+                rejectUnknown: true,
+                label: "resourceLimits",
+              })
+            : { valid: false, limits: null, errors: [] };
+
+          if (resourceArbiter && validatedRequestedLimits.valid) {
+            try {
+              const lease = resourceArbiter.tryAcquire({
+                requestId,
+                principalId,
+                principalHash: principalHashValue,
+                toolSlug: slug,
+                resourceLimits: validatedRequestedLimits.limits,
+              });
+              arbiterLeaseId = lease.leaseId;
+            } catch (error) {
+              const code = error && typeof error.code === "string" ? error.code : "NODE_CAPACITY_EXCEEDED";
+              throw makeFailure(code, error && error.message ? error.message : "Execution rejected by resource arbiter", {
+                reason: code,
+                details: error && error.details ? error.details : {},
+              });
+            }
+          }
+
+          const executionSecrets = resolveExecutionSecretsForTool(slug, context);
+          const arbitrationSatisfied = !resourceArbiter || Boolean(arbiterLeaseId);
+          if (arbitrationSatisfied && Object.keys(executionSecrets).length > 0) {
+            executionInput.executionSecrets = executionSecrets;
+          }
+
         }
-        const toolResult = await validation.adapter.execute({
-          ...executionInput,
-        });
+        let toolResult;
+        try {
+          toolResult = await validation.adapter.execute({
+            ...executionInput,
+          });
+        } finally {
+          if (resourceArbiter && arbiterLeaseId) {
+            try {
+              resourceArbiter.release(arbiterLeaseId);
+            } catch {}
+            arbiterLeaseId = "";
+          }
+        }
         const toolDuration = Math.max(
           0,
           toolResult &&
@@ -2697,6 +3039,9 @@ function createSupervisorV1(options = {}) {
       if (shouldObserveExecution) {
         metrics.observe("supervisor.execution.duration_ms", Date.now() - executionStartedAt, { slug, method });
       }
+      try {
+        evaluateNodeAlertThresholds();
+      } catch {}
     }
   }
 
@@ -2822,15 +3167,37 @@ function createSupervisorV1(options = {}) {
       };
     });
 
+    const executionMetadata = executionConfigReconciler
+      ? executionConfigReconciler.localMetadata()
+      : {
+          nodeId: nodePublication.nodeId,
+        };
+
     return {
       ok: true,
       isShuttingDown,
       skills,
+      executionMetadata: {
+        ...executionMetadata,
+        thresholdScope: thresholdScope === "cluster" ? "cluster" : "node",
+      },
     };
   }
 
   function getMetrics() {
     return metrics.snapshot();
+  }
+
+  function getExecutionMetadata() {
+    const local = executionConfigReconciler
+      ? executionConfigReconciler.localMetadata()
+      : {
+          nodeId: nodePublication.nodeId,
+        };
+    return {
+      ...local,
+      thresholdScope: thresholdScope === "cluster" ? "cluster" : "node",
+    };
   }
 
   async function shutdown() {
@@ -2952,6 +3319,12 @@ function createSupervisorV1(options = {}) {
       await stateManager.shutdown();
     }
 
+    if (executionQuotaStore && typeof executionQuotaStore.close === "function") {
+      try {
+        await executionQuotaStore.close();
+      } catch {}
+    }
+
     return {
       ok: true,
       terminated,
@@ -2968,6 +3341,7 @@ function createSupervisorV1(options = {}) {
     initialize,
     execute,
     getStatus,
+    getExecutionMetadata,
     getMetrics,
     reapIdle,
     shutdown,

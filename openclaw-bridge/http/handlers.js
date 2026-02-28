@@ -131,11 +131,35 @@ function mapSupervisorError(error) {
   if (code === "UNAUTHORIZED") {
     return { statusCode: 401, code: "UNAUTHORIZED", message: "Authentication failed" };
   }
+  if (code === "UNAUTHENTICATED_EXECUTION") {
+    return { statusCode: 401, code: "UNAUTHENTICATED_EXECUTION", message: "Execution requires authenticated identity" };
+  }
   if (code === "SUPERVISOR_RATE_LIMIT_EXCEEDED") {
     return { statusCode: 429, code: "RATE_LIMIT_EXCEEDED", message: "Rate limit exceeded" };
   }
+  if (code === "EXECUTION_RATE_LIMIT_EXCEEDED") {
+    return { statusCode: 429, code: "EXECUTION_RATE_LIMIT_EXCEEDED", message: "Per-minute execution rate limit exceeded" };
+  }
+  if (code === "EXECUTION_QUOTA_EXCEEDED") {
+    return { statusCode: 429, code: "EXECUTION_QUOTA_EXCEEDED", message: "Hourly execution quota exceeded" };
+  }
   if (code === "CIRCUIT_BREAKER_OPEN") {
     return { statusCode: 503, code: "CIRCUIT_BREAKER_OPEN", message: "Skill circuit breaker is open" };
+  }
+  if (code === "NODE_CAPACITY_EXCEEDED") {
+    return { statusCode: 503, code: "NODE_CAPACITY_EXCEEDED", message: "Node concurrency capacity exceeded" };
+  }
+  if (code === "TOOL_CONCURRENCY_LIMIT_EXCEEDED") {
+    return { statusCode: 503, code: "TOOL_CONCURRENCY_LIMIT_EXCEEDED", message: "Tool concurrency limit exceeded" };
+  }
+  if (code === "NODE_MEMORY_PRESSURE_EXCEEDED") {
+    return { statusCode: 503, code: "NODE_MEMORY_PRESSURE_EXCEEDED", message: "Node memory pressure exceeded" };
+  }
+  if (code === "NODE_CPU_SATURATION_EXCEEDED") {
+    return { statusCode: 503, code: "NODE_CPU_SATURATION_EXCEEDED", message: "Node CPU saturation exceeded" };
+  }
+  if (code === "EXECUTION_CONFIG_MISMATCH") {
+    return { statusCode: 503, code: "EXECUTION_CONFIG_MISMATCH", message: "Execution config mismatch across nodes" };
   }
   if (code === "SUPERVISOR_CAPACITY_EXCEEDED") {
     return { statusCode: 503, code: "INTERNAL_ERROR", message: "Service capacity exceeded" };
@@ -281,6 +305,15 @@ function createHttpHandlers(options = {}) {
 
       const authHeader = typeof req.headers.authorization === "string" ? req.headers.authorization : "";
       if (authEnabled && !isBearerHeader(authHeader)) {
+        logger.info({
+          event: "execution_audit",
+          decision: "deny",
+          phase: "auth",
+          reason: "missing_or_invalid_bearer",
+          request_id: requestId,
+          route: "/api/v1/execute",
+          timestamp: nowIso(),
+        });
         metrics.increment("http.requests.error", { route: "/api/v1/execute", code: "UNAUTHORIZED" });
         metrics.increment("http.errors_by_code", { code: "UNAUTHORIZED" });
         writeJson(
@@ -337,14 +370,36 @@ function createHttpHandlers(options = {}) {
 
       const principalHeader = req.headers["x-principal-id"];
       const principalId = typeof principalHeader === "string" ? principalHeader.trim() : "";
+      if (!principalId) {
+        logger.info({
+          event: "execution_audit",
+          decision: "deny",
+          phase: "identity",
+          reason: "missing_principal_id",
+          request_id: requestId,
+          route: "/api/v1/execute",
+          timestamp: nowIso(),
+        });
+        metrics.increment("http.requests.error", { route: "/api/v1/execute", code: "UNAUTHENTICATED_EXECUTION" });
+        metrics.increment("http.errors_by_code", { code: "UNAUTHENTICATED_EXECUTION" });
+        writeJson(
+          res,
+          401,
+          makeErrorEnvelope({
+            code: "UNAUTHENTICATED_EXECUTION",
+            message: "Execution requires authenticated identity",
+            requestId,
+            apiVersion,
+          }),
+        );
+        return;
+      }
 
       const requestContext = {
         requestId,
         authHeader,
+        principalId,
       };
-      if (principalId) {
-        requestContext.principalId = principalId;
-      }
       if (typeof parsed.idempotencyKey === "string" && parsed.idempotencyKey.length > 0) {
         requestContext.idempotencyKey = parsed.idempotencyKey;
       }
@@ -354,6 +409,17 @@ function createHttpHandlers(options = {}) {
 
       let result;
       try {
+        logger.info({
+          event: "execution_audit",
+          decision: "allow",
+          phase: "authz",
+          route: "/api/v1/execute",
+          request_id: requestId,
+          principal_id: principalId,
+          slug: parsed.slug,
+          method: parsed.method,
+          timestamp: nowIso(),
+        });
         result = await supervisor.execute(parsed.slug, parsed.method, parsed.params, requestContext);
       } catch (error) {
         const mapped = mapSupervisorError(error);
@@ -370,6 +436,18 @@ function createHttpHandlers(options = {}) {
           duration_ms: Date.now() - startedAt,
           timestamp: nowIso(),
         });
+        logger.info({
+          event: "execution_audit",
+          decision: "deny",
+          phase: "execution",
+          route: "/api/v1/execute",
+          request_id: errorRequestId,
+          principal_id: principalId,
+          slug: parsed.slug,
+          method: parsed.method,
+          reason: mapped.code,
+          timestamp: nowIso(),
+        });
         writeJson(
           res,
           mapped.statusCode,
@@ -384,6 +462,26 @@ function createHttpHandlers(options = {}) {
       }
 
       metrics.increment("http.requests.success", { route: "/api/v1/execute" });
+      logger.info({
+        event: "execution_audit",
+        decision: "allow",
+        phase: "execution",
+        route: "/api/v1/execute",
+        request_id: requestId,
+        principal_id: principalId,
+        slug: parsed.slug,
+        method: parsed.method,
+        timestamp: nowIso(),
+      });
+      logger.info({
+        event: "egress_audit",
+        route: "/api/v1/execute",
+        request_id: requestId,
+        principal_id: principalId,
+        slug: parsed.slug,
+        method: parsed.method,
+        timestamp: nowIso(),
+      });
       writeJson(res, 200, {
         ok: true,
         data: {
@@ -433,6 +531,7 @@ function createHttpHandlers(options = {}) {
         : false;
       const supervisorReady = Boolean(status && status.ok === true && status.isShuttingDown !== true);
       const healthState = supervisorReady && !hasOpenCircuit ? "healthy" : "degraded";
+      const executionMetadata = status && status.executionMetadata && typeof status.executionMetadata === "object" ? status.executionMetadata : {};
 
       writeJson(res, 200, {
         status: healthState,
@@ -440,6 +539,16 @@ function createHttpHandlers(options = {}) {
         supervisor_ready: supervisorReady,
         queue_length: queueLength,
         active_instances: activeInstances,
+        node_id: typeof executionMetadata.nodeId === "string" ? executionMetadata.nodeId : "node-unknown",
+        scope: typeof executionMetadata.thresholdScope === "string" ? executionMetadata.thresholdScope : "node",
+        execution_config_hash:
+          typeof executionMetadata.executionConfigHash === "string" ? executionMetadata.executionConfigHash : "",
+        execution_config_version:
+          typeof executionMetadata.executionConfigVersion === "string" ? executionMetadata.executionConfigVersion : "",
+        expected_execution_config_version:
+          typeof executionMetadata.expectedExecutionConfigVersion === "string"
+            ? executionMetadata.expectedExecutionConfigVersion
+            : "",
       });
     } catch (error) {
       writeJson(res, 503, {

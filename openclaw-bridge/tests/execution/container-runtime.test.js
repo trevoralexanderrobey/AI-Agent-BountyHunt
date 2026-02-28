@@ -188,4 +188,7 @@ test("runtime returns tool payload in mock backend when validation passes", asyn
   assert.equal(result.backend, "mock");
   assert.equal(result.toolSlug, "curl");
   assert.equal(result.mocked, true);
+
+  const active = await runtime.listActiveExecutions();
+  assert.equal(Array.isArray(active), true);
 });

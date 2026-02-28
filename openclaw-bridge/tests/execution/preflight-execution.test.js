@@ -32,6 +32,19 @@ function baseProductionOptions(overrides = {}) {
       executionMode: "container",
       containerRuntimeEnabled: true,
       backend: "mock",
+      maxConcurrentContainersPerNode: 16,
+      toolConcurrencyLimits: {
+        curl: 4,
+      },
+      nodeMemoryHardCapMb: 4096,
+      nodeCpuHardCapShares: 4096,
+      configVersion: "v1",
+      expectedExecutionConfigVersion: "v1",
+      rollingUpgradeWindowMinutes: 15,
+      rolloutWindowStartedAt: "2026-02-27T00:00:00.000Z",
+      allowedConfigHashesByVersion: {
+        v1: ["aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"],
+      },
       tools: {
         curl: {
           signatureVerified: true,
@@ -65,6 +78,20 @@ function baseProductionOptions(overrides = {}) {
         curl: "ghcr.io/openclaw-bridge/curl@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
       },
       allowedImageRegistries: ["ghcr.io"],
+    },
+    security: {
+      executionQuotaPerHour: 120,
+      executionBurstLimitPerMinute: 20,
+      quotaRedisUrl: "redis://127.0.0.1:6379",
+      quotaRedisPrefix: "openclaw:quota",
+    },
+    observability: {
+      thresholdScope: "node",
+      alertThresholds: {
+        circuitOpenRate: 0.2,
+        executionRejectRate: 0.15,
+        memoryPressureRate: 0.1,
+      },
     },
     ...overrides,
   };
@@ -104,6 +131,7 @@ test("production host mode warns but does not error from execution plane", async
 
   assert.equal(errorCodes(result).has("EXECUTION_CONTAINER_REQUIRED_PROD"), false);
   assert.equal(errorCodes(result).has("CONTAINER_RUNTIME_DISABLED"), false);
+  assert.equal(errorCodes(result).has("EXECUTION_QUOTA_PER_HOUR_REQUIRED"), false);
   assert.equal(warningCodes(result).has("HOST_EXECUTION_TRANSITIONAL_PROD"), true);
 });
 
@@ -184,4 +212,45 @@ test("production container mode passes when execution policies are complete", as
   const result = await runPreflightValidation(baseProductionOptions());
   assert.equal(result.ready_for_production, true);
   assert.equal((result.errors || []).length, 0);
+});
+
+test("production container mode fails when phase 21 governance settings are missing", async () => {
+  const base = baseProductionOptions();
+  const result = await runPreflightValidation(
+    baseProductionOptions({
+      execution: {
+        ...base.execution,
+        maxConcurrentContainersPerNode: undefined,
+        toolConcurrencyLimits: undefined,
+        nodeMemoryHardCapMb: undefined,
+        nodeCpuHardCapShares: undefined,
+        expectedExecutionConfigVersion: "",
+      },
+      security: {
+        executionQuotaPerHour: 0,
+        executionBurstLimitPerMinute: 0,
+        quotaRedisUrl: "",
+      },
+      observability: {
+        thresholdScope: "cluster",
+        alertThresholds: {
+          circuitOpenRate: -1,
+          executionRejectRate: -1,
+          memoryPressureRate: -1,
+        },
+      },
+    }),
+  );
+
+  const codes = errorCodes(result);
+  assert.equal(codes.has("EXECUTION_NODE_CONCURRENCY_CAP_REQUIRED"), true);
+  assert.equal(codes.has("EXECUTION_TOOL_CONCURRENCY_LIMITS_INVALID"), true);
+  assert.equal(codes.has("EXECUTION_NODE_MEMORY_CAP_REQUIRED"), true);
+  assert.equal(codes.has("EXECUTION_NODE_CPU_CAP_REQUIRED"), true);
+  assert.equal(codes.has("EXPECTED_EXECUTION_CONFIG_VERSION_REQUIRED"), true);
+  assert.equal(codes.has("EXECUTION_QUOTA_PER_HOUR_REQUIRED"), true);
+  assert.equal(codes.has("EXECUTION_BURST_LIMIT_PER_MINUTE_REQUIRED"), true);
+  assert.equal(codes.has("EXECUTION_QUOTA_REDIS_URL_REQUIRED"), true);
+  assert.equal(codes.has("OBSERVABILITY_THRESHOLD_SCOPE_INVALID"), true);
+  assert.equal(codes.has("OBSERVABILITY_ALERT_THRESHOLDS_INVALID"), true);
 });

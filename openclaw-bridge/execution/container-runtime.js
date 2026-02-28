@@ -22,7 +22,7 @@ const RUN_CONTAINER_REQUIRED_KEYS = Object.freeze([
   "sandboxConfig",
   "signatureVerified",
 ]);
-const RUN_CONTAINER_OPTIONAL_KEYS = Object.freeze(["inputArtifacts", "requestId"]);
+const RUN_CONTAINER_OPTIONAL_KEYS = Object.freeze(["inputArtifacts", "requestId", "principalHash"]);
 const RUN_CONTAINER_KEYS = Object.freeze([...RUN_CONTAINER_REQUIRED_KEYS, ...RUN_CONTAINER_OPTIONAL_KEYS]);
 
 const CONTAINER_LABEL_ENABLED = "com.openclaw.execution";
@@ -30,6 +30,11 @@ const CONTAINER_LABEL_TOOL = "com.openclaw.tool";
 const CONTAINER_LABEL_REQUEST = "com.openclaw.request_id";
 const CONTAINER_LABEL_RUNTIME = "com.openclaw.runtime_id";
 const CONTAINER_LABEL_VOLUME = "com.openclaw.volume";
+const CONTAINER_LABEL_PRINCIPAL_HASH = "com.openclaw.principal_hash";
+const CONTAINER_LABEL_CPU_SHARES = "com.openclaw.resource.cpu_shares";
+const CONTAINER_LABEL_MEMORY_MB = "com.openclaw.resource.memory_mb";
+const CONTAINER_LABEL_RUNTIME_SECONDS = "com.openclaw.resource.max_runtime_seconds";
+const CONTAINER_LABEL_OUTPUT_BYTES = "com.openclaw.resource.max_output_bytes";
 
 const DEFAULT_EXTERNAL_NETWORK = "openclaw-execution-net";
 const DEFAULT_INTERNAL_NETWORK = "openclaw-execution-internal";
@@ -59,6 +64,14 @@ function parseBoolean(value, fallback = false) {
     }
   }
   return fallback;
+}
+
+function parsePositiveInteger(value, fallback = null) {
+  const parsed = Number.parseInt(String(value ?? "").trim(), 10);
+  if (!Number.isFinite(parsed) || parsed <= 0) {
+    return fallback;
+  }
+  return parsed;
 }
 
 function makeFailure(code, message, details) {
@@ -162,6 +175,10 @@ function resolveExecutionConfig(options) {
       : Object.prototype.hasOwnProperty.call(execution, "requireSignatureVerification")
       ? Boolean(execution.requireSignatureVerification)
       : false,
+    egressAnomalyThresholdPerMinute: parsePositiveInteger(
+      options.egressAnomalyThresholdPerMinute,
+      parsePositiveInteger(execution.egressAnomalyThresholdPerMinute, 100),
+    ),
   };
 }
 
@@ -213,6 +230,13 @@ function validateRunContainerInputShape(input) {
     }
   }
 
+  if (Object.prototype.hasOwnProperty.call(input, "principalHash")) {
+    const principalHash = normalizeString(input.principalHash).toLowerCase();
+    if (principalHash && !/^[a-f0-9]{8,64}$/.test(principalHash)) {
+      throw makeFailure("INVALID_CONTAINER_REQUEST", "principalHash must be a lowercase hex string when provided");
+    }
+  }
+
   if (Object.prototype.hasOwnProperty.call(input, "inputArtifacts")) {
     validateInputArtifacts(input.inputArtifacts);
   }
@@ -256,6 +280,16 @@ function validateInputArtifacts(inputArtifacts) {
       throw makeFailure("INVALID_CONTAINER_REQUEST", "inlineText artifact requires contents string");
     }
   }
+}
+
+function normalizeResourceLimits(rawLimits) {
+  const source = isPlainObject(rawLimits) ? rawLimits : {};
+  return {
+    cpuShares: parsePositiveInteger(source.cpuShares, null),
+    memoryLimitMb: parsePositiveInteger(source.memoryLimitMb, null),
+    maxRuntimeSeconds: parsePositiveInteger(source.maxRuntimeSeconds, null),
+    maxOutputBytes: parsePositiveInteger(source.maxOutputBytes, null),
+  };
 }
 
 function buildDockerEnv(env, input) {
@@ -337,6 +371,38 @@ function createNoopMetrics() {
     increment: () => {},
     observe: () => {},
     gauge: () => {},
+  };
+}
+
+function createNoopLogger() {
+  return {
+    info: () => {},
+    error: () => {},
+  };
+}
+
+function createSafeLogger(rawLogger) {
+  const noop = createNoopLogger();
+  const source = rawLogger && typeof rawLogger === "object" ? rawLogger : noop;
+  return {
+    info: (...args) => {
+      try {
+        if (typeof source.info === "function") {
+          source.info(...args);
+        } else if (typeof source.log === "function") {
+          source.log(...args);
+        }
+      } catch {}
+    },
+    error: (...args) => {
+      try {
+        if (typeof source.error === "function") {
+          source.error(...args);
+        } else if (typeof source.log === "function") {
+          source.log(...args);
+        }
+      } catch {}
+    },
   };
 }
 
@@ -567,6 +633,10 @@ function createMockBackend() {
         image: input.image,
         createdAt: Date.now(),
         state: "MOCK_RUNNING",
+        requestId: normalizeString(input.requestId),
+        principalHash: normalizeString(input.principalHash).toLowerCase(),
+        toolSlug: normalizeString(input.toolSlug).toLowerCase(),
+        resourceLimits: normalizeResourceLimits(input.resourceLimits),
       });
 
       return {
@@ -618,6 +688,19 @@ function createMockBackend() {
       };
     },
 
+    async listActiveExecutions() {
+      return Array.from(containers.values())
+        .filter((record) => record.state === "MOCK_RUNNING")
+        .map((record) => ({
+          containerId: record.containerId,
+          requestId: record.requestId,
+          principalHash: record.principalHash,
+          toolSlug: record.toolSlug,
+          resourceLimits: normalizeResourceLimits(record.resourceLimits),
+          createdAt: record.createdAt,
+        }));
+    },
+
     async sweepOrphans() {
       return { removedContainers: 0, removedVolumes: 0 };
     },
@@ -634,6 +717,9 @@ function createDisabledBackend(name) {
     },
     async inspectContainer() {
       throw makeFailure("CONTAINER_BACKEND_DISABLED", `Backend '${name}' is scaffolding-only`);
+    },
+    async listActiveExecutions() {
+      return [];
     },
     async sweepOrphans() {
       return { removedContainers: 0, removedVolumes: 0 };
@@ -730,14 +816,22 @@ async function createDockerBackend({ docker, executionConfig, metrics, runtimeId
     });
 
     const requestId = normalizeString(input.requestId);
+    const principalHash = normalizeString(input.principalHash).toLowerCase();
     const labels = {
       [CONTAINER_LABEL_ENABLED]: "true",
       [CONTAINER_LABEL_TOOL]: input.toolSlug,
       [CONTAINER_LABEL_RUNTIME]: runtimeId,
       [CONTAINER_LABEL_VOLUME]: volumeName,
+      [CONTAINER_LABEL_CPU_SHARES]: String(input.resourceLimits.cpuShares),
+      [CONTAINER_LABEL_MEMORY_MB]: String(input.resourceLimits.memoryLimitMb),
+      [CONTAINER_LABEL_RUNTIME_SECONDS]: String(input.resourceLimits.maxRuntimeSeconds),
+      [CONTAINER_LABEL_OUTPUT_BYTES]: String(input.resourceLimits.maxOutputBytes),
     };
     if (requestId) {
       labels[CONTAINER_LABEL_REQUEST] = requestId;
+    }
+    if (principalHash) {
+      labels[CONTAINER_LABEL_PRINCIPAL_HASH] = principalHash;
     }
 
     const securityOpt = [];
@@ -939,6 +1033,38 @@ async function createDockerBackend({ docker, executionConfig, metrics, runtimeId
     };
   }
 
+  async function listActiveExecutions() {
+    const running = await docker.listContainers({
+      all: false,
+      filters: {
+        label: [`${CONTAINER_LABEL_ENABLED}=true`],
+      },
+    });
+
+    return (Array.isArray(running) ? running : []).map((container) => {
+      const labels = container && isPlainObject(container.Labels) ? container.Labels : {};
+      const requestId = normalizeString(labels[CONTAINER_LABEL_REQUEST]);
+      const toolSlug = normalizeString(labels[CONTAINER_LABEL_TOOL]).toLowerCase();
+      const principalHash = normalizeString(labels[CONTAINER_LABEL_PRINCIPAL_HASH]).toLowerCase();
+      const createdAt = Number.isFinite(Number(container.Created)) ? Number(container.Created) * 1000 : Date.now();
+      const resourceLimits = {
+        cpuShares: parsePositiveInteger(labels[CONTAINER_LABEL_CPU_SHARES], null),
+        memoryLimitMb: parsePositiveInteger(labels[CONTAINER_LABEL_MEMORY_MB], null),
+        maxRuntimeSeconds: parsePositiveInteger(labels[CONTAINER_LABEL_RUNTIME_SECONDS], null),
+        maxOutputBytes: parsePositiveInteger(labels[CONTAINER_LABEL_OUTPUT_BYTES], null),
+      };
+
+      return {
+        containerId: normalizeString(container && container.Id),
+        requestId,
+        principalHash,
+        toolSlug,
+        resourceLimits,
+        createdAt,
+      };
+    });
+  }
+
   async function sweepOrphans() {
     const removedContainers = [];
     const removedVolumes = [];
@@ -1000,6 +1126,7 @@ async function createDockerBackend({ docker, executionConfig, metrics, runtimeId
     runContainer,
     stopContainer,
     inspectContainer,
+    listActiveExecutions,
     sweepOrphans,
   };
 }
@@ -1010,6 +1137,7 @@ function createContainerRuntime(options = {}) {
   const runtimeEnabled = resolveRuntimeEnabled(options);
   const executionConfig = resolveExecutionConfig(options);
   const metrics = createSafeMetrics(options.metrics);
+  const logger = createSafeLogger(options.logger || options.auditLogger);
   const audit = createContainerAudit({
     logger: options.auditLogger,
     metrics,
@@ -1043,6 +1171,56 @@ function createContainerRuntime(options = {}) {
   }
 
   let orphanTimer = null;
+  const egressEventsByBucket = new Map();
+
+  function recordEgressEvent(toolSlug, egressValidation) {
+    const normalizedTool = normalizeString(toolSlug).toLowerCase() || "unknown";
+    const allowedExternal = Boolean(
+      egressValidation &&
+        egressValidation.policy &&
+        isPlainObject(egressValidation.policy) &&
+        egressValidation.policy.allowedExternalNetwork === true,
+    );
+
+    if (!allowedExternal) {
+      return;
+    }
+
+    const minuteBucket = Math.floor(Date.now() / 60000);
+    const key = `${normalizedTool}:${minuteBucket}`;
+    const nextCount = (egressEventsByBucket.get(key) || 0) + 1;
+    egressEventsByBucket.set(key, nextCount);
+
+    metrics.increment("tool.container.egress.external_event", {
+      tool: normalizedTool,
+      minute_bucket: String(minuteBucket),
+    });
+
+    const threshold = parsePositiveInteger(executionConfig.egressAnomalyThresholdPerMinute, 100);
+    if (nextCount > threshold) {
+      metrics.increment("tool.container.egress.anomaly", {
+        tool: normalizedTool,
+        minute_bucket: String(minuteBucket),
+      });
+      logger.error({
+        event: "tool_container_egress_anomaly",
+        tool: normalizedTool,
+        minute_bucket: minuteBucket,
+        count: nextCount,
+        threshold,
+        timestamp: new Date().toISOString(),
+      });
+    }
+
+    const cutoffBucket = minuteBucket - 2;
+    for (const mapKey of egressEventsByBucket.keys()) {
+      const suffix = mapKey.split(":").pop() || "";
+      const parsedBucket = Number.parseInt(suffix, 10);
+      if (Number.isFinite(parsedBucket) && parsedBucket < cutoffBucket) {
+        egressEventsByBucket.delete(mapKey);
+      }
+    }
+  }
 
   async function resolveBackend() {
     if (backendPromise) {
@@ -1068,7 +1246,12 @@ function createContainerRuntime(options = {}) {
     validateRunContainerInputShape(input);
 
     const toolSlug = normalizeString(input.toolSlug).toLowerCase();
-    circuit.assertClosed(toolSlug);
+    try {
+      circuit.assertClosed(toolSlug);
+    } catch (error) {
+      metrics.increment("circuit.open", { tool: toolSlug });
+      throw error;
+    }
 
     const resourceValidation = validateResourceLimitsObject(input.resourceLimits, {
       rejectUnknown: true,
@@ -1115,6 +1298,7 @@ function createContainerRuntime(options = {}) {
         errors: egressValidation.errors,
       });
     }
+    recordEgressEvent(toolSlug, egressValidation);
 
     const requireSignatureVerification = production
       ? executionConfig.requireSignatureVerificationInProduction
@@ -1231,6 +1415,15 @@ function createContainerRuntime(options = {}) {
     return resolvedBackend.inspectContainer(containerId);
   }
 
+  async function listActiveExecutions() {
+    const resolvedBackend = await resolveBackend();
+    if (!resolvedBackend || typeof resolvedBackend.listActiveExecutions !== "function") {
+      return [];
+    }
+    const records = await resolvedBackend.listActiveExecutions();
+    return Array.isArray(records) ? records : [];
+  }
+
   async function sweepOrphans() {
     const resolvedBackend = await resolveBackend();
     if (!resolvedBackend || typeof resolvedBackend.sweepOrphans !== "function") {
@@ -1240,7 +1433,37 @@ function createContainerRuntime(options = {}) {
       };
     }
 
-    return resolvedBackend.sweepOrphans();
+    const result = await resolvedBackend.sweepOrphans();
+    const removedContainers = Number.isFinite(Number(result && result.removedContainers))
+      ? Math.max(0, Number(result.removedContainers))
+      : 0;
+    const removedVolumes = Number.isFinite(Number(result && result.removedVolumes))
+      ? Math.max(0, Number(result.removedVolumes))
+      : 0;
+
+    if (removedContainers > 0) {
+      metrics.increment("container.orphan.cleaned", {
+        resource: "container",
+        removed: String(removedContainers),
+      });
+    }
+    if (removedVolumes > 0) {
+      metrics.increment("container.orphan.cleaned", {
+        resource: "volume",
+        removed: String(removedVolumes),
+      });
+    }
+    if (removedContainers > 0 || removedVolumes > 0) {
+      metrics.increment("orphan.cleanup", {
+        removed_containers: String(removedContainers),
+        removed_volumes: String(removedVolumes),
+      });
+    }
+
+    return {
+      removedContainers,
+      removedVolumes,
+    };
   }
 
   function startOrphanSweeper(intervalMs = 60000) {
@@ -1281,6 +1504,7 @@ function createContainerRuntime(options = {}) {
     runContainer,
     stopContainer,
     inspectContainer,
+    listActiveExecutions,
     sweepOrphans,
     startOrphanSweeper,
     stopOrphanSweeper,

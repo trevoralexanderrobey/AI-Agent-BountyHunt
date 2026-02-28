@@ -25,6 +25,7 @@ Key capabilities:
 - **Operational Runbooks** — Preflight validation, SLO/SLI tracking, scaling strategy, and disaster recovery playbooks
 - **Execution Plane Hardening** — Container runtime integration scaffolding, resource/egress/sandbox policies
 - **Controlled Runtime Activation** — Opt-in containerized execution enforcing sandbox and image provenance guardrails
+- **Execution Governance & Resource Control** — Safe secret injection, threat models, and deterministic execution quotas
 - **Cluster Simulation** — Deterministic fault injection harness for multi-node scenario testing
 - **MCP Bridge** — Director → Executor pattern connecting GitHub Pro / Antigravity / Codex to OpenClaw
 
@@ -126,6 +127,8 @@ cd "AG for OC"
 - [Deployment Topology Spec](./openclaw-bridge/docs/deployment-topology-spec.md) — Rolling upgrades and version safety
 - [Execution Plane Hardening Spec](./openclaw-bridge/docs/execution-plane-hardening-spec.md) — Container execution policy enforcement scaffolding
 - [Execution Plane Activation Spec](./openclaw-bridge/docs/execution-plane-activation-spec.md) — Layered runtime enablement controls
+- [Execution Threat Model](./openclaw-bridge/docs/threat-model.md) — Container breakout and supply chain threat libraries
+- [Secret Governance](./openclaw-bridge/docs/secret-governance.md) — Runtime secret injection and leakage prevention
 - [Cluster Simulation Spec](./openclaw-bridge/docs/cluster-simulation-spec.md) — Multi-node fault injection harness
 - [Topology Model](./openclaw-bridge/deployment/topology-model.md) — Production topology model and node placement guidance
 - [Operational Playbook](./openclaw-bridge/deployment/operational-playbook.md) — Playbooks for disaster recovery and performance targets

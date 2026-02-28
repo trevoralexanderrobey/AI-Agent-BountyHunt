@@ -553,6 +553,231 @@ function resolveExecutionConfig(options, manifest) {
   return merged;
 }
 
+function resolveSecurityConfig(options, manifest) {
+  const manifestSecurity = manifest && manifest.security && typeof manifest.security === "object" ? manifest.security : {};
+  const optionSecurity = options && options.security && typeof options.security === "object" ? options.security : {};
+  return {
+    ...manifestSecurity,
+    ...optionSecurity,
+  };
+}
+
+function resolveObservabilityConfig(options, manifest) {
+  const manifestObservability =
+    manifest && manifest.observability && typeof manifest.observability === "object" ? manifest.observability : {};
+  const optionObservability =
+    options && options.observability && typeof options.observability === "object" ? options.observability : {};
+  const alertThresholds = {
+    ...(manifestObservability.alertThresholds && typeof manifestObservability.alertThresholds === "object"
+      ? manifestObservability.alertThresholds
+      : {}),
+    ...(optionObservability.alertThresholds && typeof optionObservability.alertThresholds === "object"
+      ? optionObservability.alertThresholds
+      : {}),
+  };
+  return {
+    ...manifestObservability,
+    ...optionObservability,
+    alertThresholds,
+  };
+}
+
+function validateToolConcurrencyMap(rawValue, label) {
+  if (!rawValue || typeof rawValue !== "object" || Array.isArray(rawValue)) {
+    return {
+      valid: false,
+      errors: [`${label} must be an object`],
+    };
+  }
+
+  const errors = [];
+  for (const [toolSlug, rawLimit] of Object.entries(rawValue)) {
+    const slug = normalizeString(toolSlug).toLowerCase();
+    if (!slug) {
+      errors.push(`${label} contains an empty tool slug`);
+      continue;
+    }
+    if (!Number.isFinite(Number(rawLimit)) || !Number.isInteger(Number(rawLimit)) || Number(rawLimit) <= 0) {
+      errors.push(`${label}.${slug} must be a positive integer`);
+    }
+  }
+
+  return {
+    valid: errors.length === 0,
+    errors,
+  };
+}
+
+function validatePhase21ExecutionConfig(executionConfig, errors, warnings, isProduction, mode) {
+  if (mode !== "container") {
+    return;
+  }
+
+  const maxConcurrentContainersPerNode = parsePositiveInt(executionConfig.maxConcurrentContainersPerNode);
+  if (!maxConcurrentContainersPerNode) {
+    addIssue(errors, "EXECUTION_NODE_CONCURRENCY_CAP_REQUIRED", "execution.maxConcurrentContainersPerNode is required", {});
+  }
+
+  const nodeMemoryHardCapMb = parsePositiveInt(executionConfig.nodeMemoryHardCapMb);
+  if (!nodeMemoryHardCapMb) {
+    addIssue(errors, "EXECUTION_NODE_MEMORY_CAP_REQUIRED", "execution.nodeMemoryHardCapMb is required", {});
+  }
+
+  const nodeCpuHardCapShares = parsePositiveInt(executionConfig.nodeCpuHardCapShares);
+  if (!nodeCpuHardCapShares) {
+    addIssue(errors, "EXECUTION_NODE_CPU_CAP_REQUIRED", "execution.nodeCpuHardCapShares is required", {});
+  }
+
+  const toolConcurrencyValidation = validateToolConcurrencyMap(
+    executionConfig.toolConcurrencyLimits,
+    "execution.toolConcurrencyLimits",
+  );
+  if (!toolConcurrencyValidation.valid) {
+    addIssue(errors, "EXECUTION_TOOL_CONCURRENCY_LIMITS_INVALID", "execution.toolConcurrencyLimits is invalid", {
+      errors: toolConcurrencyValidation.errors,
+    });
+  }
+
+  const configVersion = normalizeString(executionConfig.configVersion);
+  const expectedExecutionConfigVersion = normalizeString(executionConfig.expectedExecutionConfigVersion);
+  const rollingUpgradeWindowMinutes = parsePositiveInt(executionConfig.rollingUpgradeWindowMinutes);
+  const rolloutWindowStartedAt = normalizeString(executionConfig.rolloutWindowStartedAt);
+  const allowedConfigHashesByVersion =
+    executionConfig.allowedConfigHashesByVersion && typeof executionConfig.allowedConfigHashesByVersion === "object"
+      ? executionConfig.allowedConfigHashesByVersion
+      : {};
+
+  if (isProduction && !configVersion) {
+    addIssue(errors, "EXECUTION_CONFIG_VERSION_REQUIRED", "execution.configVersion is required in production container mode", {});
+  }
+
+  if (isProduction && !expectedExecutionConfigVersion) {
+    addIssue(
+      errors,
+      "EXPECTED_EXECUTION_CONFIG_VERSION_REQUIRED",
+      "execution.expectedExecutionConfigVersion is required in production container mode",
+      {},
+    );
+  }
+
+  if (isProduction && !rollingUpgradeWindowMinutes) {
+    addIssue(
+      errors,
+      "EXECUTION_ROLLING_UPGRADE_WINDOW_REQUIRED",
+      "execution.rollingUpgradeWindowMinutes must be a positive integer in production",
+      {},
+    );
+  }
+
+  if (rollingUpgradeWindowMinutes && !rolloutWindowStartedAt) {
+    addIssue(errors, "EXECUTION_ROLLOUT_WINDOW_STARTED_AT_REQUIRED", "execution.rolloutWindowStartedAt is required", {});
+  }
+
+  const allowedVersions = Object.keys(allowedConfigHashesByVersion || {});
+  if (isProduction && allowedVersions.length === 0) {
+    addIssue(
+      errors,
+      "EXECUTION_ALLOWED_CONFIG_HASHES_REQUIRED",
+      "execution.allowedConfigHashesByVersion must include at least one version entry in production",
+      {},
+    );
+  }
+
+  for (const version of allowedVersions) {
+    const hashes = Array.isArray(allowedConfigHashesByVersion[version]) ? allowedConfigHashesByVersion[version] : [];
+    if (hashes.length === 0) {
+      addIssue(errors, "EXECUTION_ALLOWED_CONFIG_HASHES_INVALID", "allowed hash list must not be empty", {
+        version,
+      });
+      continue;
+    }
+    for (const hash of hashes) {
+      const normalized = normalizeString(hash).toLowerCase();
+      if (!/^[a-f0-9]{64}$/.test(normalized)) {
+        addIssue(errors, "EXECUTION_ALLOWED_CONFIG_HASHES_INVALID", "allowed config hash must be a sha256 hex digest", {
+          version,
+          hash,
+        });
+      }
+    }
+  }
+
+  if (!isProduction && thresholdWarningNeeded(executionConfig)) {
+    addIssue(
+      warnings,
+      "EXECUTION_PHASE21_CONFIG_INCOMPLETE_NON_PROD",
+      "Phase 21 execution config is partially configured in non-production mode",
+      {},
+    );
+  }
+}
+
+function thresholdWarningNeeded(executionConfig) {
+  const requiredKeys = [
+    "maxConcurrentContainersPerNode",
+    "nodeMemoryHardCapMb",
+    "nodeCpuHardCapShares",
+    "toolConcurrencyLimits",
+  ];
+  return requiredKeys.some((key) => !Object.prototype.hasOwnProperty.call(executionConfig || {}, key));
+}
+
+function validatePhase21SecurityConfig(securityConfig, errors, isProduction, mode) {
+  if (mode !== "container") {
+    return;
+  }
+
+  const executionQuotaPerHour = parsePositiveInt(securityConfig.executionQuotaPerHour) || 0;
+  const executionBurstLimitPerMinute = parsePositiveInt(securityConfig.executionBurstLimitPerMinute) || 0;
+  const quotaRedisUrl = normalizeString(securityConfig.quotaRedisUrl);
+
+  if (executionQuotaPerHour <= 0) {
+    addIssue(errors, "EXECUTION_QUOTA_PER_HOUR_REQUIRED", "security.executionQuotaPerHour must be > 0", {});
+  }
+
+  if (executionBurstLimitPerMinute <= 0) {
+    addIssue(errors, "EXECUTION_BURST_LIMIT_PER_MINUTE_REQUIRED", "security.executionBurstLimitPerMinute must be > 0", {});
+  }
+
+  if (isProduction && (!quotaRedisUrl || !/^redis(s)?:\/\//i.test(quotaRedisUrl))) {
+    addIssue(errors, "EXECUTION_QUOTA_REDIS_URL_REQUIRED", "security.quotaRedisUrl must be set to a redis URL in production", {});
+  }
+}
+
+function validatePhase21ObservabilityConfig(observabilityConfig, errors, warnings, isProduction) {
+  const thresholdScope = normalizeString(observabilityConfig.thresholdScope).toLowerCase();
+  const alertThresholds =
+    observabilityConfig.alertThresholds && typeof observabilityConfig.alertThresholds === "object"
+      ? observabilityConfig.alertThresholds
+      : {};
+
+  if (!thresholdScope) {
+    addIssue(errors, "OBSERVABILITY_THRESHOLD_SCOPE_REQUIRED", "observability.thresholdScope is required", {});
+  } else if (thresholdScope !== "node") {
+    const collection = isProduction ? errors : warnings;
+    addIssue(
+      collection,
+      "OBSERVABILITY_THRESHOLD_SCOPE_INVALID",
+      "Phase 21 requires observability.thresholdScope='node'",
+      {
+        thresholdScope,
+      },
+    );
+  }
+
+  const requiredThresholds = ["circuitOpenRate", "executionRejectRate", "memoryPressureRate"];
+  for (const key of requiredThresholds) {
+    const rawValue = alertThresholds[key];
+    const value = Number(rawValue);
+    if (!Number.isFinite(value) || value < 0) {
+      addIssue(errors, "OBSERVABILITY_ALERT_THRESHOLDS_INVALID", "observability.alertThresholds entry is invalid", {
+        key,
+        value: rawValue,
+      });
+    }
+  }
+}
+
 function resolveExecutionToolImageReference(executionConfig, slug, toolConfig) {
   const direct = normalizeString(toolConfig && toolConfig.image);
   if (direct) {
@@ -1224,6 +1449,8 @@ async function runPreflightValidation(options = {}) {
   const executionBackendResult = resolveExecutionBackend(options, manifest);
   const containerRuntimeEnabledResult = resolveExecutionContainerRuntimeEnabled(options, manifest);
   const executionConfig = resolveExecutionConfig(options, manifest);
+  const securityConfig = resolveSecurityConfig(options, manifest);
+  const observabilityConfig = resolveObservabilityConfig(options, manifest);
   const knownToolSlugs = resolveAuthoritativeToolSlugs(options);
 
   const nodeId = resolveNodeId(options);
@@ -1288,6 +1515,15 @@ async function runPreflightValidation(options = {}) {
     errors,
     warnings,
   );
+  validatePhase21ExecutionConfig(
+    executionConfig,
+    errors,
+    warnings,
+    productionMode.isProduction,
+    executionValidation.mode,
+  );
+  validatePhase21SecurityConfig(securityConfig, errors, productionMode.isProduction, executionValidation.mode);
+  validatePhase21ObservabilityConfig(observabilityConfig, errors, warnings, productionMode.isProduction);
 
   const result = {
     ready_for_production: errors.length === 0,
@@ -1316,6 +1552,9 @@ async function runPreflightValidation(options = {}) {
       executionToolCount: executionValidation.executionToolCount,
       validatedExecutionTools: executionValidation.validatedTools,
       knownExecutionTools: Array.from(knownToolSlugs).sort((a, b) => a.localeCompare(b)),
+      executionConfigVersion: normalizeString(executionConfig.configVersion),
+      expectedExecutionConfigVersion: normalizeString(executionConfig.expectedExecutionConfigVersion),
+      observabilityThresholdScope: normalizeString(observabilityConfig.thresholdScope),
     },
   };
 
