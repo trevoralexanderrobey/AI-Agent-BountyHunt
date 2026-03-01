@@ -181,7 +181,7 @@ jobs:
           context: .
           file: ${{ env.CONTAINER_ROOT }}/${{ matrix.tool }}/Dockerfile
           push: ${{ !env.ACT }}
-          load: ${{ env.ACT }}
+          load: ${{ !!env.ACT }}
           provenance: ${{ !env.ACT }}
           sbom: ${{ !env.ACT }}
           tags: ghcr.io/${{ github.repository }}-${{ matrix.tool }}:latest

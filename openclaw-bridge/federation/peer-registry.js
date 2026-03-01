@@ -82,6 +82,7 @@ function sanitizePeer(peerId, entry, includeSecret = false) {
     lastHeartbeat: entry.lastHeartbeat,
     executionConfigHash: entry.executionConfigHash,
     executionPolicyHash: entry.executionPolicyHash,
+    secretManifestHash: entry.secretManifestHash,
     executionConfigVersion: entry.executionConfigVersion,
     executionPolicyVersion: entry.executionPolicyVersion,
     expectedExecutionConfigVersion: entry.expectedExecutionConfigVersion,
@@ -141,6 +142,7 @@ function createPeerRegistry(options = {}) {
       lastHeartbeat,
       executionConfigHash: normalizeExecutionConfigHash(config.executionConfigHash),
       executionPolicyHash: normalizeExecutionConfigHash(config.executionPolicyHash),
+      secretManifestHash: normalizeExecutionConfigHash(config.secretManifestHash),
       executionConfigVersion: normalizeMetadataVersion(config.executionConfigVersion),
       executionPolicyVersion: normalizePolicyVersion(config.executionPolicyVersion),
       expectedExecutionConfigVersion: normalizeMetadataVersion(config.expectedExecutionConfigVersion),
@@ -245,6 +247,9 @@ function createPeerRegistry(options = {}) {
     if (typeof health.executionPolicyHash === "string") {
       entry.executionPolicyHash = normalizeExecutionConfigHash(health.executionPolicyHash);
     }
+    if (typeof health.secretManifestHash === "string") {
+      entry.secretManifestHash = normalizeExecutionConfigHash(health.secretManifestHash);
+    }
     if (typeof health.executionConfigVersion === "string") {
       entry.executionConfigVersion = normalizeMetadataVersion(health.executionConfigVersion);
     }
@@ -275,6 +280,7 @@ function createPeerRegistry(options = {}) {
         lastHeartbeat: entry.lastHeartbeat,
         executionConfigHash: entry.executionConfigHash,
         executionPolicyHash: entry.executionPolicyHash,
+        secretManifestHash: entry.secretManifestHash,
         executionConfigVersion: entry.executionConfigVersion,
         executionPolicyVersion: entry.executionPolicyVersion,
         expectedExecutionConfigVersion: entry.expectedExecutionConfigVersion,
@@ -315,6 +321,7 @@ function createPeerRegistry(options = {}) {
       const status = item.status === STATUS_UP || item.status === STATUS_DOWN ? item.status : STATUS_DOWN;
       const executionConfigHash = normalizeExecutionConfigHash(item.executionConfigHash);
       const executionPolicyHash = normalizeExecutionConfigHash(item.executionPolicyHash);
+      const secretManifestHash = normalizeExecutionConfigHash(item.secretManifestHash);
       const executionConfigVersion = normalizeMetadataVersion(item.executionConfigVersion);
       const executionPolicyVersion = normalizePolicyVersion(item.executionPolicyVersion);
       const expectedExecutionConfigVersion = normalizeMetadataVersion(item.expectedExecutionConfigVersion);
@@ -330,6 +337,7 @@ function createPeerRegistry(options = {}) {
           lastHeartbeat,
           executionConfigHash,
           executionPolicyHash,
+          secretManifestHash,
           executionConfigVersion,
           executionPolicyVersion,
           expectedExecutionConfigVersion,
@@ -345,6 +353,7 @@ function createPeerRegistry(options = {}) {
       existing.lastHeartbeat = lastHeartbeat;
       existing.executionConfigHash = executionConfigHash;
       existing.executionPolicyHash = executionPolicyHash;
+      existing.secretManifestHash = secretManifestHash;
       existing.executionConfigVersion = executionConfigVersion;
       existing.executionPolicyVersion = executionPolicyVersion;
       existing.expectedExecutionConfigVersion = expectedExecutionConfigVersion;

@@ -161,6 +161,29 @@ function mapSupervisorError(error) {
   if (code === "EXECUTION_CONFIG_MISMATCH") {
     return { statusCode: 503, code: "EXECUTION_CONFIG_MISMATCH", message: "Execution config mismatch across nodes" };
   }
+  if (code === "SECRET_SCOPE_VIOLATION") {
+    return { statusCode: 403, code: "SECRET_SCOPE_VIOLATION", message: "Secret scope violation" };
+  }
+  if (code === "SECRET_MANIFEST_MISMATCH") {
+    return { statusCode: 503, code: "SECRET_MANIFEST_MISMATCH", message: "Secret manifest mismatch across nodes" };
+  }
+  if (code === "SECRET_LEAK_DETECTED") {
+    return { statusCode: 503, code: "SECRET_LEAK_DETECTED", message: "Secret leak detected in tool output" };
+  }
+  if (
+    code === "SECRET_AUTHORITY_UNINITIALIZED" ||
+    code === "SECRET_STORE_UNREACHABLE" ||
+    code === "SECRET_STORE_PROVIDER_INVALID" ||
+    code === "SECRET_MANIFEST_MISSING" ||
+    code === "SECRET_MANIFEST_INVALID" ||
+    code === "SECRET_MANIFEST_SCHEMA_INVALID" ||
+    code === "SECRET_MANIFEST_PATH_OVERRIDE_FORBIDDEN" ||
+    code === "SECRET_FETCH_TIMEOUT" ||
+    code === "REQUIRED_SECRET_UNAVAILABLE" ||
+    code === "SECRET_FETCH_FAILURE"
+  ) {
+    return { statusCode: 503, code: "EXECUTION_CONFIG_MISMATCH", message: "Secret authority mismatch" };
+  }
   if (
     code === "POLICY_SIGNATURE_INVALID" ||
     code === "POLICY_SCHEMA_INVALID" ||
@@ -551,6 +574,8 @@ function createHttpHandlers(options = {}) {
         scope: typeof executionMetadata.thresholdScope === "string" ? executionMetadata.thresholdScope : "node",
         execution_policy_hash:
           typeof executionMetadata.executionPolicyHash === "string" ? executionMetadata.executionPolicyHash : "",
+        secret_manifest_hash:
+          typeof executionMetadata.secretManifestHash === "string" ? executionMetadata.secretManifestHash : "",
         execution_policy_version:
           Number.isFinite(Number(executionMetadata.executionPolicyVersion)) && Number(executionMetadata.executionPolicyVersion) > 0
             ? Number(executionMetadata.executionPolicyVersion)

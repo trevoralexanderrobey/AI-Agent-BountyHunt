@@ -6,11 +6,21 @@ const fs = require("node:fs");
 const pkg = require("../../package.json");
 const { runPreflightValidation } = require("../../deployment/preflight-validator.js");
 const { computePolicyHash } = require("../../policy/execution-policy-manifest.js");
+const { computeSecretManifestHash } = require("../../security/secret-manifest.js");
 
 const POLICY_MANIFEST_PATH = path.resolve(__dirname, "../../policy/execution-policy.json");
 const POLICY_SIGNATURE_PATH = path.resolve(__dirname, "../../policy/execution-policy.json.sig");
 const POLICY_PUBLIC_KEY_PATH = path.resolve(__dirname, "../../policy/execution-policy.pub.pem");
 const POLICY_EXPECTED_HASH = computePolicyHash(JSON.parse(fs.readFileSync(POLICY_MANIFEST_PATH, "utf8")));
+const SECRET_MANIFEST_PATH = path.resolve(__dirname, "../../security/secret-manifest.json");
+const SECRET_MANIFEST_EXPECTED_HASH = computeSecretManifestHash(JSON.parse(fs.readFileSync(SECRET_MANIFEST_PATH, "utf8")));
+
+function healthySecretStoreProvider() {
+  return {
+    ping: async () => true,
+    fetchSecret: async () => ({ found: true, value: "secret-value" }),
+  };
+}
 
 function validSandboxConfig() {
   return {
@@ -57,6 +67,8 @@ function baseProductionOptions(overrides = {}) {
       policySignaturePath: POLICY_SIGNATURE_PATH,
       policyPublicKeyPath: POLICY_PUBLIC_KEY_PATH,
       policyExpectedHash: POLICY_EXPECTED_HASH,
+      secretManifestPath: SECRET_MANIFEST_PATH,
+      secretManifestExpectedHash: SECRET_MANIFEST_EXPECTED_HASH,
       tools: {
         curl: {
           signatureVerified: true,
@@ -96,6 +108,14 @@ function baseProductionOptions(overrides = {}) {
       executionBurstLimitPerMinute: 20,
       quotaRedisUrl: "redis://127.0.0.1:6379",
       quotaRedisPrefix: "openclaw:quota",
+      secretStoreProvider: "redis",
+      secretStoreProviderImpl: healthySecretStoreProvider(),
+      secretStoreUrl: "redis://127.0.0.1:6379",
+      secretStorePrefix: "openclaw:secrets",
+      secretStoreConnectTimeoutMs: 3000,
+      secretFetchTimeoutMs: 3000,
+      secretFetchMaxAttempts: 2,
+      allowEnvSecretFallbackNonProd: false,
     },
     observability: {
       thresholdScope: "node",
@@ -293,4 +313,47 @@ test("production container mode fails when policy artifact paths are overridden"
 
   const codes = errorCodes(result);
   assert.equal(codes.has("POLICY_PATH_OVERRIDE_FORBIDDEN"), true);
+});
+
+test("production container mode fails when secret manifest path is overridden", async () => {
+  const result = await runPreflightValidation(
+    baseProductionOptions({
+      execution: {
+        ...baseProductionOptions().execution,
+        secretManifestPath: path.resolve(__dirname, "./tmp-secret-manifest.json"),
+      },
+    }),
+  );
+
+  const codes = errorCodes(result);
+  assert.equal(codes.has("SECRET_MANIFEST_PATH_OVERRIDE_FORBIDDEN"), true);
+});
+
+test("production container mode fails when secret store is unreachable", async () => {
+  const result = await runPreflightValidation(
+    baseProductionOptions({
+      security: {
+        ...baseProductionOptions().security,
+        secretStoreProvider: "none",
+        secretStoreProviderImpl: null,
+      },
+    }),
+  );
+
+  const codes = errorCodes(result);
+  assert.equal(codes.has("SECRET_STORE_UNREACHABLE"), true);
+});
+
+test("production container mode fails when secret manifest hash does not match expected hash", async () => {
+  const result = await runPreflightValidation(
+    baseProductionOptions({
+      execution: {
+        ...baseProductionOptions().execution,
+        secretManifestExpectedHash: "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+      },
+    }),
+  );
+
+  const codes = errorCodes(result);
+  assert.equal(codes.has("SECRET_MANIFEST_MISMATCH"), true);
 });

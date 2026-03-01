@@ -11,6 +11,12 @@ const { SUPPORTED_BACKENDS } = require("../execution/container-runtime.js");
 const { resolveToolImageReference: resolveCatalogImageReference } = require("../execution/tool-image-catalog.js");
 const { validatePolicySchema, serializeCanonical, computePolicyHash } = require("../policy/execution-policy-manifest.js");
 const { verifyPolicySignature, getDefaultPolicyArtifactPaths } = require("../policy/policy-authority.js");
+const {
+  validateSecretSchema,
+  getCanonicalSecretManifest,
+  computeSecretManifestHash,
+} = require("../security/secret-manifest.js");
+const { createSecretAuthority, resolveDefaultSecretManifestPath } = require("../security/secret-authority.js");
 const { createToolRegistry } = require("../tools/tool-registry.js");
 const { registerBatch1Tools } = require("../tools/adapters/index.js");
 const { registerBatch2Tools } = require("../tools/adapters/batch-2-index.js");
@@ -909,6 +915,127 @@ function validatePhase22PolicyGovernance(executionConfig, errors, warnings, isPr
   }
 }
 
+async function validatePhase23SecretGovernance(executionConfig, securityConfig, errors, warnings, isProduction, mode) {
+  if (mode !== "container") {
+    return;
+  }
+
+  const defaultManifestPath = resolveDefaultSecretManifestPath();
+  const configuredManifestPath = normalizeString(executionConfig.secretManifestPath || process.env.SECRET_MANIFEST_PATH);
+  const expectedManifestHash = normalizeString(
+    executionConfig.secretManifestExpectedHash || process.env.SECRET_MANIFEST_EXPECTED_HASH,
+  ).toLowerCase();
+  const manifestPath = isProduction
+    ? defaultManifestPath
+    : configuredManifestPath
+    ? configuredManifestPath
+    : defaultManifestPath;
+
+  const collection = isProduction ? errors : warnings;
+
+  if (isProduction) {
+    if (configuredManifestPath && resolvePath(configuredManifestPath) !== resolvePath(defaultManifestPath)) {
+      addIssue(errors, "SECRET_MANIFEST_PATH_OVERRIDE_FORBIDDEN", "Secret manifest path override is forbidden in production", {
+        configuredPath: resolvePath(configuredManifestPath),
+        requiredPath: resolvePath(defaultManifestPath),
+      });
+    }
+    if (!expectedManifestHash) {
+      addIssue(errors, "SECRET_MANIFEST_MISMATCH", "execution.secretManifestExpectedHash is required in production", {});
+    }
+    if (securityConfig && securityConfig.allowEnvSecretFallbackNonProd === true) {
+      addIssue(errors, "SECRET_ENV_FALLBACK_FORBIDDEN_PROD", "Environment fallback for secret fetch is forbidden in production", {});
+    }
+  }
+
+  if (!manifestPath) {
+    addIssue(collection, "SECRET_MANIFEST_MISSING", "execution.secretManifestPath is required for secret governance", {});
+    return;
+  }
+
+  const resolvedManifestPath = resolvePath(manifestPath);
+  if (!fs.existsSync(resolvedManifestPath)) {
+    addIssue(collection, "SECRET_MANIFEST_MISSING", "Secret manifest file is missing", {
+      manifestPath: resolvedManifestPath,
+    });
+    return;
+  }
+
+  let secretManifest;
+  try {
+    secretManifest = JSON.parse(fs.readFileSync(resolvedManifestPath, "utf8"));
+  } catch (error) {
+    addIssue(collection, "SECRET_MANIFEST_INVALID", "Secret manifest JSON could not be parsed", {
+      manifestPath: resolvedManifestPath,
+      reason: error && error.message ? error.message : String(error),
+    });
+    return;
+  }
+
+  const schemaValidation = validateSecretSchema(secretManifest);
+  if (!schemaValidation.valid) {
+    addIssue(collection, "SECRET_MANIFEST_INVALID", "Secret manifest schema validation failed", {
+      errors: schemaValidation.errors,
+    });
+    return;
+  }
+
+  let actualHash = "";
+  try {
+    const canonical = getCanonicalSecretManifest(secretManifest);
+    actualHash = computeSecretManifestHash(canonical);
+  } catch (error) {
+    addIssue(collection, "SECRET_MANIFEST_INVALID", "Secret manifest canonicalization failed", {
+      reason: error && error.message ? error.message : String(error),
+    });
+    return;
+  }
+
+  if (expectedManifestHash && expectedManifestHash !== actualHash) {
+    addIssue(collection, "SECRET_MANIFEST_MISMATCH", "Secret manifest hash does not match expected hash", {
+      expectedHash: expectedManifestHash,
+      actualHash,
+    });
+  }
+
+  let authority = null;
+  try {
+    authority = createSecretAuthority({
+      production: isProduction,
+      nodeId: "preflight",
+      manifestPath: resolvedManifestPath,
+      expectedHash: expectedManifestHash,
+      provider: normalizeString(securityConfig && securityConfig.secretStoreProvider) || "redis",
+      secretProvider: securityConfig && securityConfig.secretStoreProviderImpl,
+      secretStoreUrl: normalizeString(securityConfig && securityConfig.secretStoreUrl),
+      secretStorePrefix: normalizeString(securityConfig && securityConfig.secretStorePrefix),
+      secretStoreConnectTimeoutMs: parsePositiveInt(
+        securityConfig && securityConfig.secretStoreConnectTimeoutMs,
+      ) || 3000,
+      fetchTimeoutMs: parsePositiveInt(securityConfig && securityConfig.secretFetchTimeoutMs) || 3000,
+      fetchMaxAttempts: parsePositiveInt(securityConfig && securityConfig.secretFetchMaxAttempts) || 2,
+      allowEnvFallbackNonProd: securityConfig && securityConfig.allowEnvSecretFallbackNonProd === true,
+      allowProductionPathOverride: false,
+    });
+    await authority.initialize();
+  } catch (error) {
+    addIssue(
+      collection,
+      error && typeof error.code === "string" ? error.code : "SECRET_AUTHORITY_UNINITIALIZED",
+      "Secret authority initialization failed",
+      {
+        reason: error && error.message ? error.message : String(error),
+      },
+    );
+  } finally {
+    if (authority && typeof authority.close === "function") {
+      try {
+        await authority.close();
+      } catch {}
+    }
+  }
+}
+
 function resolveExecutionToolImageReference(executionConfig, slug, toolConfig) {
   const direct = normalizeString(toolConfig && toolConfig.image);
   if (direct) {
@@ -1660,6 +1787,14 @@ async function runPreflightValidation(options = {}) {
     productionMode.isProduction,
     executionValidation.mode,
   );
+  await validatePhase23SecretGovernance(
+    executionConfig,
+    securityConfig,
+    errors,
+    warnings,
+    productionMode.isProduction,
+    executionValidation.mode,
+  );
   validatePhase21SecurityConfig(securityConfig, errors, productionMode.isProduction, executionValidation.mode);
   validatePhase21ObservabilityConfig(observabilityConfig, errors, warnings, productionMode.isProduction);
 
@@ -1696,6 +1831,10 @@ async function runPreflightValidation(options = {}) {
       executionPolicySignaturePath: normalizeString(executionConfig.policySignaturePath),
       executionPolicyPublicKeyPath: normalizeString(executionConfig.policyPublicKeyPath),
       executionPolicyExpectedHash: normalizeString(executionConfig.policyExpectedHash).toLowerCase(),
+      secretManifestPath: normalizeString(executionConfig.secretManifestPath),
+      secretManifestExpectedHash: normalizeString(executionConfig.secretManifestExpectedHash).toLowerCase(),
+      secretStoreProvider: normalizeString(securityConfig.secretStoreProvider),
+      secretStoreUrlConfigured: normalizeString(securityConfig.secretStoreUrl).length > 0,
       observabilityThresholdScope: normalizeString(observabilityConfig.thresholdScope),
     },
   };

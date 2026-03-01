@@ -67,6 +67,23 @@ function createMockSpawnerFactory() {
   });
 }
 
+function createMockSecretAuthority(overrides = {}) {
+  return {
+    initialize: async () => ({ ok: true }),
+    getExecutionSecrets: async () => ({
+      env: {},
+      executionSecretRef: { executionId: "mock" },
+    }),
+    releaseExecutionSecrets: () => ({ ok: true }),
+    evaluatePeerSecretPosture: () => ({ ok: true, status: "aligned", criticalMismatches: [], warnings: [] }),
+    getActiveMetadata: () => ({
+      secretManifestHash: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    }),
+    close: async () => {},
+    ...overrides,
+  };
+}
+
 test("supervisor returns container runtime disabled error when container mode is configured but flag is false", async () => {
   const supervisor = createSupervisorV1({
     spawnerFactory: createMockSpawnerFactory(),
@@ -316,6 +333,7 @@ test("supervisor fails closed in production when arbiter reconstruction fails at
       tryAcquire: () => ({ leaseId: "unused" }),
       release: () => ({ ok: true, released: false }),
     },
+    secretAuthority: createMockSecretAuthority(),
   });
 
   try {
@@ -326,6 +344,333 @@ test("supervisor fails closed in production when arbiter reconstruction fails at
         return true;
       },
     );
+  } finally {
+    await supervisor.shutdown();
+  }
+});
+
+test("secret injection occurs only after arbitration and before container runtime start", async () => {
+  const order = [];
+  const runtimeCalls = [];
+  const supervisor = createSupervisorV1({
+    spawnerFactory: createMockSpawnerFactory(),
+    execution: {
+      executionMode: "container",
+      containerRuntimeEnabled: true,
+      backend: "mock",
+      tools: {
+        "dummy-supervisor": {
+          resourceLimits: validLimits(),
+          signatureVerified: true,
+        },
+      },
+      resourcePolicies: {
+        "dummy-supervisor": {
+          cpuShares: 256,
+          memoryLimitMb: 256,
+          maxRuntimeSeconds: 30,
+          maxOutputBytes: 1024 * 1024,
+        },
+      },
+      sandboxPolicies: {
+        "dummy-supervisor": validSandboxConfig(),
+      },
+      egressPolicies: {
+        "dummy-supervisor": {
+          allowedExternalNetwork: false,
+          allowedCIDR: [],
+          rateLimitPerSecond: 1,
+        },
+      },
+      imagePolicies: {
+        "dummy-supervisor": {
+          signatureVerified: true,
+        },
+      },
+      images: {
+        "dummy-supervisor": "ghcr.io/openclaw-bridge/dummy-supervisor@sha256:1212121212121212121212121212121212121212121212121212121212121212",
+      },
+    },
+    resourceArbiter: {
+      reconstructFromActiveExecutions: async () => ({ ok: true }),
+      tryAcquire: (input) => {
+        order.push(`arbiter:${input.requestId}`);
+        return { leaseId: `lease-${input.requestId}` };
+      },
+      release: () => ({ ok: true, released: true }),
+    },
+    secretAuthority: createMockSecretAuthority({
+      getExecutionSecrets: async ({ executionId }) => {
+        order.push(`secret:${executionId}`);
+        return {
+          env: {
+            OPENCLAW_API_TOKEN: "injected-value",
+          },
+          executionSecretRef: {
+            executionId,
+          },
+        };
+      },
+      releaseExecutionSecrets: ({ executionId }) => {
+        order.push(`release:${executionId}`);
+        return { ok: true };
+      },
+    }),
+    containerRuntime: {
+      runContainer: async (payload) => {
+        order.push(`runtime:${payload.requestId}`);
+        runtimeCalls.push(payload);
+        return { delegated: true };
+      },
+    },
+    toolAdapters: [
+      {
+        slug: "dummy-supervisor",
+        adapter: new DummySupervisorAdapter(),
+      },
+    ],
+  });
+
+  try {
+    const result = await supervisor.execute(
+      "dummy-supervisor",
+      "run",
+      {
+        resourceLimits: validLimits(),
+      },
+      { principalId: "alice" },
+    );
+
+    assert.equal(result.ok, true);
+    assert.equal(runtimeCalls.length, 1);
+    assert.equal(runtimeCalls[0].env.OPENCLAW_API_TOKEN, "injected-value");
+    const arbiterIndex = order.findIndex((entry) => entry.startsWith("arbiter:"));
+    const secretIndex = order.findIndex((entry) => entry.startsWith("secret:"));
+    const runtimeIndex = order.findIndex((entry) => entry.startsWith("runtime:"));
+    assert.equal(arbiterIndex >= 0, true);
+    assert.equal(secretIndex > arbiterIndex, true);
+    assert.equal(runtimeIndex > secretIndex, true);
+  } finally {
+    await supervisor.shutdown();
+  }
+});
+
+test("secret rotation applies to new executions while in-flight execution keeps its snapshot", async () => {
+  let currentSecretValue = "token-v1";
+  let runtimeCallCount = 0;
+  const runtimePayloads = [];
+  let notifyFirstRuntimeEntered = null;
+  let releaseFirstRuntime = null;
+  const firstRuntimeEntered = new Promise((resolve) => {
+    notifyFirstRuntimeEntered = resolve;
+  });
+  const firstRuntimeGate = new Promise((resolve) => {
+    releaseFirstRuntime = resolve;
+  });
+
+  const supervisor = createSupervisorV1({
+    spawnerFactory: createMockSpawnerFactory(),
+    execution: {
+      executionMode: "container",
+      containerRuntimeEnabled: true,
+      backend: "mock",
+      tools: {
+        "dummy-supervisor": {
+          resourceLimits: validLimits(),
+          signatureVerified: true,
+        },
+      },
+      resourcePolicies: {
+        "dummy-supervisor": {
+          cpuShares: 256,
+          memoryLimitMb: 256,
+          maxRuntimeSeconds: 30,
+          maxOutputBytes: 1024 * 1024,
+        },
+      },
+      sandboxPolicies: {
+        "dummy-supervisor": validSandboxConfig(),
+      },
+      egressPolicies: {
+        "dummy-supervisor": {
+          allowedExternalNetwork: false,
+          allowedCIDR: [],
+          rateLimitPerSecond: 1,
+        },
+      },
+      imagePolicies: {
+        "dummy-supervisor": {
+          signatureVerified: true,
+        },
+      },
+      images: {
+        "dummy-supervisor": "ghcr.io/openclaw-bridge/dummy-supervisor@sha256:5656565656565656565656565656565656565656565656565656565656565656",
+      },
+    },
+    executionQuotaStore: {
+      consume: async () => ({ ok: true, code: "OK", details: {} }),
+      close: async () => {},
+    },
+    resourceArbiter: {
+      reconstructFromActiveExecutions: async () => ({ ok: true }),
+      tryAcquire: (input) => ({ leaseId: `lease-${input.requestId}` }),
+      release: () => ({ ok: true, released: true }),
+    },
+    secretAuthority: createMockSecretAuthority({
+      getExecutionSecrets: async ({ executionId }) => ({
+        env: {
+          OPENCLAW_API_TOKEN: currentSecretValue,
+        },
+        executionSecretRef: {
+          executionId,
+        },
+      }),
+    }),
+    containerRuntime: {
+      runContainer: async (payload) => {
+        runtimeCallCount += 1;
+        runtimePayloads.push(payload);
+        if (runtimeCallCount === 1) {
+          notifyFirstRuntimeEntered();
+          await firstRuntimeGate;
+        }
+        return {
+          delegated: true,
+          tokenSeen: payload && payload.env ? payload.env.OPENCLAW_API_TOKEN : "",
+        };
+      },
+    },
+    toolAdapters: [
+      {
+        slug: "dummy-supervisor",
+        adapter: new DummySupervisorAdapter(),
+      },
+    ],
+  });
+
+  try {
+    const firstExecution = supervisor.execute(
+      "dummy-supervisor",
+      "run",
+      {
+        resourceLimits: validLimits(),
+      },
+      { principalId: "alice" },
+    );
+
+    await firstRuntimeEntered;
+    currentSecretValue = "token-v2";
+    releaseFirstRuntime();
+
+    const firstResult = await firstExecution;
+    assert.equal(firstResult.ok, true);
+    assert.equal(runtimePayloads[0].env.OPENCLAW_API_TOKEN, "token-v1");
+
+    const secondResult = await supervisor.execute(
+      "dummy-supervisor",
+      "run",
+      {
+        resourceLimits: validLimits(),
+      },
+      { principalId: "alice" },
+    );
+
+    assert.equal(secondResult.ok, true);
+    assert.equal(runtimePayloads[1].env.OPENCLAW_API_TOKEN, "token-v2");
+  } finally {
+    await supervisor.shutdown();
+  }
+});
+
+test("secret manifest mismatch blocks execution before runtime dispatch", async () => {
+  let runtimeCalls = 0;
+  const supervisor = createSupervisorV1({
+    spawnerFactory: createMockSpawnerFactory(),
+    execution: {
+      executionMode: "container",
+      containerRuntimeEnabled: true,
+      backend: "mock",
+      production: true,
+      tools: {
+        "dummy-supervisor": {
+          resourceLimits: validLimits(),
+          signatureVerified: true,
+        },
+      },
+      resourcePolicies: {
+        "dummy-supervisor": {
+          cpuShares: 256,
+          memoryLimitMb: 256,
+          maxRuntimeSeconds: 30,
+          maxOutputBytes: 1024 * 1024,
+        },
+      },
+      sandboxPolicies: {
+        "dummy-supervisor": validSandboxConfig(),
+      },
+      egressPolicies: {
+        "dummy-supervisor": {
+          allowedExternalNetwork: false,
+          allowedCIDR: [],
+          rateLimitPerSecond: 1,
+        },
+      },
+      imagePolicies: {
+        "dummy-supervisor": {
+          signatureVerified: true,
+        },
+      },
+      images: {
+        "dummy-supervisor": "ghcr.io/openclaw-bridge/dummy-supervisor@sha256:3434343434343434343434343434343434343434343434343434343434343434",
+      },
+    },
+    executionQuotaStore: {
+      consume: async () => ({ ok: true, code: "OK", details: {} }),
+      close: async () => {},
+    },
+    resourceArbiter: {
+      reconstructFromActiveExecutions: async () => ({ ok: true }),
+      tryAcquire: (input) => ({ leaseId: `lease-${input.requestId}` }),
+      release: () => ({ ok: true, released: true }),
+    },
+    secretAuthority: createMockSecretAuthority({
+      evaluatePeerSecretPosture: () => ({
+        ok: false,
+        status: "mismatch",
+        criticalMismatches: [{ classification: "SECRET_MANIFEST_MISMATCH", peerId: "node-b" }],
+        warnings: [],
+      }),
+    }),
+    containerRuntime: {
+      runContainer: async () => {
+        runtimeCalls += 1;
+        return { delegated: true };
+      },
+    },
+    toolAdapters: [
+      {
+        slug: "dummy-supervisor",
+        adapter: new DummySupervisorAdapter(),
+      },
+    ],
+  });
+
+  try {
+    await assert.rejects(
+      supervisor.execute(
+        "dummy-supervisor",
+        "run",
+        {
+          resourceLimits: validLimits(),
+        },
+        { principalId: "alice" },
+      ),
+      (error) => {
+        assert.equal(error.code, "SECRET_MANIFEST_MISMATCH");
+        return true;
+      },
+    );
+    assert.equal(runtimeCalls, 0);
   } finally {
     await supervisor.shutdown();
   }

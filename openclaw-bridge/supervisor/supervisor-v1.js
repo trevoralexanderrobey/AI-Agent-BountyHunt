@@ -24,6 +24,7 @@ const { createContainerRuntime } = require("../execution/container-runtime.js");
 const { validateResourceLimitsObject } = require("../execution/resource-policy.js");
 const { createResourceArbiter, hashPrincipal } = require("../execution/resource-arbiter.js");
 const { createSecretManager } = require("../security/secret-manager.js");
+const { createSecretAuthority, resolveDefaultSecretManifestPath } = require("../security/secret-authority.js");
 const { createExecutionQuotaStore } = require("../security/execution-quota-store.js");
 const { createPolicyRuntime } = require("../policy/policy-runtime.js");
 const { loadAndPublishPolicy } = require("../policy/policy-authority.js");
@@ -171,6 +172,11 @@ function resolveExecutionSettings(options = {}) {
       : normalizeString(execution.policyPublicKeyPath) || normalizeString(process.env.EXECUTION_POLICY_PUBLIC_KEY_PATH),
     policyExpectedHash:
       normalizeString(execution.policyExpectedHash) || normalizeString(process.env.EXECUTION_POLICY_EXPECTED_HASH),
+    secretManifestPath: production
+      ? ""
+      : normalizeString(execution.secretManifestPath) || normalizeString(process.env.SECRET_MANIFEST_PATH),
+    secretManifestExpectedHash:
+      normalizeString(execution.secretManifestExpectedHash) || normalizeString(process.env.SECRET_MANIFEST_EXPECTED_HASH),
   };
 }
 
@@ -383,6 +389,10 @@ function createSupervisorV1(options = {}) {
       : createSecretManager({
           metrics,
           logger: options.logger || auditLogger,
+          production: executionSettings.production,
+          leakFailClosedInProduction:
+            !Object.prototype.hasOwnProperty.call(securitySettings, "secretLeakFailClosedInProduction") ||
+            securitySettings.secretLeakFailClosedInProduction === true,
         });
   const policyRuntime =
     executionSettings.executionMode === "container" && executionSettings.containerRuntimeEnabled
@@ -440,6 +450,39 @@ function createSupervisorV1(options = {}) {
             nodeId: nodePublication.nodeId,
             metrics,
             auditLogger,
+          });
+        })()
+      : null;
+  const secretAuthority =
+    executionSettings.executionMode === "container" && executionSettings.containerRuntimeEnabled
+      ? (() => {
+          if (
+            options.secretAuthority &&
+            typeof options.secretAuthority.initialize === "function" &&
+            typeof options.secretAuthority.getExecutionSecrets === "function" &&
+            typeof options.secretAuthority.releaseExecutionSecrets === "function" &&
+            typeof options.secretAuthority.evaluatePeerSecretPosture === "function" &&
+            typeof options.secretAuthority.getActiveMetadata === "function"
+          ) {
+            return options.secretAuthority;
+          }
+
+          return createSecretAuthority({
+            production: executionSettings.production,
+            nodeId: nodePublication.nodeId,
+            metrics,
+            auditLogger,
+            manifestPath: executionSettings.secretManifestPath,
+            expectedHash: executionSettings.secretManifestExpectedHash,
+            allowProductionPathOverride: options.allowSecretManifestPathOverride === true,
+            provider: securitySettings.secretStoreProvider,
+            secretProvider: securitySettings.secretStoreProviderImpl,
+            secretStoreUrl: securitySettings.secretStoreUrl,
+            secretStorePrefix: securitySettings.secretStorePrefix,
+            secretStoreConnectTimeoutMs: securitySettings.secretStoreConnectTimeoutMs,
+            fetchTimeoutMs: securitySettings.secretFetchTimeoutMs,
+            fetchMaxAttempts: securitySettings.secretFetchMaxAttempts,
+            allowEnvFallbackNonProd: securitySettings.allowEnvSecretFallbackNonProd === true,
           });
         })()
       : null;
@@ -567,6 +610,8 @@ function createSupervisorV1(options = {}) {
   let policyLoadAttempted = false;
   let policyLoadError = null;
   let policyBundle = null;
+  let secretAuthorityLoadAttempted = false;
+  let secretAuthorityLoadError = null;
   const stateManager = stateEnabled
     ? createStateManager({
         version: CONTROL_PLANE_STATE_VERSION,
@@ -732,15 +777,46 @@ function createSupervisorV1(options = {}) {
     return null;
   }
 
-  function resolveExecutionSecretsForTool(slug, requestContext) {
-    const contextSecrets =
-      requestContext && isPlainObject(requestContext.executionSecrets) ? requestContext.executionSecrets : {};
+  function resolveRequestedSecretNames(slug, requestContext) {
+    const context = requestContext && typeof requestContext === "object" ? requestContext : {};
     const toolConfig = readToolContainerConfig(slug);
-    const toolSecrets = isPlainObject(toolConfig.runtimeSecrets) ? toolConfig.runtimeSecrets : {};
-    return {
-      ...toolSecrets,
-      ...contextSecrets,
-    };
+
+    const legacyContextSecrets = isPlainObject(context.executionSecrets) ? context.executionSecrets : {};
+    const legacyToolSecrets = isPlainObject(toolConfig.runtimeSecrets) ? toolConfig.runtimeSecrets : {};
+    if (Object.keys(legacyContextSecrets).length > 0 || Object.keys(legacyToolSecrets).length > 0) {
+      metrics.increment("secret.scope.violation", {
+        node_id: nodePublication.nodeId,
+        tool: normalizeString(slug).toLowerCase() || "unknown",
+        principal_hash: hashPrincipal(normalizeString(context.principalId) || "anonymous"),
+      });
+      safeAudit({
+        event: "secret_scope_rejection",
+        principal_id: normalizeString(context.principalId) || "anonymous",
+        slug: normalizeString(slug).toLowerCase() || "",
+        request_id: normalizeString(context.requestId),
+        status: "failure",
+        details: {
+          reason: "legacy_inline_secret_forbidden",
+        },
+      });
+      throw makeFailure(
+        "SECRET_SCOPE_VIOLATION",
+        "Inline execution secrets are forbidden; use cluster secret authority",
+        {},
+      );
+    }
+
+    if (!Array.isArray(context.requestedSecretNames)) {
+      return [];
+    }
+
+    return Array.from(
+      new Set(
+        context.requestedSecretNames
+          .map((item) => normalizeString(item))
+          .filter(Boolean),
+      ),
+    ).sort((a, b) => a.localeCompare(b));
   }
 
   function emitExecutionRejectedMetric(reasonCode, slug, principalId) {
@@ -871,6 +947,12 @@ function createSupervisorV1(options = {}) {
           Number.isFinite(Number(record.executionPolicyVersion)) && Number(record.executionPolicyVersion) > 0
             ? Number(record.executionPolicyVersion)
             : parsePositiveInt(String(record.executionConfigVersion || "").replace(/^v/i, ""), 0),
+        secretManifestHash:
+          typeof record.secretManifestHash === "string"
+            ? record.secretManifestHash
+            : typeof record.secret_manifest_hash === "string"
+            ? record.secret_manifest_hash
+            : "",
         executionConfigHash: typeof record.executionConfigHash === "string" ? record.executionConfigHash : "",
         executionConfigVersion: typeof record.executionConfigVersion === "string" ? record.executionConfigVersion : "",
       };
@@ -934,6 +1016,89 @@ function createSupervisorV1(options = {}) {
         error,
       };
     }
+  }
+
+  async function ensureSecretAuthorityLoaded() {
+    if (!secretAuthority || typeof secretAuthority.initialize !== "function") {
+      return {
+        ok: true,
+        skipped: true,
+      };
+    }
+
+    if (secretAuthorityLoadAttempted && !secretAuthorityLoadError) {
+      return {
+        ok: true,
+      };
+    }
+
+    if (secretAuthorityLoadAttempted && secretAuthorityLoadError) {
+      if (executionSettings.production) {
+        throw secretAuthorityLoadError;
+      }
+      return {
+        ok: false,
+        error: secretAuthorityLoadError,
+      };
+    }
+
+    secretAuthorityLoadAttempted = true;
+    try {
+      await secretAuthority.initialize();
+      secretAuthorityLoadError = null;
+      return {
+        ok: true,
+      };
+    } catch (error) {
+      secretAuthorityLoadError = error;
+      if (executionSettings.production) {
+        throw error;
+      }
+      return {
+        ok: false,
+        error,
+      };
+    }
+  }
+
+  function assertSecretManifestPostureAllowed() {
+    if (!secretAuthority || typeof secretAuthority.evaluatePeerSecretPosture !== "function") {
+      return {
+        ok: true,
+        status: "aligned",
+        criticalMismatches: [],
+        warnings: [],
+      };
+    }
+
+    const summary = secretAuthority.evaluatePeerSecretPosture(getExecutionPeersForReconciliation());
+    if (summary.ok) {
+      return summary;
+    }
+
+    if (!executionSettings.production) {
+      return summary;
+    }
+
+    metrics.increment("secret.manifest.hash.mismatch", {
+      node_id: nodePublication.nodeId,
+      scope: "node",
+    });
+    safeAudit({
+      event: "secret_drift_block",
+      principal_id: "system",
+      slug: "",
+      request_id: "",
+      status: "failure",
+      details: {
+        mismatches: Array.isArray(summary.criticalMismatches) ? summary.criticalMismatches : [],
+      },
+    });
+
+    throw makeFailure("SECRET_MANIFEST_MISMATCH", "Secret manifest mismatch detected", {
+      reason: "secret_manifest_mismatch",
+      details: summary,
+    });
   }
 
   async function ensureResourceArbiterReconciled() {
@@ -1415,14 +1580,28 @@ function createSupervisorV1(options = {}) {
     metrics.gauge("supervisor.queue.length", requestQueue.length);
   }
 
+  function getExecutionMetadataSnapshot() {
+    const policyMetadata =
+      policyRuntime && typeof policyRuntime.getActiveMetadata === "function"
+        ? policyRuntime.getActiveMetadata()
+        : {};
+    const secretMetadata =
+      secretAuthority && typeof secretAuthority.getActiveMetadata === "function"
+        ? secretAuthority.getActiveMetadata()
+        : {};
+
+    return {
+      ...policyMetadata,
+      secretManifestHash:
+        typeof secretMetadata.secretManifestHash === "string" ? secretMetadata.secretManifestHash : "",
+    };
+  }
+
   function publishNodeMetadataGauge() {
     if (!clusterEnabled) {
       return;
     }
-    const metadata =
-      policyRuntime && typeof policyRuntime.getActiveMetadata === "function"
-        ? policyRuntime.getActiveMetadata()
-        : {};
+    const metadata = getExecutionMetadataSnapshot();
 
     metrics.gauge("cluster.node_metadata", 1, {
       node_id: nodePublication.nodeId,
@@ -1437,6 +1616,8 @@ function createSupervisorV1(options = {}) {
           : 0,
       execution_policy_hash:
         typeof metadata.executionPolicyHash === "string" ? metadata.executionPolicyHash : "",
+      secret_manifest_hash:
+        typeof metadata.secretManifestHash === "string" ? metadata.secretManifestHash : "",
     });
   }
 
@@ -2423,6 +2604,9 @@ function createSupervisorV1(options = {}) {
     if (policyRuntime) {
       await ensurePolicyAuthorityLoaded();
     }
+    if (secretAuthority) {
+      await ensureSecretAuthorityLoaded();
+    }
 
     if (!arbiterReconciledFromRuntime) {
       await ensureResourceArbiterReconciled();
@@ -2436,6 +2620,17 @@ function createSupervisorV1(options = {}) {
             node_id: nodePublication.nodeId,
           });
           metrics.increment("execution.config.mismatch", {
+            node_id: nodePublication.nodeId,
+            scope: "node",
+          });
+        }
+      } catch {}
+    }
+    if (secretAuthority && typeof secretAuthority.evaluatePeerSecretPosture === "function") {
+      try {
+        const summary = secretAuthority.evaluatePeerSecretPosture(getExecutionPeersForReconciliation());
+        if (!summary.ok) {
+          metrics.increment("secret.manifest.hash.mismatch", {
             node_id: nodePublication.nodeId,
             scope: "node",
           });
@@ -2489,6 +2684,7 @@ function createSupervisorV1(options = {}) {
     let shouldObserveExecution = false;
     let clusterRoutingSnapshot = null;
     let executionPolicySnapshot = null;
+    let executionSecretRef = null;
 
     try {
       authGuard.validate(context, requestId);
@@ -2497,6 +2693,9 @@ function createSupervisorV1(options = {}) {
       if (policyRuntime) {
         await ensurePolicyAuthorityLoaded();
         executionPolicySnapshot = policyRuntime.captureExecutionSnapshot();
+      }
+      if (secretAuthority) {
+        await ensureSecretAuthorityLoaded();
       }
 
       if (executionQuotaStore && typeof executionQuotaStore.consume === "function") {
@@ -2628,6 +2827,21 @@ function createSupervisorV1(options = {}) {
               });
             }
           }
+          if (secretAuthority) {
+            try {
+              assertSecretManifestPostureAllowed();
+            } catch (error) {
+              emitExecutionRejectedMetric("SECRET_MANIFEST_MISMATCH", slug, principalId);
+              throw makeFailure(
+                "SECRET_MANIFEST_MISMATCH",
+                "Secret manifest mismatch detected",
+                {
+                  reason: error && error.message ? error.message : "Secret manifest mismatch",
+                  details: error && error.details ? error.details : {},
+                },
+              );
+            }
+          }
 
           const validatedRequestedLimits = requestedLimits
             ? validateResourceLimitsObject(requestedLimits, {
@@ -2656,12 +2870,35 @@ function createSupervisorV1(options = {}) {
             }
           }
 
-          const executionSecrets = resolveExecutionSecretsForTool(slug, context);
+          const requestedSecretNames = resolveRequestedSecretNames(slug, context);
           const arbitrationSatisfied = !resourceArbiter || Boolean(arbiterLeaseId);
-          if (arbitrationSatisfied && Object.keys(executionSecrets).length > 0) {
-            executionInput.executionSecrets = executionSecrets;
+          if (arbitrationSatisfied && secretAuthority) {
+            try {
+              const scopedSecrets = await secretAuthority.getExecutionSecrets({
+                executionId: requestId,
+                toolSlug: slug,
+                principalId,
+                requestedSecretNames,
+              });
+              executionSecretRef =
+                scopedSecrets &&
+                scopedSecrets.executionSecretRef &&
+                typeof scopedSecrets.executionSecretRef === "object"
+                  ? scopedSecrets.executionSecretRef
+                  : {
+                      executionId: requestId,
+                    };
+              if (scopedSecrets && scopedSecrets.env && typeof scopedSecrets.env === "object") {
+                executionInput.executionSecrets = scopedSecrets.env;
+              }
+              executionInput.executionSecretRef = executionSecretRef;
+            } catch (error) {
+              if (error && error.code === "SECRET_SCOPE_VIOLATION") {
+                emitExecutionRejectedMetric("SECRET_SCOPE_VIOLATION", slug, principalId);
+              }
+              throw error;
+            }
           }
-
         }
         let toolResult;
         try {
@@ -2670,6 +2907,16 @@ function createSupervisorV1(options = {}) {
             policySnapshot: executionPolicySnapshot,
           });
         } finally {
+          if (secretManager && typeof secretManager.finalizeExecutionSecrets === "function") {
+            try {
+              secretManager.finalizeExecutionSecrets(requestId);
+            } catch {}
+          }
+          if (secretAuthority && typeof secretAuthority.releaseExecutionSecrets === "function") {
+            try {
+              secretAuthority.releaseExecutionSecrets(executionSecretRef || requestId);
+            } catch {}
+          }
           if (resourceArbiter && arbiterLeaseId) {
             try {
               resourceArbiter.release(arbiterLeaseId);
@@ -3336,12 +3583,10 @@ function createSupervisorV1(options = {}) {
       };
     });
 
-    const executionMetadata =
-      policyRuntime && typeof policyRuntime.getActiveMetadata === "function"
-        ? policyRuntime.getActiveMetadata()
-        : {
-            nodeId: nodePublication.nodeId,
-          };
+    const executionMetadata = {
+      nodeId: nodePublication.nodeId,
+      ...getExecutionMetadataSnapshot(),
+    };
 
     return {
       ok: true,
@@ -3371,6 +3616,8 @@ function createSupervisorV1(options = {}) {
           typeof executionMetadata.expectedExecutionConfigVersion === "string"
             ? executionMetadata.expectedExecutionConfigVersion
             : normalizeString(executionSettings.expectedExecutionConfigVersion),
+        secretManifestHash:
+          typeof executionMetadata.secretManifestHash === "string" ? executionMetadata.secretManifestHash : "",
         thresholdScope: thresholdScope === "cluster" ? "cluster" : "node",
       },
     };
@@ -3381,12 +3628,10 @@ function createSupervisorV1(options = {}) {
   }
 
   function getExecutionMetadata() {
-    const local =
-      policyRuntime && typeof policyRuntime.getActiveMetadata === "function"
-        ? policyRuntime.getActiveMetadata()
-        : {
-            nodeId: nodePublication.nodeId,
-          };
+    const local = {
+      nodeId: nodePublication.nodeId,
+      ...getExecutionMetadataSnapshot(),
+    };
     return {
       ...local,
       executionPolicyVersion:
@@ -3410,6 +3655,7 @@ function createSupervisorV1(options = {}) {
         typeof local.expectedExecutionConfigVersion === "string"
           ? local.expectedExecutionConfigVersion
           : normalizeString(executionSettings.expectedExecutionConfigVersion),
+      secretManifestHash: typeof local.secretManifestHash === "string" ? local.secretManifestHash : "",
       thresholdScope: thresholdScope === "cluster" ? "cluster" : "node",
     };
   }
@@ -3428,6 +3674,11 @@ function createSupervisorV1(options = {}) {
     }
     if (federationEnabled && federationHeartbeat && typeof federationHeartbeat.stop === "function") {
       federationHeartbeat.stop();
+    }
+    if (secretAuthority && typeof secretAuthority.close === "function") {
+      try {
+        await secretAuthority.close();
+      } catch {}
     }
     safeAudit({
       event: "shutdown",

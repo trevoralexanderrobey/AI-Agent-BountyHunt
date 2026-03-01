@@ -62,3 +62,73 @@ test("secret manager redacts accidental secret echo from tool output", () => {
   assert.equal(result.redacted, true);
   assert.equal(JSON.stringify(result.payload).includes("super-secret-value"), false);
 });
+
+test("secret manager detects base64 and url-encoded secret leakage", () => {
+  const manager = createSecretManager();
+  const secret = "sup3r-secr3t-!value";
+  const encoded = encodeURIComponent(secret);
+  const base64 = Buffer.from(secret, "utf8").toString("base64");
+
+  const result = manager.redactToolOutput(
+    {
+      output: `encoded=${encoded} b64=${base64}`,
+    },
+    [secret],
+    {
+      executionId: "req-encoded-1",
+      toolSlug: "curl",
+      requestId: "req-encoded-1",
+    },
+  );
+
+  assert.equal(result.redacted, true);
+  assert.equal(JSON.stringify(result.payload).includes(encoded), false);
+  assert.equal(JSON.stringify(result.payload).includes(base64), false);
+});
+
+test("secret manager redacts high-entropy token variants within secret length bounds", () => {
+  const manager = createSecretManager();
+  const secret = "phase23-governance-secret-token";
+  const highEntropyToken = "A9kLm2Qx7pR4tVu8nW3zHy6BcDf1";
+
+  const result = manager.redactToolOutput(
+    {
+      output: `suspicious=${highEntropyToken}`,
+    },
+    [secret],
+    {
+      executionId: "req-entropy-1",
+      toolSlug: "curl",
+      requestId: "req-entropy-1",
+    },
+  );
+
+  assert.equal(result.redacted, true);
+  assert.equal(JSON.stringify(result.payload).includes(highEntropyToken), false);
+});
+
+test("secret manager can fail closed in production on detected leak", () => {
+  const manager = createSecretManager({
+    production: true,
+    leakFailClosedInProduction: true,
+  });
+
+  assert.throws(
+    () =>
+      manager.redactToolOutput(
+        {
+          output: "token=super-secret-value",
+        },
+        ["super-secret-value"],
+        {
+          executionId: "req-prod-leak",
+          toolSlug: "nmap",
+          requestId: "req-prod-leak",
+        },
+      ),
+    (error) => {
+      assert.equal(error.code, "SECRET_LEAK_DETECTED");
+      return true;
+    },
+  );
+});

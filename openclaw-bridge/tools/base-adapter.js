@@ -361,6 +361,13 @@ class BaseToolAdapter {
     const context = {
       toolSlug: this.slug,
       requestId,
+      executionId:
+        input &&
+        input.executionSecretRef &&
+        typeof input.executionSecretRef === "object" &&
+        typeof input.executionSecretRef.executionId === "string"
+          ? input.executionSecretRef.executionId
+          : requestId,
       principalHash: input && typeof input.principalHash === "string" ? input.principalHash : "",
     };
     const invocationEnv = request.env && typeof request.env === "object" ? request.env : {};

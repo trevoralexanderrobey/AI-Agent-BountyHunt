@@ -72,6 +72,8 @@ function createPeerHeartbeat(options = {}) {
                   metadata = {
                     executionPolicyHash:
                       typeof parsed.execution_policy_hash === "string" ? parsed.execution_policy_hash : undefined,
+                    secretManifestHash:
+                      typeof parsed.secret_manifest_hash === "string" ? parsed.secret_manifest_hash : undefined,
                     executionPolicyVersion:
                       Number.isInteger(Number(parsed.execution_policy_version))
                         ? Number(parsed.execution_policy_version)
@@ -134,6 +136,10 @@ function createPeerHeartbeat(options = {}) {
           executionPolicyHash:
             result && result.metadata && typeof result.metadata.executionPolicyHash === "string"
               ? result.metadata.executionPolicyHash
+              : undefined,
+          secretManifestHash:
+            result && result.metadata && typeof result.metadata.secretManifestHash === "string"
+              ? result.metadata.secretManifestHash
               : undefined,
           executionConfigVersion:
             result && result.metadata && typeof result.metadata.executionConfigVersion === "string"

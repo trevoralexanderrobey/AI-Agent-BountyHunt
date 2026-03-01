@@ -31,6 +31,13 @@ const REQUIRED_PHASE22_FILES = [
   path.resolve(__dirname, "..", "policy", "execution-policy.pub.pem"),
   path.resolve(__dirname, "..", "policy", "verify-policy-artifact.js"),
 ];
+const REQUIRED_PHASE23_FILES = [
+  path.resolve(__dirname, "..", "security", "secret-manifest.js"),
+  path.resolve(__dirname, "..", "security", "secret-manifest.json"),
+  path.resolve(__dirname, "..", "security", "secret-authority.js"),
+  path.resolve(__dirname, "..", "security", "verify-secret-manifest.js"),
+  path.resolve(__dirname, "..", "security", "validate-phase23.js"),
+];
 
 function normalizeString(value) {
   return typeof value === "string" ? value.trim() : "";
@@ -180,6 +187,17 @@ async function runDeployCheck(options = {}) {
     });
   }
 
+  const phase23SecretCheck = checkRequiredAbsoluteFiles(REQUIRED_PHASE23_FILES);
+  if (phase23SecretCheck.missing.length > 0) {
+    errors.push({
+      code: "PHASE23_SECRET_GOVERNANCE_MISSING",
+      message: "One or more Phase 23 secret governance files are missing or empty",
+      details: {
+        missing: phase23SecretCheck.missing,
+      },
+    });
+  }
+
   const result = {
     ready_for_production: errors.length === 0,
     warnings,
@@ -212,6 +230,11 @@ async function runDeployCheck(options = {}) {
         required: REQUIRED_PHASE22_FILES,
         present: phase22PolicyCheck.present,
         missing: phase22PolicyCheck.missing,
+      },
+      phase23Secrets: {
+        required: REQUIRED_PHASE23_FILES,
+        present: phase23SecretCheck.present,
+        missing: phase23SecretCheck.missing,
       },
     },
   };

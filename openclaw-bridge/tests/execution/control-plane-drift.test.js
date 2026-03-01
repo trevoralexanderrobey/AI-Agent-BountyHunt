@@ -4,7 +4,7 @@ const path = require("node:path");
 const fs = require("node:fs");
 const { execSync } = require("node:child_process");
 
-test("phase 22 does not modify cluster-manager control-plane file", () => {
+test("phase 23 does not modify cluster-manager control-plane file", () => {
   const repoRoot = path.resolve(__dirname, "../../..");
   const output = execSync(`git -C ${JSON.stringify(repoRoot)} diff --name-only`, {
     encoding: "utf8",
@@ -18,7 +18,7 @@ test("phase 22 does not modify cluster-manager control-plane file", () => {
   assert.equal(changedFiles.includes("openclaw-bridge/cluster/cluster-manager.js"), false);
 });
 
-test("validate-phase22 utility is not imported by runtime authority paths", () => {
+test("phase validation utilities are not imported by runtime authority paths", () => {
   const runtimeFiles = [
     path.resolve(__dirname, "../../supervisor/supervisor-v1.js"),
     path.resolve(__dirname, "../../http/server.js"),
@@ -30,5 +30,6 @@ test("validate-phase22 utility is not imported by runtime authority paths", () =
   for (const filePath of runtimeFiles) {
     const content = fs.readFileSync(filePath, "utf8");
     assert.equal(content.includes("validate-phase22"), false, `unexpected validate-phase22 reference in ${filePath}`);
+    assert.equal(content.includes("validate-phase23"), false, `unexpected validate-phase23 reference in ${filePath}`);
   }
 });
