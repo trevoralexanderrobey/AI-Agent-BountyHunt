@@ -37,7 +37,9 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          if [[ -d "containers" ]]; then
+          if [[ -d "openclaw-bridge/containers" ]]; then
+            root="openclaw-bridge/containers"
+          elif [[ -d "containers" ]]; then
             root="containers"
           else
             echo "Unable to locate 'containers' directory. Defaulting to root."
