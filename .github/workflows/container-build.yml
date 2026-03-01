@@ -10,6 +10,10 @@ permissions:
   id-token: write
   attestations: write
 
+defaults:
+  run:
+    shell: bash
+
 jobs:
   build-scan-sign:
     runs-on: [self-hosted, antigravity]
@@ -37,8 +41,10 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
+      - name: Bootstrap self-hosted runner
+        run: bash scripts/bootstrap-ci.sh
+
       - name: Resolve container root
-        shell: bash
         run: |
           set -euo pipefail
           if [[ -d "openclaw-bridge/containers" ]]; then
@@ -56,7 +62,6 @@ jobs:
           echo "BUILD_CONTEXT=${ctx}" >> "$GITHUB_ENV"
 
       - name: Validate signed execution policy artifact
-        shell: bash
         run: |
           set -euo pipefail
           manifest=""
@@ -99,7 +104,6 @@ jobs:
           printf '%s\n' "$policy_digest" > "policy-digest-${{ matrix.tool }}.txt"
 
       - name: Validate secret manifest governance artifact
-        shell: bash
         run: |
           set -euo pipefail
           manifest=""
@@ -149,7 +153,6 @@ jobs:
           path: secret-manifest-digest-${{ matrix.tool }}.txt
 
       - name: Validate pinned Dockerfile references
-        shell: bash
         run: |
           dockerfile="${CONTAINER_ROOT}/${{ matrix.tool }}/Dockerfile"
           if [[ ! -f "$dockerfile" ]]; then
@@ -183,7 +186,6 @@ jobs:
           password: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Prepare lowercase repository name
-        shell: bash
         run: |
           REPO_LC=$(echo "${GITHUB_REPOSITORY}" | tr '[:upper:]' '[:lower:]')
           echo "REPO_LC=${REPO_LC}" >> "$GITHUB_ENV"
@@ -205,7 +207,6 @@ jobs:
 
       - name: Enforce immutable digest output
         if: ${{ !env.ACT }}
-        shell: bash
         run: |
           set -euo pipefail
           digest="${{ steps.build.outputs.digest }}"
@@ -219,7 +220,6 @@ jobs:
           fi
 
       - name: Set image reference
-        shell: bash
         run: |
           set -euo pipefail
           if [[ -n "${ACT:-}" ]]; then
@@ -228,42 +228,17 @@ jobs:
             echo "IMAGE_REF=ghcr.io/${{ env.REPO_LC }}-${{ matrix.tool }}@${{ steps.build.outputs.digest }}" >> "$GITHUB_ENV"
           fi
 
-      - name: Ensure Trivy is installed
-        shell: bash
-        run: |
-          if [[ "$OSTYPE" == "darwin"* ]]; then
-            echo "/opt/homebrew/bin" >> "$GITHUB_PATH"
-            # Refresh path for current step
-            export PATH="/opt/homebrew/bin:$PATH"
-          fi
-          
-          if command -v trivy >/dev/null 2>&1; then
-            echo "Trivy already installed: $(trivy --version)"
-          else
-            echo "Installing Trivy..."
-            if [[ "$OSTYPE" == "darwin"* ]] && command -v brew >/dev/null 2>&1; then
-              brew install trivy
-            else
-              mkdir -p "$HOME/.local/bin"
-              curl -sfL https://raw.githubusercontent.com/aquasecurity/trivy/main/contrib/install.sh | sh -s -- -b "$HOME/.local/bin"
-              echo "$HOME/.local/bin" >> "$GITHUB_PATH"
-            fi
-          fi
-
       - name: CVE scan (fail on high/critical)
-        shell: bash
         run: |
           set -euo pipefail
           trivy image --scanners vuln --severity HIGH,CRITICAL --exit-code 1 "$IMAGE_REF"
 
       - name: Secret scan image layers
-        shell: bash
         run: |
           set -euo pipefail
           trivy image --scanners secret --severity HIGH,CRITICAL --exit-code 1 "$IMAGE_REF"
 
       - name: Generate SPDX SBOM
-        shell: bash
         run: |
           set -euo pipefail
           trivy image --format spdx-json --output "sbom-${{ matrix.tool }}.spdx.json" "$IMAGE_REF"
