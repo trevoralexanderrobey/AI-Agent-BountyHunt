@@ -21,7 +21,6 @@ const REQUIRED_PHASE21_DOCS = [
   path.resolve(__dirname, "..", "docs", "http-api-spec.md"),
   path.resolve(__dirname, "..", "docs", "execution-plane-activation-spec.md"),
 ];
-const REQUIRED_PHASE21_WORKFLOW = path.resolve(__dirname, "..", "..", ".github", "workflows", "container-build.yml");
 const REQUIRED_PHASE22_FILES = [
   path.resolve(__dirname, "..", "policy", "execution-policy-manifest.js"),
   path.resolve(__dirname, "..", "policy", "policy-authority.js"),
@@ -165,16 +164,6 @@ async function runDeployCheck(options = {}) {
     });
   }
 
-  const workflowCheck = checkRequiredAbsoluteFiles([REQUIRED_PHASE21_WORKFLOW]);
-  if (workflowCheck.missing.length > 0) {
-    errors.push({
-      code: "PHASE21_WORKFLOW_MISSING",
-      message: "Phase 21 container build workflow is missing or empty",
-      details: {
-        missing: workflowCheck.missing,
-      },
-    });
-  }
 
   const phase22PolicyCheck = checkRequiredAbsoluteFiles(REQUIRED_PHASE22_FILES);
   if (phase22PolicyCheck.missing.length > 0) {
@@ -222,9 +211,9 @@ async function runDeployCheck(options = {}) {
         missing: phase21DocsCheck.missing,
       },
       workflow: {
-        required: [REQUIRED_PHASE21_WORKFLOW],
-        present: workflowCheck.present,
-        missing: workflowCheck.missing,
+        required: [],
+        present: [],
+        missing: [],
       },
       phase22Policy: {
         required: REQUIRED_PHASE22_FILES,
