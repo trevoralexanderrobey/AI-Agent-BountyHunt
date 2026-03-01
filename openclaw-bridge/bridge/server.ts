@@ -339,11 +339,32 @@ const BRIDGE_MCP_TOOLS: Tool[] = [
 ];
 
 function createMcpToolResult(payload: unknown, isError = false) {
+  const LOCAL_SENSITIVE_KEY_PATTERN = /(token|secret|password|authorization|authheader|signature|privatekey|apikey|api_key|credential|cookie|secret_store|secretstore|secret_manifest|secretManifest|secret_store_url|redis|password|key|auth)/i;
+
+  function sanitizeForMcp(value: unknown): unknown {
+    if (value === null || typeof value === "undefined") return value;
+    if (typeof value === "string" || typeof value === "number" || typeof value === "boolean") return value;
+    if (Array.isArray(value)) return value.map((v) => sanitizeForMcp(v));
+    if (typeof value === "object") {
+      const out: Record<string, unknown> = {};
+      for (const [k, v] of Object.entries(value as Record<string, unknown>)) {
+        if (LOCAL_SENSITIVE_KEY_PATTERN.test(k)) {
+          out[k] = "<redacted>";
+        } else {
+          out[k] = sanitizeForMcp(v);
+        }
+      }
+      return out;
+    }
+    return value;
+  }
+
+  const safe = sanitizeForMcp(payload);
   return {
     content: [
       {
         type: "text",
-        text: JSON.stringify(payload, null, 2),
+        text: JSON.stringify(safe, null, 2),
       },
     ],
     isError,
@@ -515,6 +536,7 @@ const SENSITIVE_HEADER_NAMES = new Set([
   "x-api-key",
   "x-auth-token",
 ]);
+const SENSITIVE_KEY_PATTERN = /(token|secret|password|authorization|authheader|signature|privatekey|apikey|api_key|credential|cookie|secret_store|secretstore|secret_manifest|secretManifest|secret_store_url|redis|password|key|auth)/i;
 
 const INT32_MAX = 2147483647n;
 const UINT32_MAX = 4294967295n;
