@@ -474,3 +474,12 @@ Validates and loads cryptographically signed `execution-policy.json` representin
 - Replaces env checks with a signed configuration manifest parsed by `policy-authority.js`.
 - Generates canonical JSON to verify RSA signatures against `execution-policy.pub.pem`.
 - Modifying limits requires re-signing the canonical JSON via `verify-policy-artifact.js` tooling if in production.
+
+## Secret Governance & Authority (Phase 23)
+
+Centralizes secret lifecycle management and enforces cryptographic integrity of secret manifests.
+
+- **`secret-authority.js`**: Replaces ad-hoc secret fetching with a formal authority pattern.
+- **Secret Manifest**: Uses `secret-manifest.json` to define allowed secrets, versions, and principal-based access rules.
+- **Memory Safety**: Ensures secrets are zero-filled/wiped from memory via `releaseExecutionSecrets` after use.
+- **External Stores**: Supports Redis as a primary secret provider with environment fallbacks for non-production environments.

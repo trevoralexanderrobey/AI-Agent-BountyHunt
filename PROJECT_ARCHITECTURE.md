@@ -764,7 +764,22 @@ Bridge / Director Agent
 
 ---
 
-### 26. Burp Suite Integration (BionicLink)
+### 26. Secret Governance & Authority (Phase 23)
+
+**Authority Controller**: `/Users/trevorrobey/AI-Agent-BountyHunt/openclaw-bridge/security/secret-authority.js`  
+**Manifest Definition**: `/Users/trevorrobey/AI-Agent-BountyHunt/openclaw-bridge/security/secret-manifest.js`  
+**Manifest Storage**: `/Users/trevorrobey/AI-Agent-BountyHunt/openclaw-bridge/security/secret-manifest.json`  
+**Purpose**: Centralize secret lifecycle management, enforce cryptographic manifest integrity, and provide deterministic secret injection for execution.
+
+#### Capabilities
+- **Manifest Integrity**: SHA256 hashed and optionally signed JSON manifests defining secret metadata and access policies.
+- **Provider Abstraction**: Pluggable secret providers (Redis, Env Fallback) for retrieving sensitive values.
+- **Principal Isolation**: Scoped secret access based on principal ID and tool slug.
+- **Memory Safety**: Automatic zero-fill/wiping of secret buffers in memory after execution release.
+
+---
+
+### 27. Burp Suite Integration (BionicLink)
 
 **Extension**: BionicLink (custom Burp extension)  
 **Port**: 8090 (HTTP)  
@@ -983,12 +998,14 @@ User receives scan summary with findings
 │   │   └── supervisor-v1.js       # Supervisor v1 (routing, pooling, lifecycle)
 │   ├── observability/              # Telemetry system
 │   │   └── metrics.js             # In-memory metrics (counters, histograms, gauges)
-│   ├── security/                  # Security integrations (Phase 9, 21)
+│   ├── security/                  # Security integrations (Phase 9, 21, 23)
 │   │   ├── auth-guard.js          # Authentication validation (Constant-time)
 │   │   ├── audit-logger.js        # Audit logging sink (Phase 11)
 │   │   ├── request-signing.js     # HMAC signature validation
 │   │   ├── tls-config.js          # TLS 1.2+/mTLS config validation
 │   │   ├── secret-manager.js      # Memory-only secret injection mapping
+│   │   ├── secret-authority.js    # Manifest-based secret provider (Phase 23)
+│   │   ├── secret-manifest.js     # Manifest schema and hashing
 │   │   └── execution-quota-store.js # Rate limiting and quota bounds
 │   ├── http/                      # HTTP API ingress (Phase 10)
 │   │   ├── server.js              # HTTP server with graceful shutdown
@@ -1361,6 +1378,6 @@ This architecture is designed for security researchers, bug bounty hunters, and 
 
 ---
 
-**Document Version**: 1.15  
+**Document Version**: 1.16  
 **Last Updated**: February 28, 2026  
 **Maintained By**: Trevor Robey

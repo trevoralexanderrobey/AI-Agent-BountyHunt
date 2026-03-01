@@ -27,6 +27,7 @@ Key capabilities:
 - **Controlled Runtime Activation** — Opt-in containerized execution enforcing sandbox and image provenance guardrails
 - **Execution Governance & Resource Control** — Safe secret injection, threat models, and deterministic execution quotas
 - **Execution Policy Authority** — Cryptographically signed JSON manifests enforcing environment configuration limits
+- **Secret Governance & Authority** — Centralized secret manifest validation and cryptographic provenance enforcement
 - **Cluster Simulation** — Deterministic fault injection harness for multi-node scenario testing
 - **MCP Bridge** — Director → Executor pattern connecting GitHub Pro / Antigravity / Codex to OpenClaw
 
