@@ -39,13 +39,17 @@ jobs:
           set -euo pipefail
           if [[ -d "openclaw-bridge/containers" ]]; then
             root="openclaw-bridge/containers"
+            ctx="openclaw-bridge"
           elif [[ -d "containers" ]]; then
             root="containers"
+            ctx="."
           else
             echo "Unable to locate 'containers' directory. Defaulting to root."
             root="."
+            ctx="."
           fi
           echo "CONTAINER_ROOT=${root}" >> "$GITHUB_ENV"
+          echo "BUILD_CONTEXT=${ctx}" >> "$GITHUB_ENV"
 
       - name: Validate signed execution policy artifact
         shell: bash
@@ -184,7 +188,7 @@ jobs:
         id: build
         uses: docker/build-push-action@v6
         with:
-          context: .
+          context: ${{ env.BUILD_CONTEXT }}
           file: ${{ env.CONTAINER_ROOT }}/${{ matrix.tool }}/Dockerfile
           push: ${{ env.ACT != 'true' }}
           load: ${{ env.ACT == 'true' }}
