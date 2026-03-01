@@ -247,10 +247,42 @@ function computeSecretManifestHash(inputManifest) {
 }
 
 function loadSecretManifestFromDisk(options = {}) {
-  const manifestPath =
-    normalizeString(options.manifestPath) ||
-    normalizeString(process.env.SECRET_MANIFEST_PATH) ||
-    path.resolve(__dirname, "secret-manifest.json");
+  const canonicalPath = path.resolve(__dirname, "secret-manifest.json");
+  const providedManifestPath =
+    normalizeString(options.manifestPath) || normalizeString(process.env.SECRET_MANIFEST_PATH) || "";
+  const production = Boolean(
+    options.production === true || String(process.env.NODE_ENV || "").trim().toLowerCase() === "production",
+  );
+
+  if (production) {
+    if (providedManifestPath) {
+      const err = new Error("Manifest path override not allowed in production");
+      err.code = "SECRET_MANIFEST_OVERRIDE_IN_PRODUCTION";
+      throw err;
+    }
+
+    const manifestPath = canonicalPath;
+    let writable = false;
+    try {
+      fs.accessSync(manifestPath, fs.constants.W_OK);
+      writable = true;
+    } catch (err) {
+      // accessSync throws when not writable or file doesn't exist - that's acceptable here
+      writable = false;
+    }
+
+    if (writable) {
+      const error = new Error("Secret manifest must be read-only in production");
+      error.code = "SECRET_MANIFEST_WRITABLE_IN_PRODUCTION";
+      throw error;
+    }
+
+    const raw = fs.readFileSync(manifestPath, "utf8");
+    return JSON.parse(raw);
+  }
+
+  // Non-production: allow explicit overrides for local/dev convenience.
+  const manifestPath = providedManifestPath || canonicalPath;
   const raw = fs.readFileSync(manifestPath, "utf8");
   return JSON.parse(raw);
 }
