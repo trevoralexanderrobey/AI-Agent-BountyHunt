@@ -143,11 +143,14 @@ jobs:
       - name: Validate pinned Dockerfile references
         shell: bash
         run: |
-          set -euo pipefail
           dockerfile="${CONTAINER_ROOT}/${{ matrix.tool }}/Dockerfile"
           if [[ ! -f "$dockerfile" ]]; then
-            echo "Missing Dockerfile: $dockerfile" >&2
-            exit 1
+             # Try falling back to looking in openclaw-bridge if we are the root
+             dockerfile="openclaw-bridge/containers/${{ matrix.tool }}/Dockerfile"
+             if [[ ! -f "$dockerfile" ]]; then
+                 echo "Missing Dockerfile: $dockerfile" >&2
+                 exit 1
+             fi
           fi
           if grep -En "FROM .*:latest" "$dockerfile"; then
             echo "':latest' is not allowed in Dockerfile" >&2
@@ -157,7 +160,6 @@ jobs:
             echo "FROM lines must be digest pinned" >&2
             exit 1
           fi
-
       - name: Set up QEMU
         uses: docker/setup-qemu-action@v3
 
