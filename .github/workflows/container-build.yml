@@ -228,15 +228,27 @@ jobs:
             echo "IMAGE_REF=ghcr.io/${{ env.REPO_LC }}-${{ matrix.tool }}@${{ steps.build.outputs.digest }}" >> "$GITHUB_ENV"
           fi
 
-      - name: Install Trivy
+      - name: Ensure Trivy is installed
         shell: bash
         run: |
-          set -euo pipefail
-          mkdir -p "$HOME/.local/bin"
-          if [[ ! -f "$HOME/.local/bin/trivy" ]]; then
-            curl -sfL https://raw.githubusercontent.com/aquasecurity/trivy/main/contrib/install.sh | sh -s -- -b "$HOME/.local/bin"
+          if [[ "$OSTYPE" == "darwin"* ]]; then
+            echo "/opt/homebrew/bin" >> "$GITHUB_PATH"
+            # Refresh path for current step
+            export PATH="/opt/homebrew/bin:$PATH"
           fi
-          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+          
+          if command -v trivy >/dev/null 2>&1; then
+            echo "Trivy already installed: $(trivy --version)"
+          else
+            echo "Installing Trivy..."
+            if [[ "$OSTYPE" == "darwin"* ]] && command -v brew >/dev/null 2>&1; then
+              brew install trivy
+            else
+              mkdir -p "$HOME/.local/bin"
+              curl -sfL https://raw.githubusercontent.com/aquasecurity/trivy/main/contrib/install.sh | sh -s -- -b "$HOME/.local/bin"
+              echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+            fi
+          fi
 
       - name: CVE scan (fail on high/critical)
         shell: bash
