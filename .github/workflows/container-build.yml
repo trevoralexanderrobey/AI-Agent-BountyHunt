@@ -29,6 +29,11 @@ jobs:
           - sqlmap
           - whois
 
+    env:
+      ACT: ${{ env.ACT }}
+      GIT_CONFIG_GLOBAL: /dev/null
+      GIT_CONFIG_SYSTEM: /dev/null
+
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -225,7 +230,14 @@ jobs:
           fi
 
       - name: Install Trivy
-        uses: aquasecurity/setup-trivy@v0.2.4
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p "$HOME/.local/bin"
+          if [[ ! -f "$HOME/.local/bin/trivy" ]]; then
+            curl -sfL https://raw.githubusercontent.com/aquasecurity/trivy/main/contrib/install.sh | sh -s -- -b "$HOME/.local/bin"
+          fi
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
 
       - name: CVE scan (fail on high/critical)
         shell: bash
