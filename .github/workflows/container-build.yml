@@ -23,6 +23,9 @@ permissions:
 jobs:
   build-scan-sign:
     runs-on: ubuntu-latest
+    env:
+      # LOCAL_RUN is exported to step shells so scripts can detect act via $LOCAL_RUN
+      LOCAL_RUN: ${{ env.ACT }}
     strategy:
       fail-fast: false
       matrix:
@@ -95,6 +98,7 @@ jobs:
         uses: docker/setup-buildx-action@v3
 
       - name: Log in to GHCR
+        if: ${{ !env.ACT }}
         uses: docker/login-action@v3
         with:
           registry: ghcr.io
@@ -121,9 +125,10 @@ jobs:
         with:
           context: openclaw-bridge
           file: openclaw-bridge/containers/${{ matrix.tool }}/Dockerfile
-          push: true
-          provenance: true
-          sbom: true
+          push: ${{ env.ACT == '' }}
+          load: ${{ env.ACT != '' }}
+          provenance: ${{ env.ACT == '' }}
+          sbom: ${{ env.ACT == '' }}
           tags: |
             ${{ steps.meta.outputs.image }}:${{ steps.meta.outputs.tag }}
           labels: |
@@ -131,6 +136,7 @@ jobs:
             org.opencontainers.image.revision=${{ github.sha }}
 
       - name: Enforce immutable digest output
+        if: ${{ !env.ACT }}
         shell: bash
         run: |
           set -euo pipefail
@@ -151,24 +157,37 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          image_ref="${{ steps.meta.outputs.image }}@${{ steps.build.outputs.digest }}"
+          if [[ -n "${ACT:-}" ]]; then
+            image_ref="${{ steps.meta.outputs.image }}:${{ steps.meta.outputs.tag }}"
+          else
+            image_ref="${{ steps.meta.outputs.image }}@${{ steps.build.outputs.digest }}"
+          fi
           trivy image --scanners vuln --severity HIGH,CRITICAL --exit-code 1 "$image_ref"
 
       - name: Secret scan image layers
         shell: bash
         run: |
           set -euo pipefail
-          image_ref="${{ steps.meta.outputs.image }}@${{ steps.build.outputs.digest }}"
+          if [[ -n "${ACT:-}" ]]; then
+            image_ref="${{ steps.meta.outputs.image }}:${{ steps.meta.outputs.tag }}"
+          else
+            image_ref="${{ steps.meta.outputs.image }}@${{ steps.build.outputs.digest }}"
+          fi
           trivy image --scanners secret --severity HIGH,CRITICAL --exit-code 1 "$image_ref"
 
       - name: Enforce no embedded secrets in layers
         shell: bash
         run: |
           set -euo pipefail
-          image_ref="${{ steps.meta.outputs.image }}@${{ steps.build.outputs.digest }}"
+          if [[ -n "${ACT:-}" ]]; then
+            image_ref="${{ steps.meta.outputs.image }}:${{ steps.meta.outputs.tag }}"
+          else
+            image_ref="${{ steps.meta.outputs.image }}@${{ steps.build.outputs.digest }}"
+            # Pull only in CI; locally the image is already in the daemon via load:true
+            docker pull "$image_ref"
+          fi
           tmpdir="$(mktemp -d)"
           trap 'rm -rf "$tmpdir"' EXIT
-          docker pull "$image_ref"
           docker save "$image_ref" -o "$tmpdir/image.tar"
           mkdir -p "$tmpdir/unpack"
           tar -xf "$tmpdir/image.tar" -C "$tmpdir/unpack"
@@ -188,7 +207,11 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          image_ref="${{ steps.meta.outputs.image }}@${{ steps.build.outputs.digest }}"
+          if [[ -n "${ACT:-}" ]]; then
+            image_ref="${{ steps.meta.outputs.image }}:${{ steps.meta.outputs.tag }}"
+          else
+            image_ref="${{ steps.meta.outputs.image }}@${{ steps.build.outputs.digest }}"
+          fi
           trivy image --format spdx-json --output "sbom-${{ matrix.tool }}.spdx.json" "$image_ref"
 
       - name: Upload SBOM artifact
@@ -201,6 +224,7 @@ jobs:
         uses: sigstore/cosign-installer@v3.8.1
 
       - name: Sign image (keyless)
+        if: ${{ !env.ACT }}
         shell: bash
         env:
           COSIGN_EXPERIMENTAL: "1"
@@ -210,6 +234,7 @@ jobs:
           cosign sign --yes "$image_ref"
 
       - name: Attest build provenance
+        if: ${{ !env.ACT }}
         uses: actions/attest-build-provenance@v2
         with:
           subject-name: ${{ steps.meta.outputs.image }}

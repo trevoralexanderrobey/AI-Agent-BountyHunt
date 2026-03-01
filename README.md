@@ -139,6 +139,54 @@ cd "AG for OC"
 - [LLDB Triage Flow](./openclaw-bridge/docs/LLDB_TRIAGE.md)
 - [Operations Guide](./openclaw-bridge/docs/OPERATIONS.md)
 
+## Running CI Locally (No Docker Desktop)
+
+This repository supports running the full CI pipeline locally using [nektos/act](https://github.com/nektos/act) backed by [Colima](https://github.com/abiosoft/colima) (no Docker Desktop required).
+
+### Prerequisites
+
+```bash
+brew install colima docker act
+```
+
+### Start Colima
+
+```bash
+colima start --cpu 4 --memory 8 --disk 60
+export DOCKER_HOST=unix://$HOME/.colima/default/docker.sock
+```
+
+### Run CI Locally
+
+Run a single tool (e.g. `curl`) to validate the pipeline quickly:
+
+```bash
+make act-curl
+```
+
+Run the full matrix of all tools:
+
+```bash
+make act-all
+```
+
+> **Note:** The following steps are automatically skipped when running under `act`:
+> - GHCR login and image push
+> - Cosign keyless signing (requires OIDC, unavailable locally)
+> - Build provenance attestation (requires OIDC, unavailable locally)
+>
+> Build, policy checks, Dockerfile validation, and Trivy vulnerability/secret scans **do** run locally.
+
+### Passing Secrets
+
+If any steps require a token (e.g. for pulling private base images), pass secrets via:
+
+```bash
+act -s GITHUB_TOKEN=$GITHUB_TOKEN push -j build-scan-sign
+```
+
+> **Never commit tokens or secrets to this repository.**
+
 ## Safety Notes
 
 - Keep `.env` files local-only and uncommitted.
