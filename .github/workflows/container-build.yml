@@ -176,7 +176,9 @@ jobs:
 
       - name: Prepare lowercase repository name
         shell: bash
-        run: echo "REPO_LC=${GITHUB_REPOSITORY,,}" >> "$GITHUB_ENV"
+        run: |
+          REPO_LC=$(echo "${GITHUB_REPOSITORY}" | tr '[:upper:]' '[:lower:]')
+          echo "REPO_LC=${REPO_LC}" >> "$GITHUB_ENV"
 
       - name: Build image
         id: build
