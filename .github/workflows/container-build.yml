@@ -12,7 +12,8 @@ permissions:
 
 jobs:
   build-scan-sign:
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, antigravity]
+    # runs-on: ubuntu-latest # fallback
     strategy:
       fail-fast: false
       matrix:

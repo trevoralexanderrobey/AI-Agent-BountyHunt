@@ -106,6 +106,45 @@ cd "AG for OC"
 - **Qwen Bootstrap Script:** `openclaw-bridge/github-pro-mcp/scripts/qwen-openclaw-bootstrap.sh`
 - **Antigravity Bootstrap Script:** `openclaw-bridge/github-pro-mcp/scripts/antigravity-openclaw-bootstrap.sh`
 
+## Self-Hosted Runner (Zero Cloud Billing)
+
+This repository comes pre-configured to run GitHub Actions on a local self-hosted runner powered by Colima, eliminating all per-minute cloud billing charges while preserving the full suite of supply-chain security checks (OIDC keyless signing, provenance generation, SBOMs, and Trivy scans).
+
+### Why this eliminates GitHub minute charges
+By running actions on your own compute architecture, GitHub does not charge for execution time. Because the workflow uses isolated environments, the security assertions, OIDC boundaries, and GHCR pushes remain completely intact.
+
+### How to install runner
+1. Navigate to: **Repository -> Settings -> Actions -> Runners -> New self-hosted runner**
+2. Select **macOS** and copy the **registration token**.
+3. Run the setup script from the root of the repository:
+   ```bash
+   ./scripts/setup-self-hosted-runner.sh
+   # It will prompt for your token.
+   ```
+This automatically configures the runner service and binds it to Colima's Docker socket via `DOCKER_HOST`.
+
+### How to start runner
+The installation script installs the runner as a background macOS service. It will start automatically. You can manually manage it via:
+```bash
+cd actions-runner
+./svc.sh start
+```
+
+### How to verify runner online
+Go to **Repository -> Settings -> Actions -> Runners**. Your runner `antigravity-local-runner` should show a green status "Idle".
+
+### How to stop runner
+```bash
+cd actions-runner
+./svc.sh stop
+```
+
+### Security implications
+- ✅ **No secrets committed:** The runner registration uses transient tokens.
+- ✅ **No PAT hardcoded:** Authenticated actions continue interacting seamlessly via scoped `$GITHUB_TOKEN` and Actions OIDC policies.
+- ✅ **No weakening of cosign OIDC:** Keyless signing requires no long-lived keys.
+- ✅ **Environment Isolation:** Containers are executed within Colima, isolating side effects.
+
 ## Documentation
 
 - [Project Architecture](./PROJECT_ARCHITECTURE.md)
