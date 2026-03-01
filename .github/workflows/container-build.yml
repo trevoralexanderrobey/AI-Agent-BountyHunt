@@ -30,9 +30,8 @@ jobs:
           - whois
 
     env:
-      ACT: ${{ env.ACT }}
-      GIT_CONFIG_GLOBAL: /dev/null
-      GIT_CONFIG_SYSTEM: /dev/null
+      GIT_CONFIG_GLOBAL: "/dev/null"
+      GIT_CONFIG_SYSTEM: "/dev/null"
 
     steps:
       - name: Checkout
@@ -280,6 +279,6 @@ jobs:
         if: ${{ !env.ACT }}
         uses: actions/attest-build-provenance@v2
         with:
-          subject-name: ghcr.io/${{ github.repository }}-${{ matrix.tool }}
+          subject-name: ghcr.io/${{ env.REPO_LC }}-${{ matrix.tool }}
           subject-digest: ${{ steps.build.outputs.digest }}
           push-to-registry: true
