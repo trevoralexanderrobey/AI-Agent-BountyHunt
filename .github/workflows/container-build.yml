@@ -13,8 +13,6 @@ permissions:
 jobs:
   build-scan-sign:
     runs-on: ubuntu-latest
-    env:
-      LOCAL_RUN: ${{ env.ACT }}
     strategy:
       fail-fast: false
       matrix:
@@ -205,7 +203,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          if [[ -n "${LOCAL_RUN:-}" ]]; then
+          if [[ -n "${ACT:-}" ]]; then
             echo "IMAGE_REF=ghcr.io/${{ github.repository }}-${{ matrix.tool }}:latest" >> "$GITHUB_ENV"
           else
             echo "IMAGE_REF=ghcr.io/${{ github.repository }}-${{ matrix.tool }}@${{ steps.build.outputs.digest }}" >> "$GITHUB_ENV"
