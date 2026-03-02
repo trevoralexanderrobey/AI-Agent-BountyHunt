@@ -453,17 +453,17 @@ Spec: `/Users/trevorrobey/AI-Agent-BountyHunt/openclaw-bridge/docs/execution-pla
 
 Resource allocation boundaries covering node-level safety during container or host execution.
 
-- Global Quotas: 
+- Global Quotas:
   - Regulated hourly burst rate
   - Execution attempts tracked by principal and origin
-- Secret Governance: 
+- Secret Governance:
   - Secrets injected into runtime ENV bounds via `secret-manager.js`
   - Prevents secrets touching disk or snapshots
-- Arbitration: 
+- Arbitration:
   - Bounded concurrency matching total system memory capacity
   - Automatic `release` idempotency in execution failures
 
-Specs: 
+Specs:
 - `/Users/trevorrobey/AI-Agent-BountyHunt/openclaw-bridge/docs/threat-model.md`
 - `/Users/trevorrobey/AI-Agent-BountyHunt/openclaw-bridge/docs/secret-governance.md`
 
@@ -483,3 +483,14 @@ Centralizes secret lifecycle management and enforces cryptographic integrity of 
 - **Secret Manifest**: Uses `secret-manifest.json` to define allowed secrets, versions, and principal-based access rules.
 - **Memory Safety**: Ensures secrets are zero-filled/wiped from memory via `releaseExecutionSecrets` after use.
 - **External Stores**: Supports Redis as a primary secret provider with environment fallbacks for non-production environments.
+
+## Supervisor Structural Hardening (Phase 24)
+
+Establishes strict workspace sandboxing and canonical execution boundaries using `execution-router.ts`.
+
+- **Internal Bypass Rules**: An external `internal=true` flag is ignored unless explicitly signed by the `SUPERVISOR_INTERNAL_TOKEN` or called via in-process trusted boundaries.
+- **Audit Logging**: Asynchronous auditing is output strictly into the isolated workspace boundary at `<workspaceRoot>/.openclaw/audit.log` featuring internal 10MB auto-rotation.
+- **Rollback Playbook**: To temporarily bypass or fallback in the event of supervisor faults:
+  1. Set `SUPERVISOR_MODE=false`.
+  2. Set `SUPERVISOR_AUTH_PHASE=compat`.
+  3. Restart bridge services.
