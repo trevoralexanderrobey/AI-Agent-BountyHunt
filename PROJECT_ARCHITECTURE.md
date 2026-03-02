@@ -803,7 +803,21 @@ Bridge / Director Agent
 
 ---
 
-### 28. Burp Suite Integration (BionicLink)
+### 28. Preflight Validation & Workload Integrity (Phase 24.5)
+
+**Preflight Validator**: `/Users/trevorrobey/AI-Agent-BountyHunt/openclaw-bridge/deployment/preflight-validator.js`
+**Workload Integrity**: `/Users/trevorrobey/AI-Agent-BountyHunt/openclaw-bridge/security/workload-integrity.ts`
+**Workload Manifest**: `/Users/trevorrobey/AI-Agent-BountyHunt/openclaw-bridge/security/workload-manifest.json`
+**Purpose**: Enforce comprehensive boot-time validations across cluster topology, security domains, and execution policies, while strictly locking script execution hashes.
+
+#### Capabilities
+- **Boot-time Validation**: Validates container runtime mode, cluster federation, alert thresholds, topology constraints, and expected TLS settings before allowing bridge startup.
+- **Cryptographic Provenance**: Requires signed workloads validating precisely pinned SHA256 hashes of `adapterHash`, `entrypointHash`, and `runtimeConfigHash` for all tool executions.
+- **Fail-Safe Integrity**: Prevents injection and drift by ensuring production container-mode boundaries strictly adhere to the audited manifest version.
+
+---
+
+### 29. Burp Suite Integration (BionicLink)
 
 **Extension**: BionicLink (custom Burp extension)
 **Port**: 8090 (HTTP)

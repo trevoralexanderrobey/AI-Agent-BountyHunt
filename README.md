@@ -35,6 +35,7 @@ Key capabilities:
 - **Execution Policy Authority** — Cryptographically signed JSON manifests enforcing environment configuration limits
 - **Secret Governance & Authority** — Centralized secret manifest validation and cryptographic provenance enforcement
 - **Supervisor Structural Hardening** — Secure canonical execution routing, isolated workspace guards, and queued audit logging
+- **Preflight Validation & Workload Integrity** — Comprehensive boot-time environment enforcement and cryptographic workload validation
 - **Cluster Simulation** — Deterministic fault injection harness for multi-node scenario testing
 - **MCP Bridge** — Director → Executor pattern connecting GitHub Pro / Antigravity / Codex to OpenClaw
 
