@@ -28,12 +28,13 @@ Key capabilities:
 - **Execution Governance & Resource Control** — Safe secret injection, threat models, and deterministic execution quotas
 - **Execution Policy Authority** — Cryptographically signed JSON manifests enforcing environment configuration limits
 - **Secret Governance & Authority** — Centralized secret manifest validation and cryptographic provenance enforcement
+- **Supervisor Structural Hardening** — Secure canonical execution routing, isolated workspace guards, and queued audit logging
 - **Cluster Simulation** — Deterministic fault injection harness for multi-node scenario testing
 - **MCP Bridge** — Director → Executor pattern connecting GitHub Pro / Antigravity / Codex to OpenClaw
 
 ### OpenClaw Bridge Runtime
 
-Located in `openclaw-bridge/`. 
+Located in `openclaw-bridge/`.
 
 This repo runs the OpenClaw bridge, GitHub Pro MCP server, and OpenCode daemon against a local Ollama instance (default model `qwen2.5-coder:7b`).
 
@@ -90,7 +91,7 @@ curl -sS http://localhost:11434/v1/models | jq
 
 ### AG Runtime For OpenClaw
 
-Located in `AG for OC/`. 
+Located in `AG for OC/`.
 
 This directory is the generated runtime bundle for Antigravity's OpenClaw MCP client. It copies the `mcp.json` into the Antigravity User config space.
 

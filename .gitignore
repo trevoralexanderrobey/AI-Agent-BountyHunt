@@ -72,3 +72,6 @@ venv.bak/
 # Runtime state and audit logs
 data/
 logs/
+
+# Cline workspace secrets
+.cline/

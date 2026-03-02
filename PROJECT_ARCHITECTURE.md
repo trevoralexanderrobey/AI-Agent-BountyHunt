@@ -4,8 +4,8 @@
 
 The AI-Agent-BountyHunt project is a sophisticated local AI agent runtime stack that bridges GitHub Pro Agent Mode with OpenClaw for autonomous security research and bounty hunting workflows. It integrates multiple AI models, security tools (Burp Suite, LLDB), and a job queue system to enable intelligent, privileged task execution.
 
-**Current Date**: February 22, 2026  
-**Project Root**: `/Users/trevorrobey/AI-Agent-BountyHunt`  
+**Current Date**: February 22, 2026
+**Project Root**: `/Users/trevorrobey/AI-Agent-BountyHunt`
 **Primary Maintainer**: Trevor Robey
 
 ---
@@ -65,8 +65,8 @@ The AI-Agent-BountyHunt project is a sophisticated local AI agent runtime stack 
 
 ### 1. OpenClaw Bridge Service (`/openclaw-bridge/bridge/`)
 
-**Location**: `/Users/trevorrobey/AI-Agent-BountyHunt/openclaw-bridge/bridge/server.ts`  
-**Port**: 8787 (HTTP) or HTTPS with TLS  
+**Location**: `/Users/trevorrobey/AI-Agent-BountyHunt/openclaw-bridge/bridge/server.ts`
+**Port**: 8787 (HTTP) or HTTPS with TLS
 **Purpose**: Central job queue and tool execution router
 
 #### Key Features:
@@ -107,7 +107,7 @@ The AI-Agent-BountyHunt project is a sophisticated local AI agent runtime stack 
 
 ### 2. GitHub Pro MCP Bridge (`/openclaw-bridge/github-pro-mcp/`)
 
-**Location**: `/Users/trevorrobey/AI-Agent-BountyHunt/openclaw-bridge/github-pro-mcp/`  
+**Location**: `/Users/trevorrobey/AI-Agent-BountyHunt/openclaw-bridge/github-pro-mcp/`
 **Purpose**: MCP server bridging GitHub Pro Agent Mode to OpenClaw
 
 #### Architecture: Director → Executor Pattern
@@ -169,7 +169,7 @@ The AI-Agent-BountyHunt project is a sophisticated local AI agent runtime stack 
 
 ### 3. Runtime Skills (`/openclaw-bridge/skills/`)
 
-**Source**: `/Users/trevorrobey/AI-Agent-BountyHunt/openclaw-bridge/skills/`  
+**Source**: `/Users/trevorrobey/AI-Agent-BountyHunt/openclaw-bridge/skills/`
 **Runtime**: `~/.openclaw/skills/` (synced via `sync-skill-to-runtime.sh`)
 
 #### Available Skills:
@@ -224,8 +224,8 @@ The AI-Agent-BountyHunt project is a sophisticated local AI agent runtime stack 
 
 ### 4. OpenCode Daemon (`/openclaw-bridge/github-pro-mcp/src/`)
 
-**Port**: 8091  
-**Backend**: `opencode serve` at port 8090  
+**Port**: 8091
+**Backend**: `opencode serve` at port 8090
 **Purpose**: Local coding agent session management
 
 #### API Endpoints:
@@ -245,7 +245,7 @@ The AI-Agent-BountyHunt project is a sophisticated local AI agent runtime stack 
 
 ### 5. LLDB Integration (`/openclaw-bridge/lldb/`)
 
-**File**: `triage_bridge.py`  
+**File**: `triage_bridge.py`
 **Purpose**: Automatic crash triage from LLDB stop events
 
 #### Workflow:
@@ -273,10 +273,10 @@ The AI-Agent-BountyHunt project is a sophisticated local AI agent runtime stack 
 
 ### 7. Skill Spawner & Runtime Core
 
-**Spawner**: `/Users/trevorrobey/AI-Agent-BountyHunt/openclaw-bridge/scripts/spawner.py`  
-**Runtime Core**: `/Users/trevorrobey/AI-Agent-BountyHunt/openclaw-bridge/runtime/skill-runtime-core.js`  
-**Templates**: `/Users/trevorrobey/AI-Agent-BountyHunt/openclaw-bridge/scripts/templates/`  
-**Spec**: `/Users/trevorrobey/AI-Agent-BountyHunt/openclaw-bridge/docs/skill-runtime-v1.md`  
+**Spawner**: `/Users/trevorrobey/AI-Agent-BountyHunt/openclaw-bridge/scripts/spawner.py`
+**Runtime Core**: `/Users/trevorrobey/AI-Agent-BountyHunt/openclaw-bridge/runtime/skill-runtime-core.js`
+**Templates**: `/Users/trevorrobey/AI-Agent-BountyHunt/openclaw-bridge/scripts/templates/`
+**Spec**: `/Users/trevorrobey/AI-Agent-BountyHunt/openclaw-bridge/docs/skill-runtime-v1.md`
 **Purpose**: Generate and scaffold new OpenClaw skills with a formalized runtime interface
 
 #### Spawner CLI
@@ -300,20 +300,20 @@ python3 spawner.py <tool_name> [--flags "..."] [--gui] [--force] [--dry-run] [--
 
 #### Skill Runtime v1 Exports (per generated skill)
 
-**Control**: `run()`, `health()`  
-**Forensics**: `read_output_chunk()`, `search_output()`  
-**Indexing**: `semantic_summary()`  
-**Intelligence**: `anomaly_summary()`, `anomaly_diff()`  
+**Control**: `run()`, `health()`
+**Forensics**: `read_output_chunk()`, `search_output()`
+**Indexing**: `semantic_summary()`
+**Intelligence**: `anomaly_summary()`, `anomaly_diff()`
 **Baseline**: `tag_baseline()`, `list_baselines()`, `diff_against_baseline()`
 
 ---
 
 ### 8. MCP Skill Containers (Distributed Execution)
 
-**MCP Server**: `/Users/trevorrobey/AI-Agent-BountyHunt/openclaw-bridge/runtime/mcp-skill-server.js`  
-**Spawner v2**: `/Users/trevorrobey/AI-Agent-BountyHunt/openclaw-bridge/spawner/spawner-v2.js`  
-**Dockerfile**: `/Users/trevorrobey/AI-Agent-BountyHunt/openclaw-bridge/containers/nmap/Dockerfile`  
-**Specs**: `docs/mcp-skill-container-spec.md`, `docs/spawner-v2-spec.md`  
+**MCP Server**: `/Users/trevorrobey/AI-Agent-BountyHunt/openclaw-bridge/runtime/mcp-skill-server.js`
+**Spawner v2**: `/Users/trevorrobey/AI-Agent-BountyHunt/openclaw-bridge/spawner/spawner-v2.js`
+**Dockerfile**: `/Users/trevorrobey/AI-Agent-BountyHunt/openclaw-bridge/containers/nmap/Dockerfile`
+**Specs**: `docs/mcp-skill-container-spec.md`, `docs/spawner-v2-spec.md`
 **Purpose**: Run individual skills as isolated Docker containers with JSON-RPC 2.0 MCP transport
 
 #### Architecture
@@ -354,8 +354,8 @@ Bridge / Director Agent
 
 ### 9. Supervisor v1 (Routing & Pooling)
 
-**Module**: `/Users/trevorrobey/AI-Agent-BountyHunt/openclaw-bridge/supervisor/supervisor-v1.js`  
-**Spec**: `/Users/trevorrobey/AI-Agent-BountyHunt/openclaw-bridge/docs/supervisor-v1-spec.md`  
+**Module**: `/Users/trevorrobey/AI-Agent-BountyHunt/openclaw-bridge/supervisor/supervisor-v1.js`
+**Spec**: `/Users/trevorrobey/AI-Agent-BountyHunt/openclaw-bridge/docs/supervisor-v1-spec.md`
 **Purpose**: Deterministic routing and connection pooling layer over Spawner v2
 
 #### Public API
@@ -386,8 +386,8 @@ Bridge / Director Agent
 
 ### 10. Observability (Telemetry)
 
-**Module**: `/Users/trevorrobey/AI-Agent-BountyHunt/openclaw-bridge/observability/metrics.js`  
-**Spec**: `/Users/trevorrobey/AI-Agent-BountyHunt/openclaw-bridge/docs/observability-spec.md`  
+**Module**: `/Users/trevorrobey/AI-Agent-BountyHunt/openclaw-bridge/observability/metrics.js`
+**Spec**: `/Users/trevorrobey/AI-Agent-BountyHunt/openclaw-bridge/docs/observability-spec.md`
 **Purpose**: Deterministic in-memory telemetry for Supervisor and Spawner
 
 #### API
@@ -414,9 +414,9 @@ Bridge / Director Agent
 
 ### 11. Security Baseline (Phase 9)
 
-**Auth Guard**: `/Users/trevorrobey/AI-Agent-BountyHunt/openclaw-bridge/security/auth.js`  
-**Rate Limiter**: `/Users/trevorrobey/AI-Agent-BountyHunt/openclaw-bridge/security/rate-limit.js`  
-**Spec**: `/Users/trevorrobey/AI-Agent-BountyHunt/openclaw-bridge/docs/phase-9-security-baseline.md`  
+**Auth Guard**: `/Users/trevorrobey/AI-Agent-BountyHunt/openclaw-bridge/security/auth.js`
+**Rate Limiter**: `/Users/trevorrobey/AI-Agent-BountyHunt/openclaw-bridge/security/rate-limit.js`
+**Spec**: `/Users/trevorrobey/AI-Agent-BountyHunt/openclaw-bridge/docs/phase-9-security-baseline.md`
 **Purpose**: Authentication, rate limiting, and request tracing for the Supervisor ingress
 
 #### Auth Guard (`createAuthGuard`)
@@ -444,9 +444,9 @@ Bridge / Director Agent
 
 ### 12. HTTP API Ingress (Phase 10)
 
-**Server**: `/Users/trevorrobey/AI-Agent-BountyHunt/openclaw-bridge/http/server.js`  
-**Handlers**: `/Users/trevorrobey/AI-Agent-BountyHunt/openclaw-bridge/http/handlers.js`  
-**Spec**: `/Users/trevorrobey/AI-Agent-BountyHunt/openclaw-bridge/docs/http-api-spec.md`  
+**Server**: `/Users/trevorrobey/AI-Agent-BountyHunt/openclaw-bridge/http/server.js`
+**Handlers**: `/Users/trevorrobey/AI-Agent-BountyHunt/openclaw-bridge/http/handlers.js`
+**Spec**: `/Users/trevorrobey/AI-Agent-BountyHunt/openclaw-bridge/docs/http-api-spec.md`
 **Purpose**: External HTTP ingress wrapping Supervisor v1
 
 #### Endpoints
@@ -465,10 +465,10 @@ Bridge / Director Agent
 
 ### 13. Production Hardening (Phase 11)
 
-**TLS Config**: `/Users/trevorrobey/AI-Agent-BountyHunt/openclaw-bridge/security/tls-config.js`  
-**Request Signing**: `/Users/trevorrobey/AI-Agent-BountyHunt/openclaw-bridge/security/request-signing.js`  
-**Audit Logger**: `/Users/trevorrobey/AI-Agent-BountyHunt/openclaw-bridge/security/audit-logger.js`  
-**Prometheus**: `/Users/trevorrobey/AI-Agent-BountyHunt/openclaw-bridge/monitoring/prometheus-exporter.js`  
+**TLS Config**: `/Users/trevorrobey/AI-Agent-BountyHunt/openclaw-bridge/security/tls-config.js`
+**Request Signing**: `/Users/trevorrobey/AI-Agent-BountyHunt/openclaw-bridge/security/request-signing.js`
+**Audit Logger**: `/Users/trevorrobey/AI-Agent-BountyHunt/openclaw-bridge/security/audit-logger.js`
+**Prometheus**: `/Users/trevorrobey/AI-Agent-BountyHunt/openclaw-bridge/monitoring/prometheus-exporter.js`
 **Spec**: `/Users/trevorrobey/AI-Agent-BountyHunt/openclaw-bridge/docs/phase-11-production-hardening.md`
 
 #### TLS/mTLS
@@ -492,8 +492,8 @@ Bridge / Director Agent
 
 ### 14. Tool Adapter Framework (Phase 11A–11C)
 
-**Framework**: `/Users/trevorrobey/AI-Agent-BountyHunt/openclaw-bridge/tools/`  
-**Specs**: `docs/tool-adapter-framework.md`, `docs/batch-1-tools.md`, `docs/batch-2-tools.md`  
+**Framework**: `/Users/trevorrobey/AI-Agent-BountyHunt/openclaw-bridge/tools/`
+**Specs**: `docs/tool-adapter-framework.md`, `docs/batch-1-tools.md`, `docs/batch-2-tools.md`
 **Purpose**: Direct CLI tool execution via standardized adapters, bypassing container lifecycle
 
 #### Architecture
@@ -531,10 +531,10 @@ Bridge / Director Agent
 
 ### 15. Federation (Phase 12A–12B)
 
-**Peer Registry**: `/Users/trevorrobey/AI-Agent-BountyHunt/openclaw-bridge/federation/peer-registry.js`  
-**Remote Client**: `/Users/trevorrobey/AI-Agent-BountyHunt/openclaw-bridge/federation/remote-client.js`  
-**Heartbeat**: `/Users/trevorrobey/AI-Agent-BountyHunt/openclaw-bridge/federation/heartbeat.js`  
-**Spec**: `/Users/trevorrobey/AI-Agent-BountyHunt/openclaw-bridge/docs/federation-spec.md`  
+**Peer Registry**: `/Users/trevorrobey/AI-Agent-BountyHunt/openclaw-bridge/federation/peer-registry.js`
+**Remote Client**: `/Users/trevorrobey/AI-Agent-BountyHunt/openclaw-bridge/federation/remote-client.js`
+**Heartbeat**: `/Users/trevorrobey/AI-Agent-BountyHunt/openclaw-bridge/federation/heartbeat.js`
+**Spec**: `/Users/trevorrobey/AI-Agent-BountyHunt/openclaw-bridge/docs/federation-spec.md`
 **Purpose**: Multi-node capacity-overflow delegation with deterministic peer selection
 
 #### Architecture
@@ -557,9 +557,9 @@ Bridge / Director Agent
 
 ### 16. Persistent Control Plane State (Phase 14)
 
-**Persistent Store**: `/Users/trevorrobey/AI-Agent-BountyHunt/openclaw-bridge/state/persistent-store.js`  
-**State Manager**: `/Users/trevorrobey/AI-Agent-BountyHunt/openclaw-bridge/state/state-manager.js`  
-**Spec**: `/Users/trevorrobey/AI-Agent-BountyHunt/openclaw-bridge/docs/persistent-state-spec.md`  
+**Persistent Store**: `/Users/trevorrobey/AI-Agent-BountyHunt/openclaw-bridge/state/persistent-store.js`
+**State Manager**: `/Users/trevorrobey/AI-Agent-BountyHunt/openclaw-bridge/state/state-manager.js`
+**Spec**: `/Users/trevorrobey/AI-Agent-BountyHunt/openclaw-bridge/docs/persistent-state-spec.md`
 **Purpose**: File-backed persistence for supervisor control plane metadata across process restarts
 
 #### Persisted Structures
@@ -587,9 +587,9 @@ Bridge / Director Agent
 
 ### 17. Cluster Coordination (Phase 15)
 
-**Leader Election**: `/Users/trevorrobey/AI-Agent-BountyHunt/openclaw-bridge/cluster/leader-election.js`  
-**Cluster Manager**: `/Users/trevorrobey/AI-Agent-BountyHunt/openclaw-bridge/cluster/cluster-manager.js`  
-**Spec**: `/Users/trevorrobey/AI-Agent-BountyHunt/openclaw-bridge/docs/cluster-spec.md`  
+**Leader Election**: `/Users/trevorrobey/AI-Agent-BountyHunt/openclaw-bridge/cluster/leader-election.js`
+**Cluster Manager**: `/Users/trevorrobey/AI-Agent-BountyHunt/openclaw-bridge/cluster/cluster-manager.js`
+**Spec**: `/Users/trevorrobey/AI-Agent-BountyHunt/openclaw-bridge/docs/cluster-spec.md`
 **Purpose**: Deterministic multi-supervisor coordination with shard-based routing
 
 #### Leader Election
@@ -617,8 +617,8 @@ Bridge / Director Agent
 
 ### 18. Partition Containment & Convergence (Phase 16)
 
-**Partition Detector**: `/Users/trevorrobey/AI-Agent-BountyHunt/openclaw-bridge/cluster/partition-detector.js`  
-**Spec**: `/Users/trevorrobey/AI-Agent-BountyHunt/openclaw-bridge/docs/cluster-convergence-spec.md`  
+**Partition Detector**: `/Users/trevorrobey/AI-Agent-BountyHunt/openclaw-bridge/cluster/partition-detector.js`
+**Spec**: `/Users/trevorrobey/AI-Agent-BountyHunt/openclaw-bridge/docs/cluster-convergence-spec.md`
 **Purpose**: Detect network partitions and freeze shard/leader state to prevent split-brain
 
 #### Partition Rules
@@ -643,8 +643,8 @@ Bridge / Director Agent
 
 ### 19. Deployment Topology & Rolling Upgrades (Phase 17)
 
-**Bootstrap Manager**: `/Users/trevorrobey/AI-Agent-BountyHunt/openclaw-bridge/deployment/bootstrap-manager.js`  
-**Version Guard**: `/Users/trevorrobey/AI-Agent-BountyHunt/openclaw-bridge/deployment/version-guard.js`  
+**Bootstrap Manager**: `/Users/trevorrobey/AI-Agent-BountyHunt/openclaw-bridge/deployment/bootstrap-manager.js`
+**Version Guard**: `/Users/trevorrobey/AI-Agent-BountyHunt/openclaw-bridge/deployment/version-guard.js`
 **Spec**: `/Users/trevorrobey/AI-Agent-BountyHunt/openclaw-bridge/docs/deployment-topology-spec.md`
 
 #### Bootstrap Validation
@@ -663,9 +663,9 @@ Bridge / Director Agent
 
 ### 20. Cluster Simulation & Fault Injection (Phase 18)
 
-**Simulator**: `/Users/trevorrobey/AI-Agent-BountyHunt/openclaw-bridge/simulation/cluster-simulator.js`  
-**Fault Injector**: `/Users/trevorrobey/AI-Agent-BountyHunt/openclaw-bridge/simulation/fault-injector.js`  
-**Spec**: `/Users/trevorrobey/AI-Agent-BountyHunt/openclaw-bridge/docs/cluster-simulation-spec.md`  
+**Simulator**: `/Users/trevorrobey/AI-Agent-BountyHunt/openclaw-bridge/simulation/cluster-simulator.js`
+**Fault Injector**: `/Users/trevorrobey/AI-Agent-BountyHunt/openclaw-bridge/simulation/fault-injector.js`
+**Spec**: `/Users/trevorrobey/AI-Agent-BountyHunt/openclaw-bridge/docs/cluster-simulation-spec.md`
 **Purpose**: Deterministic in-process harness for multi-node cluster scenario testing
 
 #### Capabilities
@@ -686,12 +686,12 @@ Bridge / Director Agent
 
 ### 21. Operational Runbooks & Deployment Topology (Phase 19)
 
-**Playbook**: `/Users/trevorrobey/AI-Agent-BountyHunt/openclaw-bridge/deployment/operational-playbook.md`  
-**Security Model**: `/Users/trevorrobey/AI-Agent-BountyHunt/openclaw-bridge/deployment/security-model.md`  
-**Scaling**: `/Users/trevorrobey/AI-Agent-BountyHunt/openclaw-bridge/deployment/scaling-strategy.md`  
-**Disaster Recovery**: `/Users/trevorrobey/AI-Agent-BountyHunt/openclaw-bridge/deployment/disaster-recovery.md`  
-**Topology**: `/Users/trevorrobey/AI-Agent-BountyHunt/openclaw-bridge/deployment/topology-model.md`  
-**Preflight & Checks**: `preflight-validator.js`, `deploy-check.js` 
+**Playbook**: `/Users/trevorrobey/AI-Agent-BountyHunt/openclaw-bridge/deployment/operational-playbook.md`
+**Security Model**: `/Users/trevorrobey/AI-Agent-BountyHunt/openclaw-bridge/deployment/security-model.md`
+**Scaling**: `/Users/trevorrobey/AI-Agent-BountyHunt/openclaw-bridge/deployment/scaling-strategy.md`
+**Disaster Recovery**: `/Users/trevorrobey/AI-Agent-BountyHunt/openclaw-bridge/deployment/disaster-recovery.md`
+**Topology**: `/Users/trevorrobey/AI-Agent-BountyHunt/openclaw-bridge/deployment/topology-model.md`
+**Preflight & Checks**: `preflight-validator.js`, `deploy-check.js`
 **Purpose**: Prescriptive architecture guidance and operational runbooks prioritizing safety and reliability.
 
 #### Capabilities
@@ -705,9 +705,9 @@ Bridge / Director Agent
 
 ### 22. Execution Plane Hardening (Phase 19A)
 
-**Container Runtime**: `/Users/trevorrobey/AI-Agent-BountyHunt/openclaw-bridge/execution/container-runtime.js`  
-**Policies**: `sandbox-policy.js`, `resource-policy.js`, `egress-policy.js`, `image-policy.js`  
-**Spec**: `/Users/trevorrobey/AI-Agent-BountyHunt/openclaw-bridge/docs/execution-plane-hardening-spec.md`  
+**Container Runtime**: `/Users/trevorrobey/AI-Agent-BountyHunt/openclaw-bridge/execution/container-runtime.js`
+**Policies**: `sandbox-policy.js`, `resource-policy.js`, `egress-policy.js`, `image-policy.js`
+**Spec**: `/Users/trevorrobey/AI-Agent-BountyHunt/openclaw-bridge/docs/execution-plane-hardening-spec.md`
 **Purpose**: Container execution policy validation and security scaffolding structure decoupling execution constraints from control-plane logic.
 
 #### Capabilities
@@ -721,9 +721,9 @@ Bridge / Director Agent
 
 ### 23. Execution Plane Activation (Phase 20)
 
-**Tool Runner**: `/Users/trevorrobey/AI-Agent-BountyHunt/openclaw-bridge/runtime/container-tool-runner.js`  
-**Image Catalog**: `/Users/trevorrobey/AI-Agent-BountyHunt/openclaw-bridge/execution/tool-image-catalog.js`  
-**Spec**: `/Users/trevorrobey/AI-Agent-BountyHunt/openclaw-bridge/docs/execution-plane-activation-spec.md`  
+**Tool Runner**: `/Users/trevorrobey/AI-Agent-BountyHunt/openclaw-bridge/runtime/container-tool-runner.js`
+**Image Catalog**: `/Users/trevorrobey/AI-Agent-BountyHunt/openclaw-bridge/execution/tool-image-catalog.js`
+**Spec**: `/Users/trevorrobey/AI-Agent-BountyHunt/openclaw-bridge/docs/execution-plane-activation-spec.md`
 **Purpose**: Execute selected tools securely inside strict, read-only Docker containers managed by OpenClaw Bridge.
 
 #### Capabilities
@@ -736,10 +736,10 @@ Bridge / Director Agent
 
 ### 24. Execution-Plane Governance & Resource Control (Phase 21)
 
-**Resource Arbiter**: `/Users/trevorrobey/AI-Agent-BountyHunt/openclaw-bridge/execution/resource-arbiter.js`  
-**Execution Quotas**: `/Users/trevorrobey/AI-Agent-BountyHunt/openclaw-bridge/security/execution-quota-store.js`  
-**Secret Manager**: `/Users/trevorrobey/AI-Agent-BountyHunt/openclaw-bridge/security/secret-manager.js`  
-**Specs**: `threat-model.md`, `secret-governance.md`  
+**Resource Arbiter**: `/Users/trevorrobey/AI-Agent-BountyHunt/openclaw-bridge/execution/resource-arbiter.js`
+**Execution Quotas**: `/Users/trevorrobey/AI-Agent-BountyHunt/openclaw-bridge/security/execution-quota-store.js`
+**Secret Manager**: `/Users/trevorrobey/AI-Agent-BountyHunt/openclaw-bridge/security/secret-manager.js`
+**Specs**: `threat-model.md`, `secret-governance.md`
 **Purpose**: Protect node capacity and prevent sensitive credential leakage during container execution.
 
 #### Capabilities
@@ -752,9 +752,9 @@ Bridge / Director Agent
 
 ### 25. Execution Policy Authority (Phase 22)
 
-**Policy Manifest**: `/Users/trevorrobey/AI-Agent-BountyHunt/openclaw-bridge/policy/execution-policy.json`  
-**Policy Runtime**: `/Users/trevorrobey/AI-Agent-BountyHunt/openclaw-bridge/policy/policy-runtime.js`  
-**Authority Controller**: `/Users/trevorrobey/AI-Agent-BountyHunt/openclaw-bridge/policy/policy-authority.js`  
+**Policy Manifest**: `/Users/trevorrobey/AI-Agent-BountyHunt/openclaw-bridge/policy/execution-policy.json`
+**Policy Runtime**: `/Users/trevorrobey/AI-Agent-BountyHunt/openclaw-bridge/policy/policy-runtime.js`
+**Authority Controller**: `/Users/trevorrobey/AI-Agent-BountyHunt/openclaw-bridge/policy/policy-authority.js`
 **Purpose**: Centralize, version, and cryptographically verify execution configurations and resource constraints.
 
 #### Capabilities
@@ -766,9 +766,9 @@ Bridge / Director Agent
 
 ### 26. Secret Governance & Authority (Phase 23)
 
-**Authority Controller**: `/Users/trevorrobey/AI-Agent-BountyHunt/openclaw-bridge/security/secret-authority.js`  
-**Manifest Definition**: `/Users/trevorrobey/AI-Agent-BountyHunt/openclaw-bridge/security/secret-manifest.js`  
-**Manifest Storage**: `/Users/trevorrobey/AI-Agent-BountyHunt/openclaw-bridge/security/secret-manifest.json`  
+**Authority Controller**: `/Users/trevorrobey/AI-Agent-BountyHunt/openclaw-bridge/security/secret-authority.js`
+**Manifest Definition**: `/Users/trevorrobey/AI-Agent-BountyHunt/openclaw-bridge/security/secret-manifest.js`
+**Manifest Storage**: `/Users/trevorrobey/AI-Agent-BountyHunt/openclaw-bridge/security/secret-manifest.json`
 **Purpose**: Centralize secret lifecycle management, enforce cryptographic manifest integrity, and provide deterministic secret injection for execution.
 
 #### Capabilities
@@ -779,10 +779,26 @@ Bridge / Director Agent
 
 ---
 
-### 27. Burp Suite Integration (BionicLink)
+### 27. Supervisor Structural Hardening (Phase 24)
 
-**Extension**: BionicLink (custom Burp extension)  
-**Port**: 8090 (HTTP)  
+**Execution Router**: `/Users/trevorrobey/AI-Agent-BountyHunt/openclaw-bridge/src/core/execution-router.ts`
+**Workspace Guard**: `/Users/trevorrobey/AI-Agent-BountyHunt/openclaw-bridge/src/core/workspace-guard.ts`
+**Audit Logger**: `/Users/trevorrobey/AI-Agent-BountyHunt/openclaw-bridge/src/core/audit-log.ts`
+**Registry**: `/Users/trevorrobey/AI-Agent-BountyHunt/openclaw-bridge/supervisor/supervisor-registry.json`
+**Purpose**: Centralize execution logic through a canonical router enforcing strict workspace sandboxing, capability-based internal bypasses, and queued audit tracking.
+
+#### Capabilities
+- **Canonical Routing**: Delegates all HTTP, Bridge, and MCP execution calls through a single validated router context.
+- **Strict Role Boundaries**: Explicit roles (`supervisor`, `internal`, `admin`, `anonymous`) mapping to capability matrices.
+- **Workspace Sandboxing**: Prevents path traversal and strictly scopes tool resources within the explicit `workspaceRoot`.
+- **Queued Audit Sink**: Asynchronous file-backed logging with fast appends and robust rotation.
+
+---
+
+### 28. Burp Suite Integration (BionicLink)
+
+**Extension**: BionicLink (custom Burp extension)
+**Port**: 8090 (HTTP)
 **Bridge Integration**: Via `/execute-tool` endpoints
 
 #### Features:
@@ -986,6 +1002,9 @@ User receives scan summary with findings
 ```
 /Users/trevorrobey/AI-Agent-BountyHunt/
 ├── openclaw-bridge/               # Main bridge service
+│   ├── src/                       # Central core execution context (Phase 24)
+│   │   ├── core/                  # Core abstractions (Router, Guard, Audit)
+│   │   └── supervisor/            # Supervisor definitions and registry
 │   ├── bridge/                    # Bridge server (TypeScript)
 │   │   └── server.ts              # Main HTTP server
 │   ├── runtime/                   # Skill Runtime Core
@@ -1378,6 +1397,6 @@ This architecture is designed for security researchers, bug bounty hunters, and 
 
 ---
 
-**Document Version**: 1.16  
-**Last Updated**: February 28, 2026  
+**Document Version**: 1.17
+**Last Updated**: March 2, 2026
 **Maintained By**: Trevor Robey

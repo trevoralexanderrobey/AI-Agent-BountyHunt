@@ -1,11 +1,13 @@
 const http = require("node:http");
 const https = require("node:https");
+const path = require("node:path");
 const { PassThrough } = require("node:stream");
 
 const { createMetrics } = require("../observability/metrics.js");
 const { createPrometheusExporter } = require("../monitoring/prometheus-exporter.js");
 const { createRequestSigner } = require("../security/request-signing.js");
 const { createTLSConfig } = require("../security/tls-config.js");
+const { createExecutionRouter } = require("../src/core/execution-router.js");
 const { createSupervisorV1 } = require("../supervisor/supervisor-v1.js");
 const { createHttpHandlers } = require("./handlers.js");
 
@@ -130,6 +132,10 @@ function createHttpServer(options = {}) {
   const maxBodyBytes = parsePositiveInt(options.maxBodyBytes, 1024 * 1024);
   const installSignalHandlers = options.installSignalHandlers !== false;
   const exitOnSignal = options.exitOnSignal !== false;
+  const workspaceRoot =
+    typeof options.workspaceRoot === "string" && options.workspaceRoot.trim().length > 0
+      ? options.workspaceRoot.trim()
+      : process.env.BRIDGE_WORKSPACE_ROOT || process.cwd();
   const logger = options.logger && typeof options.logger === "object" ? options.logger : createNoopLogger();
   const metrics = options.metrics && typeof options.metrics === "object" ? options.metrics : createMetrics();
   const supervisor = options.supervisor || createSupervisorV1(options.supervisorOptions || {});
@@ -151,6 +157,17 @@ function createHttpServer(options = {}) {
     options.prometheusExporter && typeof options.prometheusExporter.enabled !== "undefined"
       ? Boolean(options.prometheusExporter.enabled)
       : parseBoolean(process.env.PROMETHEUS_EXPORTER_ENABLED, false);
+  const executionRouter =
+    options.executionRouter ||
+    createExecutionRouter({
+      workspaceRoot,
+      supervisorMode: parseBoolean(process.env.SUPERVISOR_MODE, false),
+      supervisorAuthPhase: String(process.env.SUPERVISOR_AUTH_PHASE || "compat").trim().toLowerCase() === "strict" ? "strict" : "compat",
+      supervisorInternalToken: String(process.env.SUPERVISOR_INTERNAL_TOKEN || "").trim(),
+      registryPath: path.join(process.cwd(), "supervisor", "supervisor-registry.json"),
+      auditLogPath: path.join(workspaceRoot, ".openclaw", "audit.log"),
+      auditMaxBytes: parsePositiveInt(process.env.SUPERVISOR_AUDIT_MAX_BYTES, 10 * 1024 * 1024),
+    });
 
   const state = {
     server: null,
@@ -166,6 +183,8 @@ function createHttpServer(options = {}) {
 
   const handlers = createHttpHandlers({
     supervisor,
+    executionRouter,
+    workspaceRoot,
     metrics,
     logger,
     authEnabled,

@@ -11,6 +11,7 @@ node_modules/
 
 # Runtime state
 .bridge/
+.cline/
 
 # OS
 .DS_Store

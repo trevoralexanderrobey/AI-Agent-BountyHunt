@@ -1,12 +1,12 @@
 {
   "$schema": "https://json.schemastore.org/tsconfig",
   "extends": "./tsconfig.json",
-  "include": ["bridge/**/*.ts"],
+  "include": ["bridge/**/*.ts", "src/**/*.ts", "scripts/**/*.ts"],
   "compilerOptions": {
     "module": "commonjs",
     "target": "es2022",
-    "rootDir": "bridge",
-    "outDir": "dist/bridge",
+    "rootDir": ".",
+    "outDir": "dist",
     "declaration": false,
     "sourceMap": true,
     "noEmit": false,

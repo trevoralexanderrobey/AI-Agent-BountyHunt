@@ -4,19 +4,21 @@
   "license": "MIT",
   "private": true,
   "dependencies": {
-    "@modelcontextprotocol/sdk": "^1.12.1",
-    "dockerode": "^4.0.9",
-    "redis": "^4.7.0",
-    "tar-stream": "^3.1.7"
+    "@modelcontextprotocol/sdk": "1.12.1",
+    "dockerode": "4.0.9",
+    "redis": "4.7.0",
+    "tar-stream": "3.1.7"
   },
   "devDependencies": {
-    "@types/node": "^22.14.1",
-    "tsx": "^4.20.5",
-    "typescript": "^5.8.3",
-    "vitest": "^3.2.4"
+    "@types/node": "22.14.1",
+    "tsx": "4.20.5",
+    "typescript": "5.8.3",
+    "vitest": "3.2.4"
   },
   "scripts": {
-    "bridge:build": "tsc -p tsconfig.bridge.json",
+    "supervisor:registry": "tsx scripts/export-supervisor-registry.ts",
+    "supervisor:registry:check": "tsx scripts/check-supervisor-registry.ts",
+    "bridge:build": "npm run supervisor:registry && npm run supervisor:registry:check && tsc -p tsconfig.bridge.json",
     "bridge:control": "./scripts/bridge-control.sh",
     "bridge:start": "./scripts/bridge-control.sh start",
     "bridge:stop": "./scripts/bridge-control.sh stop",
