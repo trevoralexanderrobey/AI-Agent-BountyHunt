@@ -817,7 +817,20 @@ Bridge / Director Agent
 
 ---
 
-### 29. Burp Suite Integration (BionicLink)
+### 29. Workload Attestation (Phase 25)
+
+**Attestation Runtime**: `/Users/trevorrobey/AI-Agent-BountyHunt/openclaw-bridge/src/security/workload-attestation.ts`
+**Reference File**: `/Users/trevorrobey/AI-Agent-BountyHunt/openclaw-bridge/security/workload-attestation-reference.json`
+**Purpose**: Cryptographically attest to node health, manifest integrity, and component provenance using signed Ed25519 node identities to establish secure boundaries across a distributed cluster topology.
+
+#### Capabilities
+- **Node Provenance**: Identifies node boundaries with signed execution reports encompassing `executionPolicyHash`, `workloadManifestHash`, and `secretManifestHash`.
+- **Peer Verification Challenge**: Generates timestamps, nonces, and TTLs that nodes use to verify peer clusters and isolate untrusted drift or configuration tampering.
+- **Fail-Safe Convergence**: Excludes non-compliant instances from routing, federation, and cluster election dynamically if their signed posture fails validation check constraints.
+
+---
+
+### 30. Burp Suite Integration (BionicLink)
 
 **Extension**: BionicLink (custom Burp extension)
 **Port**: 8090 (HTTP)
