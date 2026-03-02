@@ -1,0 +1,198 @@
+{
+  "version": "1.0",
+  "meta": {
+    "generatedBy": "Cline agent",
+    "timestamp": "2026-03-01T05:12:00Z"
+  },
+  "rules": {
+    "global": [
+      {
+        "name": "Security First Engineering",
+        "description": "All code must be written and reviewed with security-first principles.",
+        "content": [
+          "Never generate code with hardcoded secrets.",
+          "Validate all external input.",
+          "Prefer parameterized queries.",
+          "Avoid eval, exec, dynamic code execution.",
+          "Enforce least-privilege design.",
+          "Explicitly mention security risks when present."
+        ]
+      },
+      {
+        "name": "Production Ready Only",
+        "description": "Agents must not suggest scaffolding or placeholder logic.",
+        "content": [
+          "No TODO comments.",
+          "No mock implementations unless explicitly requested.",
+          "All code must be runnable.",
+          "Include error handling.",
+          "Include logging where appropriate."
+        ]
+      },
+      {
+        "name": "Architecture Discipline",
+        "description": "Encourage scalable and modular design.",
+        "content": [
+          "Follow SOLID principles.",
+          "Prefer composition over inheritance.",
+          "Separate domain, infrastructure, and interface layers.",
+          "Avoid business logic inside controllers."
+        ]
+      },
+      {
+        "name": "Explain Before Acting",
+        "description": "Require reasoning before file edits.",
+        "content": [
+          "Explain what will change before modifying files.",
+          "List impacted files.",
+          "Ask confirmation for destructive operations."
+        ]
+      }
+    ]
+  },
+  "workflows": {
+    "global": [
+      {
+        "name": "Secure Refactor Workflow",
+        "steps": [
+          "Analyze code for security flaws",
+          "List architectural weaknesses",
+          "Propose improved implementation",
+          "Apply refactor",
+          "Summarize changes"
+        ]
+      },
+      {
+        "name": "Feature Implementation Workflow",
+        "steps": [
+          "Clarify requirements",
+          "Identify impacted modules",
+          "Design architecture",
+          "Implement code",
+          "Add validation and error handling",
+          "Summarize implementation"
+        ]
+      }
+    ],
+    "workspace": {
+      "/Users/trevorrobey/AI-Agent-BountyHunt": [
+        {
+          "name": "Agent Task Execution Workflow",
+          "steps": [
+            "Validate task schema (AJV by default; Zod opt-in)",
+            "Attach idempotency fields: requestId (UUID), timestamp (ISO8601), originAgent",
+            "Send task via OpenClaw MCP bridge",
+            "Receive structured response",
+            "Validate response schema",
+            "Persist or act on validated result"
+          ]
+        }
+      ]
+    }
+  },
+  "hooks": {
+    "global": [
+      {
+        "trigger": "before_file_edit",
+        "action": "Run static reasoning pass and check for security regressions."
+      },
+      {
+        "trigger": "after_file_edit",
+        "action": "Re-evaluate for unintended side effects."
+      }
+    ],
+    "workspace": {
+      "/Users/trevorrobey/AI-Agent-BountyHunt": [
+        {
+          "trigger": "on_agent_call",
+          "action": {
+            "type": "append_log",
+            "path": "./logs/agent-calls.log",
+            "format": "jsonl",
+            "requiredFields": [
+              "requestId",
+              "timestamp",
+              "originAgent",
+              "action",
+              "status",
+              "durationMs",
+              "validationResult"
+            ],
+            "notes": "Write one JSON object per line (JSON Lines). Ensure rotating/size policy handled by runtime."
+          }
+        },
+        {
+          "trigger": "on_json_parse_failure",
+          "action": "Abort operation and return structured schema-error to caller."
+        }
+      ]
+    }
+  },
+  "skills": {
+    "global": [
+      {
+        "name": "Node.js Security Auditor",
+        "description": "Detect injection, unsafe async patterns, and privilege issues."
+      },
+      {
+        "name": "Modular Architecture Designer",
+        "description": "Restructure messy repositories into layered architecture."
+      }
+    ],
+    "workspace": {
+      "/Users/trevorrobey/AI-Agent-BountyHunt": [
+        {
+          "name": "OpenClaw MCP Client",
+          "description": "Send structured JSON requests to OpenClaw bridge and validate responses (AJV/Zod).",
+          "config": {
+            "healthTimeoutMs": 3000,
+            "healthMethod": "GET",
+            "retry": {
+              "enabled": false,
+              "note": "Connectivity check is non-blocking; do not retry during config generation."
+            },
+            "schemaValidator": {
+              "default": "ajv",
+              "zodOptIn": true,
+              "coerceTypes": false,
+              "onValidationFailure": "abort_and_return_structured_error"
+            },
+            "idempotency": {
+              "requiredFields": ["requestId", "timestamp", "originAgent"],
+              "duplicateHandling": {
+                "onDuplicateRequestId": {
+                  "behavior": "no_reexecute",
+                  "return": "cached_result_if_available",
+                  "else": "idempotency_violation_error"
+                }
+              }
+            },
+            "trustBoundary": {
+              "treatResponsesAsUntrusted": true,
+              "forbidEvalExec": true,
+              "notes": "Never execute code or evaluate strings returned by MCP agents."
+            }
+          }
+        },
+        {
+          "name": "Multi-Agent Orchestrator",
+          "description": "Coordinate multiple AI agents safely via MCP bridge; enforce schema validation and idempotency."
+        }
+      ]
+    }
+  },
+  "mcp": {
+    "workspaces": {
+      "/Users/trevorrobey/AI-Agent-BountyHunt": {
+        "defaultServer": "openclaw-local"
+      }
+    }
+  },
+  "policy": {
+    "workspaceWinsOnConflict": true,
+    "jsonFormatting": {
+      "indent": 2,
+      "validateBeforeWrite": true
+    }
+  }
+}

@@ -35,6 +35,14 @@ async function waitForHealth(port: number, authToken?: string, timeoutMs = 15000
 
 async function startBridgeServer(port: number, extraEnv: Record<string, string> = {}): Promise<StartedBridge> {
   const workspaceRoot = await fs.mkdtemp(path.join(os.tmpdir(), "openclaw-bridge-mcp-sse-"));
+  const supervisorToken = String(extraEnv.SUPERVISOR_AUTH_TOKEN || "").trim();
+  if (supervisorToken) {
+    const clineDir = path.join(workspaceRoot, ".cline");
+    await fs.mkdir(clineDir, { recursive: true });
+    const tokenPath = path.join(clineDir, "cline_mcp_settings.json");
+    await fs.writeFile(tokenPath, JSON.stringify({ token: supervisorToken }, null, 2), { encoding: "utf8", mode: 0o600 });
+    await fs.chmod(tokenPath, 0o600);
+  }
   const tsxCli = path.join(BRIDGE_ROOT, "node_modules", "tsx", "dist", "cli.mjs");
   const proc = spawn(process.execPath, [tsxCli, "bridge/server.ts"], {
     cwd: BRIDGE_ROOT,
@@ -108,10 +116,14 @@ async function waitForSseCondition<T>(
 describe("bridge MCP SSE endpoint", () => {
   it("serves MCP SSE handshake, keepalive, and tool calls", async () => {
     const port = 18887;
-    const bridge = await startBridgeServer(port);
+    const token = "mcp-supervisor-token";
+    const authHeaders = {
+      Authorization: `Bearer ${token}`,
+    };
+    const bridge = await startBridgeServer(port, { SUPERVISOR_AUTH_TOKEN: token });
     let sseResponse: Response | null = null;
     try {
-      sseResponse = await fetch(`http://127.0.0.1:${port}/mcp/sse`);
+      sseResponse = await fetch(`http://127.0.0.1:${port}/mcp/sse`, { headers: authHeaders });
       expect(sseResponse.ok).toBe(true);
       expect(String(sseResponse.headers.get("content-type") || "")).toContain("text/event-stream");
 
@@ -162,7 +174,7 @@ describe("bridge MCP SSE endpoint", () => {
 
       const initResponse = await fetch(endpointUrl, {
         method: "POST",
-        headers: { "content-type": "application/json" },
+        headers: { "content-type": "application/json", ...authHeaders },
         body: JSON.stringify(initializeBody),
       });
       expect(initResponse.status).toBe(202);
@@ -189,7 +201,7 @@ describe("bridge MCP SSE endpoint", () => {
       };
       const initializedResponse = await fetch(endpointUrl, {
         method: "POST",
-        headers: { "content-type": "application/json" },
+        headers: { "content-type": "application/json", ...authHeaders },
         body: JSON.stringify(initializedBody),
       });
       expect(initializedResponse.status).toBe(202);
@@ -202,7 +214,7 @@ describe("bridge MCP SSE endpoint", () => {
       };
       const listResponse = await fetch(endpointUrl, {
         method: "POST",
-        headers: { "content-type": "application/json" },
+        headers: { "content-type": "application/json", ...authHeaders },
         body: JSON.stringify(listToolsBody),
       });
       expect(listResponse.status).toBe(202);
@@ -238,7 +250,7 @@ describe("bridge MCP SSE endpoint", () => {
       };
       const healthCallResponse = await fetch(endpointUrl, {
         method: "POST",
-        headers: { "content-type": "application/json" },
+        headers: { "content-type": "application/json", ...authHeaders },
         body: JSON.stringify(healthCallBody),
       });
       expect(healthCallResponse.status).toBe(202);

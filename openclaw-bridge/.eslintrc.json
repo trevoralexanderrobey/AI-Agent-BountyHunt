@@ -1,4 +1,20 @@
 {
   "root": true,
-  "extends": ["@raycast"]
+  "extends": ["@raycast"],
+  "rules": {
+    "no-restricted-imports": [
+      "error",
+      {
+        "patterns": ["**/supervisor-registry.json"]
+      }
+    ]
+  },
+  "overrides": [
+    {
+      "files": ["src/core/execution-router.ts", "src/core/execution-router.js"],
+      "rules": {
+        "no-restricted-imports": "off"
+      }
+    }
+  ]
 }

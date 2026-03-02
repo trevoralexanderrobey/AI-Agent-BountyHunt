@@ -1,5 +1,6 @@
 import { execFileSync } from "node:child_process";
-import fs from "node:fs";
+import crypto from "node:crypto";
+import fs from "node:fs/promises";
 import http from "node:http";
 import https from "node:https";
 import os from "node:os";
@@ -8,6 +9,7 @@ import { URL } from "node:url";
 import { Server as McpJsonRpcServer } from "@modelcontextprotocol/sdk/server/index.js";
 import { SSEServerTransport } from "@modelcontextprotocol/sdk/server/sse.js";
 import { CallToolRequestSchema, ListToolsRequestSchema, Tool } from "@modelcontextprotocol/sdk/types.js";
+import { createExecutionRouter, ExecutionContext, ExecutionRouter, ExecutionToolDescriptor } from "../src/core/execution-router";
 import { bioniclinkGetHistory, bioniclinkHealth, bioniclinkRepeater, bioniclinkScan, bioniclinkScopeCheck } from "./bioniclink-client";
 import { OpenClawClient } from "./openclaw-client";
 import { StateStore } from "./state-store";
@@ -40,6 +42,27 @@ function sendJson(res: http.ServerResponse, statusCode: number, payload: unknown
 
 function sendError(res: http.ServerResponse, statusCode: number, error: string): void {
   sendJson(res, statusCode, { error } satisfies ErrorPayload);
+}
+
+function parseBearerToken(authHeader: string): string {
+  const match = authHeader.trim().match(/^Bearer\s+(.+)$/i);
+  if (!match) {
+    return "";
+  }
+  return String(match[1] || "").trim();
+}
+
+function timingSafeEqualUtf8(left: string, right: string): boolean {
+  const leftBuffer = Buffer.from(String(left || ""), "utf8");
+  const rightBuffer = Buffer.from(String(right || ""), "utf8");
+  if (leftBuffer.length !== rightBuffer.length) {
+    return false;
+  }
+  try {
+    return crypto.timingSafeEqual(leftBuffer, rightBuffer);
+  } catch {
+    return false;
+  }
 }
 
 async function readBody(req: http.IncomingMessage): Promise<unknown> {
@@ -181,6 +204,8 @@ interface ExecuteToolBody {
   skill?: string;
   tool: string;
   args?: Record<string, unknown>;
+  internal?: boolean;
+  internal_token?: string;
 }
 
 function parseExecuteToolBody(rawBody: unknown): ExecuteToolBody {
@@ -197,7 +222,10 @@ function parseExecuteToolBody(rawBody: unknown): ExecuteToolBody {
   const skillRaw = String(record.skill || "").trim();
   const skill = skillRaw ? normalizeSkillName(skillRaw) : undefined;
   const args = asRecord(record.args) || {};
-  return { skill, tool, args };
+  const internal = record.internal === true;
+  const internalTokenRaw = record.internal_token;
+  const internal_token = typeof internalTokenRaw === "string" ? internalTokenRaw.trim() : undefined;
+  return { skill, tool, args, internal, internal_token };
 }
 
 function isMutationGuardEnabled(): boolean {
@@ -241,11 +269,22 @@ function loadToolsModule(toolsPath: string): BountyHunterToolsModule {
   return require(toolsPath) as BountyHunterToolsModule;
 }
 
+async function pathExists(targetPath: string): Promise<boolean> {
+  try {
+    await fs.access(targetPath);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 const BURP_ALLOWED_TOOLS = new Set(["burp_get_history", "burp_analyze_request", "burp_active_scan", "burp_get_raw_request"]);
 
 interface BridgeMcpContext {
   bridgePort: number;
   bridgeAuthToken: string;
+  executionRouter: ExecutionRouter;
+  sessionAuthHeader?: string;
 }
 
 interface BridgeMcpSseSession {
@@ -332,6 +371,8 @@ const BRIDGE_MCP_TOOLS: Tool[] = [
         skill: { type: "string" },
         tool: { type: "string" },
         args: { type: "object" },
+        internal: { type: "boolean" },
+        internal_token: { type: "string" },
       },
       required: ["tool"],
     },
@@ -409,6 +450,78 @@ async function callBridgeEndpointJson(
   return parsed;
 }
 
+async function executeLegacyBridgeMcpTool(
+  context: BridgeMcpContext,
+  toolName: string,
+  args: Record<string, unknown>,
+): Promise<unknown> {
+  if (toolName === "bridge_health") {
+    return callBridgeEndpointJson(context, "GET", "/health");
+  }
+
+  if (toolName === "bridge_list_jobs") {
+    return callBridgeEndpointJson(context, "GET", "/jobs");
+  }
+
+  if (toolName === "bridge_job_status") {
+    const jobId = String(args.job_id || "").trim();
+    if (!jobId) {
+      throw new Error("job_id is required");
+    }
+    return callBridgeEndpointJson(context, "GET", `/jobs/${encodeURIComponent(jobId)}`);
+  }
+
+  if (toolName === "bridge_submit_job") {
+    const instruction = String(args.instruction || "").trim();
+    if (!instruction) {
+      throw new Error("instruction is required");
+    }
+    const body = {
+      instruction,
+      repo_url: typeof args.repo_url === "string" ? args.repo_url : undefined,
+      context_urls: Array.isArray(args.context_urls) ? args.context_urls : undefined,
+      hints: typeof args.hints === "string" ? args.hints : undefined,
+      branch_name: typeof args.branch_name === "string" ? args.branch_name : undefined,
+      requester: typeof args.requester === "string" ? args.requester : undefined,
+      model: typeof args.model === "string" ? args.model : undefined,
+      gateway_base_url: typeof args.gateway_base_url === "string" ? args.gateway_base_url : undefined,
+      auth_token: typeof args.auth_token === "string" ? args.auth_token : undefined,
+    };
+    return callBridgeEndpointJson(context, "POST", "/jobs", body);
+  }
+
+  if (toolName === "bridge_cancel_job") {
+    const jobId = String(args.job_id || "").trim();
+    if (!jobId) {
+      throw new Error("job_id is required");
+    }
+    return callBridgeEndpointJson(context, "POST", `/jobs/${encodeURIComponent(jobId)}/cancel`, {});
+  }
+
+  if (toolName === "bridge_execute_tool") {
+    const tool = String(args.tool || "").trim();
+    if (!tool) {
+      throw new Error("tool is required");
+    }
+    const fallbackArgs = { ...args };
+    delete fallbackArgs.skill;
+    delete fallbackArgs.tool;
+    delete fallbackArgs.args;
+    delete fallbackArgs.internal;
+    delete fallbackArgs.internal_token;
+    const body = {
+      skill: typeof args.skill === "string" ? args.skill : undefined,
+      tool,
+      args: asRecord(args.args) || fallbackArgs,
+      internal: args.internal === true,
+      internal_token: typeof args.internal_token === "string" ? args.internal_token : undefined,
+    };
+    return callBridgeEndpointJson(context, "POST", "/execute-tool", body);
+  }
+
+  throw new Error(`Unknown tool: ${toolName}`);
+}
+
 function createBridgeMcpServer(context: BridgeMcpContext): McpJsonRpcServer {
   const server = new McpJsonRpcServer(
     {
@@ -424,8 +537,16 @@ function createBridgeMcpServer(context: BridgeMcpContext): McpJsonRpcServer {
   );
 
   server.setRequestHandler(ListToolsRequestSchema, async () => {
+    const listed = await context.executionRouter.listTools({
+      requestId: `mcp-list-${Date.now()}`,
+      workspaceRoot: process.env.BRIDGE_WORKSPACE_ROOT || DEFAULT_WORKSPACE_ROOT,
+      source: "mcp_sse",
+      caller: "bridge_mcp_sse",
+      authHeader: context.sessionAuthHeader,
+      legacyListTools: async () => BRIDGE_MCP_TOOLS as unknown as ExecutionToolDescriptor[],
+    });
     return {
-      tools: BRIDGE_MCP_TOOLS,
+      tools: listed as Tool[],
     };
   });
 
@@ -433,88 +554,220 @@ function createBridgeMcpServer(context: BridgeMcpContext): McpJsonRpcServer {
     const toolName = request.params.name;
     const args = asRecord(request.params.arguments) || {};
 
-    try {
-      if (toolName === "bridge_health") {
-        const result = await callBridgeEndpointJson(context, "GET", "/health");
-        await server.sendLoggingMessage({ level: "info", data: "bridge_health executed" }, extra.sessionId).catch(() => undefined);
-        return createMcpToolResult(result);
-      }
+    const routerContext: ExecutionContext = {
+      requestId: `mcp-call-${Date.now()}`,
+      workspaceRoot: process.env.BRIDGE_WORKSPACE_ROOT || DEFAULT_WORKSPACE_ROOT,
+      source: "mcp_sse",
+      caller: "bridge_mcp_sse",
+      authHeader: context.sessionAuthHeader,
+      internalFlagRequested: args.internal === true,
+      internalToken: typeof args.internal_token === "string" ? args.internal_token : undefined,
+      legacyExecute: async (tool, legacyArgs) => executeLegacyBridgeMcpTool(context, tool, legacyArgs),
+    };
 
-      if (toolName === "bridge_list_jobs") {
-        const result = await callBridgeEndpointJson(context, "GET", "/jobs");
-        await server.sendLoggingMessage({ level: "info", data: "bridge_list_jobs executed" }, extra.sessionId).catch(() => undefined);
-        return createMcpToolResult(result);
-      }
-
-      if (toolName === "bridge_job_status") {
-        const jobId = String(args.job_id || "").trim();
-        if (!jobId) {
-          return createMcpToolResult({ error: "job_id is required" }, true);
-        }
-        const result = await callBridgeEndpointJson(context, "GET", `/jobs/${encodeURIComponent(jobId)}`);
-        await server.sendLoggingMessage({ level: "info", data: `bridge_job_status executed job_id=${jobId}` }, extra.sessionId).catch(() => undefined);
-        return createMcpToolResult(result);
-      }
-
-      if (toolName === "bridge_submit_job") {
-        const instruction = String(args.instruction || "").trim();
-        if (!instruction) {
-          return createMcpToolResult({ error: "instruction is required" }, true);
-        }
-        const body = {
-          instruction,
-          repo_url: typeof args.repo_url === "string" ? args.repo_url : undefined,
-          context_urls: Array.isArray(args.context_urls) ? args.context_urls : undefined,
-          hints: typeof args.hints === "string" ? args.hints : undefined,
-          branch_name: typeof args.branch_name === "string" ? args.branch_name : undefined,
-          requester: typeof args.requester === "string" ? args.requester : undefined,
-          model: typeof args.model === "string" ? args.model : undefined,
-          gateway_base_url: typeof args.gateway_base_url === "string" ? args.gateway_base_url : undefined,
-          auth_token: typeof args.auth_token === "string" ? args.auth_token : undefined,
-        };
-        const result = await callBridgeEndpointJson(context, "POST", "/jobs", body);
-        await server.sendLoggingMessage({ level: "info", data: "bridge_submit_job executed" }, extra.sessionId).catch(() => undefined);
-        return createMcpToolResult(result);
-      }
-
-      if (toolName === "bridge_cancel_job") {
-        const jobId = String(args.job_id || "").trim();
-        if (!jobId) {
-          return createMcpToolResult({ error: "job_id is required" }, true);
-        }
-        const result = await callBridgeEndpointJson(context, "POST", `/jobs/${encodeURIComponent(jobId)}/cancel`, {});
-        await server.sendLoggingMessage({ level: "info", data: `bridge_cancel_job executed job_id=${jobId}` }, extra.sessionId).catch(() => undefined);
-        return createMcpToolResult(result);
-      }
-
-      if (toolName === "bridge_execute_tool") {
-        const tool = String(args.tool || "").trim();
-        if (!tool) {
-          return createMcpToolResult({ error: "tool is required" }, true);
-        }
-        const fallbackArgs = { ...args };
-        delete fallbackArgs.skill;
-        delete fallbackArgs.tool;
-        delete fallbackArgs.args;
-        const body = {
-          skill: typeof args.skill === "string" ? args.skill : undefined,
-          tool,
-          args: asRecord(args.args) || fallbackArgs,
-        };
-        const result = await callBridgeEndpointJson(context, "POST", "/execute-tool", body);
-        await server.sendLoggingMessage({ level: "info", data: `bridge_execute_tool executed tool=${tool}` }, extra.sessionId).catch(() => undefined);
-        return createMcpToolResult(result);
-      }
-
-      return createMcpToolResult({ error: `Unknown tool: ${toolName}` }, true);
-    } catch (error) {
-      const message = error instanceof Error ? error.message : String(error);
+    const result = await context.executionRouter.execute(toolName, args, routerContext);
+    if (!result.ok) {
+      const message = result.message || result.code || "Execution failed";
       await server.sendLoggingMessage({ level: "error", data: `${toolName} failed: ${message}` }, extra.sessionId).catch(() => undefined);
-      return createMcpToolResult({ error: message }, true);
+      return createMcpToolResult({ error: message, code: result.code }, true);
     }
+
+    await server.sendLoggingMessage({ level: "info", data: `${toolName} executed` }, extra.sessionId).catch(() => undefined);
+    return createMcpToolResult(result.data);
   });
 
   return server;
+}
+
+interface HttpErrorLike extends Error {
+  statusCode?: number;
+  code?: string;
+}
+
+function makeHttpError(statusCode: number, message: string, code = "LEGACY_EXECUTION_FAILED"): HttpErrorLike {
+  const error = new Error(message) as HttpErrorLike;
+  error.statusCode = statusCode;
+  error.code = code;
+  return error;
+}
+
+function resolveHttpErrorStatus(error: unknown): number {
+  const statusCode = error && typeof error === "object" && "statusCode" in error ? Number((error as { statusCode?: unknown }).statusCode) : NaN;
+  if (Number.isFinite(statusCode) && statusCode >= 100 && statusCode <= 599) {
+    return statusCode;
+  }
+  const code = error && typeof error === "object" && "code" in error ? String((error as { code?: unknown }).code || "") : "";
+  if (code === "UNAUTHORIZED" || code === "UNAUTHORIZED_INTERNAL_BYPASS") return 401;
+  if (code === "UNAUTHORIZED_TOOL") return 403;
+  if (code === "UNAUTHORIZED_ROLE") return 403;
+  if (code === "PATH_OUTSIDE_WORKSPACE") return 403;
+  if (code === "INVALID_REQUEST" || code === "INVALID_ARGUMENT") return 400;
+  if (code === "RATE_LIMIT_EXCEEDED" || code === "MAX_CONCURRENT_EXECUTIONS_EXCEEDED" || code === "SOURCE_CONCURRENCY_LIMIT_EXCEEDED") return 429;
+  const message = error instanceof Error ? error.message.toLowerCase() : String(error).toLowerCase();
+  if (message.includes("out of scope")) return 403;
+  if (message.includes("bioniclink")) return 502;
+  return 500;
+}
+
+async function executeLegacyBridgeRouteTool(params: {
+  parsed: ExecuteToolBody;
+  bioniclinkBaseUrl: string;
+  bioniclinkTimeoutMs: number;
+}): Promise<unknown> {
+  const { parsed, bioniclinkBaseUrl, bioniclinkTimeoutMs } = params;
+
+  if (!parsed.skill) {
+    const tool = parsed.tool;
+    if (!BURP_ALLOWED_TOOLS.has(tool)) {
+      throw makeHttpError(400, `Invalid tool (burp allowlist): ${tool}`, "INVALID_REQUEST");
+    }
+
+    if (tool === "burp_get_history") {
+      const limitRaw = parsed.args?.limit;
+      const fromIdRaw = parsed.args?.fromId ?? parsed.args?.from_id;
+      const inScopeRaw = parsed.args?.inScope ?? parsed.args?.in_scope ?? parsed.args?.filter_scope;
+
+      const limit = typeof limitRaw === "number" ? limitRaw : limitRaw ? Number(limitRaw) : 20;
+      const fromId = typeof fromIdRaw === "number" ? fromIdRaw : fromIdRaw ? Number(fromIdRaw) : 0;
+      const inScope =
+        typeof inScopeRaw === "boolean"
+          ? inScopeRaw
+          : typeof inScopeRaw === "string"
+            ? ["1", "true", "yes"].includes(inScopeRaw.trim().toLowerCase())
+            : Boolean(inScopeRaw);
+
+      const history = await bioniclinkGetHistory(bioniclinkBaseUrl, { limit, fromId, inScope }, bioniclinkTimeoutMs);
+      if (!history.ok) {
+        throw makeHttpError(502, "BionicLink /history returned ok=false", "BIONICLINK_ERROR");
+      }
+
+      return summarizeHistory(history);
+    }
+
+    if (tool === "burp_analyze_request") {
+      const urlRaw = String(parsed.args?.url || "").trim();
+      if (!urlRaw) {
+        throw makeHttpError(400, "args.url is required", "INVALID_REQUEST");
+      }
+      const url = normalizeTargetUrl(urlRaw);
+
+      const scope = await bioniclinkScopeCheck(bioniclinkBaseUrl, url, bioniclinkTimeoutMs);
+      if (!scope.ok) {
+        throw makeHttpError(502, "BionicLink /scope returned ok=false", "BIONICLINK_ERROR");
+      }
+      if (!scope.in_scope) {
+        throw makeHttpError(403, "Target URL is out of scope (Burp Target Scope).", "OUT_OF_SCOPE");
+      }
+
+      const methodArg = parsed.args?.method;
+      const reqMethod = typeof methodArg === "string" && methodArg.trim() ? methodArg.trim().toUpperCase() : "GET";
+      const headersArg = asRecord(parsed.args?.headers) || {};
+      const headers: Record<string, string> = {};
+      for (const [key, value] of Object.entries(headersArg)) {
+        if (!key.trim()) continue;
+        headers[key] = String(value ?? "");
+      }
+      const bodyArg = parsed.args?.body;
+      const reqBody = typeof bodyArg === "string" ? bodyArg : bodyArg != null ? String(bodyArg) : undefined;
+
+      const rr = await bioniclinkRepeater(bioniclinkBaseUrl, { url, method: reqMethod, headers, body: reqBody }, bioniclinkTimeoutMs);
+      if (!rr.ok) {
+        throw makeHttpError(502, "BionicLink /repeater returned ok=false", "BIONICLINK_ERROR");
+      }
+
+      return summarizeRepeater(rr);
+    }
+
+    if (tool === "burp_active_scan") {
+      if (!isBurpActiveScanEnabled()) {
+        throw makeHttpError(403, "Active scan disabled. Set BURP_ALLOW_ACTIVE_SCAN=true to enable.", "ACTIVE_SCAN_DISABLED");
+      }
+
+      const urlRaw = String(parsed.args?.url || "").trim();
+      if (!urlRaw) {
+        throw makeHttpError(400, "args.url is required", "INVALID_REQUEST");
+      }
+      const url = normalizeTargetUrl(urlRaw);
+
+      const scope = await bioniclinkScopeCheck(bioniclinkBaseUrl, url, bioniclinkTimeoutMs);
+      if (!scope.ok) {
+        throw makeHttpError(502, "BionicLink /scope returned ok=false", "BIONICLINK_ERROR");
+      }
+      if (!scope.in_scope) {
+        throw makeHttpError(403, "Target URL is out of scope (Burp Target Scope).", "OUT_OF_SCOPE");
+      }
+
+      const requestIdRaw = parsed.args?.requestId ?? parsed.args?.request_id;
+      const requestId = typeof requestIdRaw === "number" ? requestIdRaw : requestIdRaw ? Number(requestIdRaw) : undefined;
+      const methodArg = parsed.args?.method;
+      const reqMethod = typeof methodArg === "string" && methodArg.trim() ? methodArg.trim().toUpperCase() : "GET";
+
+      const scan = await bioniclinkScan(bioniclinkBaseUrl, { url, method: reqMethod, requestId }, bioniclinkTimeoutMs);
+      if (!scan.ok) {
+        throw makeHttpError(502, "BionicLink /scan returned ok=false", "BIONICLINK_ERROR");
+      }
+
+      return summarizeScan(scan);
+    }
+
+    if (tool === "burp_get_raw_request") {
+      if (!isBurpRawDataEnabled()) {
+        throw makeHttpError(403, "Raw data disabled. Set BURP_ALLOW_RAW_DATA=true to enable.", "RAW_DATA_DISABLED");
+      }
+
+      const messageIdRaw = parsed.args?.messageId ?? parsed.args?.message_id ?? parsed.args?.id;
+      const messageId = typeof messageIdRaw === "number" ? messageIdRaw : messageIdRaw ? Number(messageIdRaw) : NaN;
+      if (!Number.isFinite(messageId) || messageId < 1) {
+        throw makeHttpError(400, "args.messageId is required (positive integer).", "INVALID_REQUEST");
+      }
+
+      const history = await bioniclinkGetHistory(bioniclinkBaseUrl, { limit: 200, fromId: 0, inScope: false }, bioniclinkTimeoutMs);
+      if (!history.ok) {
+        throw makeHttpError(502, "BionicLink /history returned ok=false", "BIONICLINK_ERROR");
+      }
+
+      const item = (history.items || []).find((it) => it && typeof it.id === "number" && it.id === messageId);
+      if (!item) {
+        throw makeHttpError(404, `Message id not found in the last ${history.items?.length ?? 0} proxy history items: ${messageId}`, "NOT_FOUND");
+      }
+
+      const url = String(item.url || "").trim();
+      if (!url) {
+        throw makeHttpError(502, `BionicLink history item missing url for messageId=${messageId}`, "BIONICLINK_ERROR");
+      }
+
+      const scope = await bioniclinkScopeCheck(bioniclinkBaseUrl, url, bioniclinkTimeoutMs);
+      if (!scope.ok) {
+        throw makeHttpError(502, "BionicLink /scope returned ok=false", "BIONICLINK_ERROR");
+      }
+      if (!scope.in_scope) {
+        throw makeHttpError(403, "Target URL is out of scope (Burp Target Scope).", "OUT_OF_SCOPE");
+      }
+
+      return {
+        message_id: messageId,
+        scope,
+        item,
+      };
+    }
+
+    throw makeHttpError(400, `Unhandled tool: ${tool}`, "INVALID_REQUEST");
+  }
+
+  const skillName = parsed.skill;
+  const toolsPath = resolveToolsPath(skillName);
+  if (!(await pathExists(toolsPath))) {
+    throw makeHttpError(404, `Tools module not found for skill ${skillName}: ${toolsPath}`, "SKILL_NOT_FOUND");
+  }
+
+  const toolsModule = loadToolsModule(toolsPath);
+  const toolFn = toolsModule[parsed.tool];
+
+  if (typeof toolFn !== "function") {
+    throw makeHttpError(404, `Unknown tool: ${parsed.tool}`, "UNKNOWN_TOOL");
+  }
+
+  return (toolFn as (args: Record<string, unknown>) => Promise<unknown>)(parsed.args || {});
 }
 
 interface BionicHeader {
@@ -797,6 +1050,22 @@ async function main(): Promise<void> {
   const store = new StateStore(workspaceRoot);
   await store.init();
 
+  const executionRouter = createExecutionRouter({
+    workspaceRoot,
+    supervisorMode: String(process.env.SUPERVISOR_MODE || "").trim().toLowerCase() === "true",
+    supervisorAuthPhase: String(process.env.SUPERVISOR_AUTH_PHASE || "compat").trim().toLowerCase() === "strict" ? "strict" : "compat",
+    supervisorInternalToken: String(process.env.SUPERVISOR_INTERNAL_TOKEN || "").trim(),
+    registryPath: path.resolve(process.cwd(), "supervisor", "supervisor-registry.json"),
+    auditLogPath: path.join(workspaceRoot, ".openclaw", "audit.log"),
+    auditMaxBytes: 10 * 1024 * 1024,
+    legacyVisibleToolsByRole: {
+      supervisor: ["bridge_health", "bridge_list_jobs", "bridge_job_status", "bridge_submit_job", "bridge_cancel_job", "bridge_execute_tool"],
+      internal: BRIDGE_MCP_TOOLS.map((tool) => tool.name),
+      admin: BRIDGE_MCP_TOOLS.map((tool) => tool.name),
+      anonymous: BRIDGE_MCP_TOOLS.map((tool) => tool.name),
+    },
+  });
+
   const openclawClient = new OpenClawClient({
     baseUrl: process.env.OPENCLAW_GATEWAY_BASE_URL,
     defaultModel: process.env.OPENCLAW_DEFAULT_MODEL,
@@ -832,10 +1101,10 @@ async function main(): Promise<void> {
     const certPath = process.env.BRIDGE_TLS_CERT_PATH || path.join(tlsDir, "bridge-cert.pem");
     const keyPath = process.env.BRIDGE_TLS_KEY_PATH || path.join(tlsDir, "bridge-key.pem");
 
-    if (!fs.existsSync(certPath) || !fs.existsSync(keyPath)) {
+    if (!(await pathExists(certPath)) || !(await pathExists(keyPath))) {
       // Auto-generate self-signed cert
       try {
-        fs.mkdirSync(tlsDir, { recursive: true, mode: 0o700 });
+        await fs.mkdir(tlsDir, { recursive: true, mode: 0o700 });
         execFileSync("openssl", [
           "req", "-x509", "-newkey", "ec",
           "-pkeyopt", "ec_paramgen_curve:prime256v1",
@@ -846,8 +1115,8 @@ async function main(): Promise<void> {
           "-subj", "/CN=localhost/O=OpenClaw Local",
           "-addext", "subjectAltName=IP:127.0.0.1,DNS:localhost",
         ], { stdio: "pipe" });
-        fs.chmodSync(keyPath, 0o600);
-        fs.chmodSync(certPath, 0o600);
+        await fs.chmod(keyPath, 0o600);
+        await fs.chmod(certPath, 0o600);
         // eslint-disable-next-line no-console
         console.log(`Auto-generated TLS cert at ${tlsDir}`);
       } catch (err) {
@@ -876,8 +1145,8 @@ async function main(): Promise<void> {
     let tlsOpts: { cert: string; key: string };
     try {
       tlsOpts = {
-        cert: fs.readFileSync(certPath, "utf-8"),
-        key: fs.readFileSync(keyPath, "utf-8"),
+        cert: await fs.readFile(certPath, "utf-8"),
+        key: await fs.readFile(keyPath, "utf-8"),
       };
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
@@ -913,9 +1182,9 @@ async function main(): Promise<void> {
     // Authenticate requests using BRIDGE_AUTH_TOKEN if configured
     const bridgeAuthToken = (process.env.BRIDGE_AUTH_TOKEN || "").trim();
     if (bridgeAuthToken) {
-      const authHeader = req.headers.authorization || "";
-      const providedToken = authHeader.startsWith("Bearer ") ? authHeader.slice(7).trim() : "";
-      if (providedToken !== bridgeAuthToken) {
+      const authHeader = typeof req.headers.authorization === "string" ? req.headers.authorization : "";
+      const providedToken = parseBearerToken(authHeader);
+      if (!providedToken || !timingSafeEqualUtf8(providedToken, bridgeAuthToken)) {
         sendError(res, 401, "Unauthorized: invalid or missing Bearer token");
         return;
       }
@@ -929,6 +1198,8 @@ async function main(): Promise<void> {
         const mcpServer = createBridgeMcpServer({
           bridgePort,
           bridgeAuthToken,
+          executionRouter,
+          sessionAuthHeader: typeof req.headers.authorization === "string" ? req.headers.authorization : "",
         });
         const transport = new SSEServerTransport("/mcp/messages", res);
         const sessionId = transport.sessionId;
@@ -1047,223 +1318,47 @@ async function main(): Promise<void> {
       if (method === "POST" && route.type === "execute-tool") {
         const body = await readBody(req);
         const parsed = parseExecuteToolBody(body);
-        if (!parsed.skill) {
-          // Burp/BionicLink tool execution mode (no OpenClaw skill module).
-          const tool = parsed.tool;
-          if (!BURP_ALLOWED_TOOLS.has(tool)) {
-            sendError(res, 400, `Invalid tool (burp allowlist): ${tool}`);
-            return;
-          }
-
-          try {
-            if (tool === "burp_get_history") {
-              const limitRaw = parsed.args?.limit;
-              const fromIdRaw = parsed.args?.fromId ?? parsed.args?.from_id;
-              const inScopeRaw = parsed.args?.inScope ?? parsed.args?.in_scope ?? parsed.args?.filter_scope;
-
-              const limit = typeof limitRaw === "number" ? limitRaw : limitRaw ? Number(limitRaw) : 20;
-              const fromId = typeof fromIdRaw === "number" ? fromIdRaw : fromIdRaw ? Number(fromIdRaw) : 0;
-              const inScope =
-                typeof inScopeRaw === "boolean"
-                  ? inScopeRaw
-                  : typeof inScopeRaw === "string"
-                    ? ["1", "true", "yes"].includes(inScopeRaw.trim().toLowerCase())
-                    : Boolean(inScopeRaw);
-
-              const history = await bioniclinkGetHistory(bioniclinkBaseUrl, { limit, fromId, inScope }, bioniclinkTimeoutMs);
-              if (!history.ok) {
-                sendError(res, 502, "BionicLink /history returned ok=false");
-                return;
-              }
-
-              sendJson(res, 200, {
-                ok: true,
+        const executionResult = await executionRouter.execute(parsed.tool, parsed.args || {}, {
+          requestId: `route-execute-${Date.now()}`,
+          workspaceRoot,
+          source: "http_api",
+          caller: "bridge_execute_tool",
+          authHeader: typeof req.headers.authorization === "string" ? req.headers.authorization : "",
+          internalFlagRequested: parsed.internal === true,
+          internalToken: parsed.internal_token,
+          transportMetadata: {
+            skill: parsed.skill,
+          },
+          legacyExecute: async (tool, legacyArgs) => {
+            return executeLegacyBridgeRouteTool({
+              parsed: {
+                ...parsed,
                 tool,
-                result: summarizeHistory(history),
-              });
-              return;
-            }
+                args: legacyArgs,
+              },
+              bioniclinkBaseUrl,
+              bioniclinkTimeoutMs,
+            });
+          },
+        });
 
-            if (tool === "burp_analyze_request") {
-              const urlRaw = String(parsed.args?.url || "").trim();
-              if (!urlRaw) {
-                sendError(res, 400, "args.url is required");
-                return;
-              }
-              const url = normalizeTargetUrl(urlRaw);
-
-              const scope = await bioniclinkScopeCheck(bioniclinkBaseUrl, url, bioniclinkTimeoutMs);
-              if (!scope.ok) {
-                sendError(res, 502, "BionicLink /scope returned ok=false");
-                return;
-              }
-              if (!scope.in_scope) {
-                sendError(res, 403, "Target URL is out of scope (Burp Target Scope).");
-                return;
-              }
-
-              const methodArg = parsed.args?.method;
-              const reqMethod = typeof methodArg === "string" && methodArg.trim() ? methodArg.trim().toUpperCase() : "GET";
-              const headersArg = asRecord(parsed.args?.headers) || {};
-              const headers: Record<string, string> = {};
-              for (const [key, value] of Object.entries(headersArg)) {
-                if (!key.trim()) continue;
-                headers[key] = String(value ?? "");
-              }
-              const bodyArg = parsed.args?.body;
-              const reqBody = typeof bodyArg === "string" ? bodyArg : bodyArg != null ? String(bodyArg) : undefined;
-
-              const rr = await bioniclinkRepeater(bioniclinkBaseUrl, { url, method: reqMethod, headers, body: reqBody }, bioniclinkTimeoutMs);
-              if (!rr.ok) {
-                sendError(res, 502, "BionicLink /repeater returned ok=false");
-                return;
-              }
-
-              sendJson(res, 200, {
-                ok: true,
-                tool,
-                result: summarizeRepeater(rr),
-              });
-              return;
-            }
-
-            if (tool === "burp_active_scan") {
-              if (!isBurpActiveScanEnabled()) {
-                sendError(res, 403, "Active scan disabled. Set BURP_ALLOW_ACTIVE_SCAN=true to enable.");
-                return;
-              }
-
-              const urlRaw = String(parsed.args?.url || "").trim();
-              if (!urlRaw) {
-                sendError(res, 400, "args.url is required");
-                return;
-              }
-              const url = normalizeTargetUrl(urlRaw);
-
-              const scope = await bioniclinkScopeCheck(bioniclinkBaseUrl, url, bioniclinkTimeoutMs);
-              if (!scope.ok) {
-                sendError(res, 502, "BionicLink /scope returned ok=false");
-                return;
-              }
-              if (!scope.in_scope) {
-                sendError(res, 403, "Target URL is out of scope (Burp Target Scope).");
-                return;
-              }
-
-              const requestIdRaw = parsed.args?.requestId ?? parsed.args?.request_id;
-              const requestId = typeof requestIdRaw === "number" ? requestIdRaw : requestIdRaw ? Number(requestIdRaw) : undefined;
-              const methodArg = parsed.args?.method;
-              const reqMethod = typeof methodArg === "string" && methodArg.trim() ? methodArg.trim().toUpperCase() : "GET";
-
-              const scan = await bioniclinkScan(bioniclinkBaseUrl, { url, method: reqMethod, requestId }, bioniclinkTimeoutMs);
-              if (!scan.ok) {
-                sendError(res, 502, "BionicLink /scan returned ok=false");
-                return;
-              }
-
-              sendJson(res, 200, {
-                ok: true,
-                tool,
-                result: summarizeScan(scan),
-              });
-              return;
-            }
-
-            if (tool === "burp_get_raw_request") {
-              if (!isBurpRawDataEnabled()) {
-                sendError(res, 403, "Raw data disabled. Set BURP_ALLOW_RAW_DATA=true to enable.");
-                return;
-              }
-
-              const messageIdRaw = parsed.args?.messageId ?? parsed.args?.message_id ?? parsed.args?.id;
-              const messageId = typeof messageIdRaw === "number" ? messageIdRaw : messageIdRaw ? Number(messageIdRaw) : NaN;
-              if (!Number.isFinite(messageId) || messageId < 1) {
-                sendError(res, 400, "args.messageId is required (positive integer).");
-                return;
-              }
-
-              // Best-effort: BionicLink exposes history slices (max 200), not random-access by id.
-              const history = await bioniclinkGetHistory(bioniclinkBaseUrl, { limit: 200, fromId: 0, inScope: false }, bioniclinkTimeoutMs);
-              if (!history.ok) {
-                sendError(res, 502, "BionicLink /history returned ok=false");
-                return;
-              }
-
-              const item = (history.items || []).find((it) => it && typeof it.id === "number" && it.id === messageId);
-              if (!item) {
-                sendError(res, 404, `Message id not found in the last ${history.items?.length ?? 0} proxy history items: ${messageId}`);
-                return;
-              }
-
-              const url = String(item.url || "").trim();
-              if (!url) {
-                sendError(res, 502, `BionicLink history item missing url for messageId=${messageId}`);
-                return;
-              }
-
-              // Mandatory safety check: re-validate with BionicLink scope endpoint.
-              const scope = await bioniclinkScopeCheck(bioniclinkBaseUrl, url, bioniclinkTimeoutMs);
-              if (!scope.ok) {
-                sendError(res, 502, "BionicLink /scope returned ok=false");
-                return;
-              }
-              if (!scope.in_scope) {
-                sendError(res, 403, "Target URL is out of scope (Burp Target Scope).");
-                return;
-              }
-
-              sendJson(res, 200, {
-                ok: true,
-                tool,
-                result: {
-                  message_id: messageId,
-                  scope,
-                  item,
-                },
-              });
-              return;
-            }
-
-            sendError(res, 400, `Unhandled tool: ${tool}`);
-            return;
-          } catch (error) {
-            const message = error instanceof Error ? error.message : String(error);
-            sendError(
-              res,
-              message.toLowerCase().includes("bioniclink")
-                ? 502
-                : message.toLowerCase().includes("out of scope")
-                  ? 403
-                  : 500,
-              message.includes("ECONNREFUSED") ? `BionicLink unreachable (is Burp running + extension loaded?): ${message}` : message,
-            );
-            return;
-          }
-        }
-
-        const skillName = parsed.skill;
-        const toolsPath = resolveToolsPath(skillName);
-        if (!fs.existsSync(toolsPath)) {
-          sendError(res, 404, `Tools module not found for skill ${skillName}: ${toolsPath}`);
-          return;
-        }
-        const toolsModule = loadToolsModule(toolsPath);
-        const toolFn = toolsModule[parsed.tool];
-
-        if (typeof toolFn !== "function") {
-          sendError(res, 404, `Unknown tool: ${parsed.tool}`);
+        if (!executionResult.ok) {
+          sendError(res, resolveHttpErrorStatus(executionResult), executionResult.message || executionResult.code || "Execution failed");
           return;
         }
 
-        const result = await (toolFn as (args: Record<string, unknown>) => Promise<unknown>)(parsed.args || {});
-        sendJson(res, 200, {
+        const payload: Record<string, unknown> = {
           ok: true,
-          skill: skillName,
           tool: parsed.tool,
-          result,
+          result: executionResult.data,
           mutation_guard_enabled: isMutationGuardEnabled(),
           h1_mutation_guard_enabled: isH1MutationGuardEnabled(),
-        });
+        };
+        if (parsed.skill) {
+          payload.skill = parsed.skill;
+        }
+
+        sendJson(res, 200, payload);
         return;
       }
 
@@ -1313,7 +1408,7 @@ async function main(): Promise<void> {
           "- Do not provide exploit, weaponization, or payload guidance.",
         ].join("\n");
 
-        await fs.promises.writeFile(eventPath, JSON.stringify(event, null, 2), "utf-8");
+        await fs.writeFile(eventPath, JSON.stringify(event, null, 2), "utf-8");
         const updated = await store.updateJob(job.id, {
           request: {
             ...job.request,
@@ -1456,7 +1551,7 @@ async function main(): Promise<void> {
 
         const hints = hintsLines.join("\n");
 
-        await fs.promises.writeFile(eventPath, JSON.stringify(event, null, 2), "utf-8");
+        await fs.writeFile(eventPath, JSON.stringify(event, null, 2), "utf-8");
         const updated = await store.updateJob(job.id, {
           request: {
             ...job.request,

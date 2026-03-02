@@ -131,6 +131,30 @@ function mapSupervisorError(error) {
   if (code === "UNAUTHORIZED") {
     return { statusCode: 401, code: "UNAUTHORIZED", message: "Authentication failed" };
   }
+  if (code === "UNAUTHORIZED_INTERNAL_BYPASS") {
+    return { statusCode: 401, code: "UNAUTHORIZED_INTERNAL_BYPASS", message: "Internal bypass denied" };
+  }
+  if (code === "UNAUTHORIZED_TOOL") {
+    return { statusCode: 403, code: "UNAUTHORIZED_TOOL", message: "Tool not exposed to caller role" };
+  }
+  if (code === "UNAUTHORIZED_ROLE") {
+    return { statusCode: 403, code: "UNAUTHORIZED_ROLE", message: "Role is not authorized" };
+  }
+  if (code === "PATH_OUTSIDE_WORKSPACE") {
+    return { statusCode: 403, code: "PATH_OUTSIDE_WORKSPACE", message: "Path outside workspace boundary" };
+  }
+  if (code === "TOKEN_FILE_PERMISSIONS_INVALID") {
+    return { statusCode: 500, code: "TOKEN_FILE_PERMISSIONS_INVALID", message: "Token configuration is invalid" };
+  }
+  if (code === "INVALID_ARGUMENT") {
+    return { statusCode: 400, code: "INVALID_ARGUMENT", message: "Tool arguments are invalid" };
+  }
+  if (code === "RATE_LIMIT_EXCEEDED") {
+    return { statusCode: 429, code: "RATE_LIMIT_EXCEEDED", message: "Execution rate limit exceeded" };
+  }
+  if (code === "MAX_CONCURRENT_EXECUTIONS_EXCEEDED" || code === "SOURCE_CONCURRENCY_LIMIT_EXCEEDED") {
+    return { statusCode: 429, code, message: "Execution concurrency limit exceeded" };
+  }
   if (code === "UNAUTHENTICATED_EXECUTION") {
     return { statusCode: 401, code: "UNAUTHENTICATED_EXECUTION", message: "Execution requires authenticated identity" };
   }
@@ -266,6 +290,14 @@ function parseBody(req, maxBodyBytes = MAX_BODY_BYTES) {
 
 function createHttpHandlers(options = {}) {
   const supervisor = options.supervisor;
+  const executionRouter =
+    options.executionRouter && typeof options.executionRouter === "object" && typeof options.executionRouter.execute === "function"
+      ? options.executionRouter
+      : null;
+  const workspaceRoot =
+    typeof options.workspaceRoot === "string" && options.workspaceRoot.trim().length > 0
+      ? options.workspaceRoot.trim()
+      : process.env.BRIDGE_WORKSPACE_ROOT || process.cwd();
   const metrics = options.metrics;
   const logger = options.logger && typeof options.logger === "object" ? options.logger : createNoopLogger();
   const authEnabled = Boolean(options.authEnabled);
@@ -335,7 +367,8 @@ function createHttpHandlers(options = {}) {
       }
 
       const authHeader = typeof req.headers.authorization === "string" ? req.headers.authorization : "";
-      if (authEnabled && !isBearerHeader(authHeader)) {
+      const requireTransportAuth = !executionRouter && authEnabled;
+      if (requireTransportAuth && !isBearerHeader(authHeader)) {
         logger.info({
           event: "execution_audit",
           decision: "deny",
@@ -401,7 +434,7 @@ function createHttpHandlers(options = {}) {
 
       const principalHeader = req.headers["x-principal-id"];
       const principalId = typeof principalHeader === "string" ? principalHeader.trim() : "";
-      if (!principalId) {
+      if (!executionRouter && !principalId) {
         logger.info({
           event: "execution_audit",
           decision: "deny",
@@ -429,7 +462,7 @@ function createHttpHandlers(options = {}) {
       const requestContext = {
         requestId,
         authHeader,
-        principalId,
+        principalId: principalId || "router-context",
       };
       if (typeof parsed.idempotencyKey === "string" && parsed.idempotencyKey.length > 0) {
         requestContext.idempotencyKey = parsed.idempotencyKey;
@@ -451,7 +484,33 @@ function createHttpHandlers(options = {}) {
           method: parsed.method,
           timestamp: nowIso(),
         });
-        result = await supervisor.execute(parsed.slug, parsed.method, parsed.params, requestContext);
+        if (executionRouter) {
+          const tool = `${parsed.slug}.${parsed.method}`;
+          const execution = await executionRouter.execute(tool, isPlainObject(parsed.params) ? parsed.params : {}, {
+            requestId,
+            workspaceRoot,
+            source: "http_api",
+            caller: "http_api_execute",
+            authHeader,
+            trustedInProcessCaller: false,
+            transportMetadata: {
+              slug: parsed.slug,
+              method: parsed.method,
+              principalId,
+            },
+            legacyExecute: async () => supervisor.execute(parsed.slug, parsed.method, parsed.params, requestContext),
+          });
+
+          if (!execution.ok) {
+            const error = new Error(execution.message || execution.code || "Execution failed");
+            error.code = execution.code || "INTERNAL_ERROR";
+            error.request_id = requestId;
+            throw error;
+          }
+          result = execution.data;
+        } else {
+          result = await supervisor.execute(parsed.slug, parsed.method, parsed.params, requestContext);
+        }
       } catch (error) {
         const mapped = mapSupervisorError(error);
         metrics.increment("http.requests.error", { route: "/api/v1/execute", code: mapped.code });
