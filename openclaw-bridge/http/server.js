@@ -167,6 +167,38 @@ function createHttpServer(options = {}) {
         }
         return executionRouterRef.getWorkloadIntegrityMetadata();
       },
+      attestationMetadataProvider: () => {
+        if (!executionRouterRef || typeof executionRouterRef.getWorkloadAttestationMetadata !== "function") {
+          return {};
+        }
+        return executionRouterRef.getWorkloadAttestationMetadata();
+      },
+      attestationEvidenceProvider: (challenge = {}, context = {}) => {
+        if (!executionRouterRef || typeof executionRouterRef.generateAttestationEvidence !== "function") {
+          return {
+            ok: false,
+            code: "WORKLOAD_ATTESTATION_NOT_TRUSTED",
+            message: "Attestation runtime unavailable",
+            details: {},
+          };
+        }
+        return executionRouterRef.generateAttestationEvidence(challenge, context);
+      },
+      attestationVerifier: (input = {}) => {
+        if (!executionRouterRef || typeof executionRouterRef.verifyPeerAttestationEvidence !== "function") {
+          return {
+            ok: false,
+            code: "WORKLOAD_ATTESTATION_NOT_TRUSTED",
+            message: "Attestation verifier unavailable",
+            details: {},
+          };
+        }
+        return executionRouterRef.verifyPeerAttestationEvidence({
+          peerId: input && input.peer && typeof input.peer.peerId === "string" ? input.peer.peerId : "",
+          evidence: input ? input.evidence : undefined,
+          challenge: input ? input.challenge : {},
+        });
+      },
     });
   const executionRouter =
     options.executionRouter ||
@@ -184,6 +216,12 @@ function createHttpServer(options = {}) {
         process.env.WORKLOAD_INTEGRITY_ENABLED,
         String(process.env.NODE_ENV || "").trim().toLowerCase() === "production",
       ),
+      workloadAttestationEnabled: parseBoolean(
+        process.env.WORKLOAD_ATTESTATION_ENABLED,
+        String(process.env.NODE_ENV || "").trim().toLowerCase() === "production",
+      ),
+      attestationReferencePath: String(process.env.WORKLOAD_ATTESTATION_REFERENCE_PATH || "").trim(),
+      attestationReferenceExpectedHash: String(process.env.WORKLOAD_ATTESTATION_REFERENCE_EXPECTED_HASH || "").trim().toLowerCase(),
       integrityMetadataProvider: () => ({
         local: typeof supervisor.getExecutionMetadata === "function" ? supervisor.getExecutionMetadata() : {},
         peers: typeof supervisor.getExecutionPeers === "function" ? supervisor.getExecutionPeers() : [],

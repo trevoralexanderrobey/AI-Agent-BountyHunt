@@ -616,6 +616,23 @@ function resolveHttpErrorStatus(error: unknown): number {
   ) {
     return 503;
   }
+  if (
+    code === "WORKLOAD_ATTESTATION_NOT_TRUSTED" ||
+    code === "WORKLOAD_ATTESTATION_REFERENCE_MISMATCH" ||
+    code === "WORKLOAD_ATTESTATION_REFERENCE_MISSING" ||
+    code === "WORKLOAD_ATTESTATION_REFERENCE_SCHEMA_INVALID" ||
+    code === "WORKLOAD_ATTESTATION_REFERENCE_PATH_OVERRIDE_FORBIDDEN" ||
+    code === "WORKLOAD_ATTESTATION_REFERENCE_WRITABLE_IN_PRODUCTION" ||
+    code === "WORKLOAD_ATTESTATION_REFERENCE_HASH_MISSING" ||
+    code === "WORKLOAD_ATTESTATION_SIGNATURE_INVALID" ||
+    code === "WORKLOAD_ATTESTATION_EVIDENCE_INVALID" ||
+    code === "WORKLOAD_ATTESTATION_STALE" ||
+    code === "WORKLOAD_ATTESTATION_CHALLENGE_MISMATCH" ||
+    code === "WORKLOAD_ATTESTATION_REPLAY_DETECTED" ||
+    code === "WORKLOAD_ATTESTATION_PEER_STICKY_UNTRUSTED"
+  ) {
+    return 503;
+  }
   const message = error instanceof Error ? error.message.toLowerCase() : String(error).toLowerCase();
   if (message.includes("out of scope")) return 403;
   if (message.includes("bioniclink")) return 502;
@@ -1076,6 +1093,11 @@ async function main(): Promise<void> {
     workloadIntegrityEnabled:
       String(process.env.WORKLOAD_INTEGRITY_ENABLED || "").trim().toLowerCase() === "true" ||
       String(process.env.NODE_ENV || "").trim().toLowerCase() === "production",
+    workloadAttestationEnabled:
+      String(process.env.WORKLOAD_ATTESTATION_ENABLED || "").trim().toLowerCase() === "true" ||
+      String(process.env.NODE_ENV || "").trim().toLowerCase() === "production",
+    attestationReferencePath: String(process.env.WORKLOAD_ATTESTATION_REFERENCE_PATH || "").trim(),
+    attestationReferenceExpectedHash: String(process.env.WORKLOAD_ATTESTATION_REFERENCE_EXPECTED_HASH || "").trim().toLowerCase(),
     legacyVisibleToolsByRole: {
       supervisor: ["bridge_health", "bridge_list_jobs", "bridge_job_status", "bridge_submit_job", "bridge_cancel_job", "bridge_execute_tool"],
       internal: BRIDGE_MCP_TOOLS.map((tool) => tool.name),

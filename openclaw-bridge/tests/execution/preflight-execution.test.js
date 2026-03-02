@@ -20,6 +20,12 @@ const WORKLOAD_MANIFEST_PATH = path.resolve(__dirname, "../../security/workload-
 const WORKLOAD_MANIFEST_EXPECTED_HASH = computeWorkloadManifestHash(
   JSON.parse(fs.readFileSync(WORKLOAD_MANIFEST_PATH, "utf8")),
 );
+const ATTESTATION_REFERENCE_PATH = path.resolve(__dirname, "../../security/workload-attestation-reference.json");
+const ATTESTATION_REFERENCE_HASH_PATH = path.resolve(__dirname, "../../security/workload-attestation-reference.hash");
+const ATTESTATION_REFERENCE_EXPECTED_HASH = fs
+  .readFileSync(ATTESTATION_REFERENCE_HASH_PATH, "utf8")
+  .trim()
+  .toLowerCase();
 
 function healthySecretStoreProvider() {
   return {
@@ -250,13 +256,19 @@ test("production container mode fails for unknown tool slug with undefined resou
 
 test("production container mode passes when execution policies are complete", async () => {
   const previousMode = fs.statSync(WORKLOAD_MANIFEST_PATH).mode & 0o777;
+  const previousAttestationMode = fs.statSync(ATTESTATION_REFERENCE_PATH).mode & 0o777;
+  const previousAttestationHashMode = fs.statSync(ATTESTATION_REFERENCE_HASH_PATH).mode & 0o777;
   fs.chmodSync(WORKLOAD_MANIFEST_PATH, 0o444);
+  fs.chmodSync(ATTESTATION_REFERENCE_PATH, 0o444);
+  fs.chmodSync(ATTESTATION_REFERENCE_HASH_PATH, 0o444);
   try {
     const result = await runPreflightValidation(baseProductionOptions());
     assert.equal(result.ready_for_production, true);
     assert.equal((result.errors || []).length, 0);
   } finally {
     fs.chmodSync(WORKLOAD_MANIFEST_PATH, previousMode);
+    fs.chmodSync(ATTESTATION_REFERENCE_PATH, previousAttestationMode);
+    fs.chmodSync(ATTESTATION_REFERENCE_HASH_PATH, previousAttestationHashMode);
   }
 });
 
@@ -384,6 +396,34 @@ test("production container mode fails when workload manifest path is overridden"
 
   const codes = errorCodes(result);
   assert.equal(codes.has("WORKLOAD_MANIFEST_PATH_OVERRIDE_FORBIDDEN"), true);
+});
+
+test("production container mode fails when attestation reference path is overridden", async () => {
+  const result = await runPreflightValidation(
+    baseProductionOptions({
+      execution: {
+        ...baseProductionOptions().execution,
+        workloadAttestationReferencePath: path.resolve(__dirname, "./tmp-attestation-reference.json"),
+      },
+    }),
+  );
+
+  const codes = errorCodes(result);
+  assert.equal(codes.has("WORKLOAD_ATTESTATION_REFERENCE_PATH_OVERRIDE_FORBIDDEN"), true);
+});
+
+test("production container mode fails when attestation expected hash is overridden", async () => {
+  const result = await runPreflightValidation(
+    baseProductionOptions({
+      execution: {
+        ...baseProductionOptions().execution,
+        workloadAttestationReferenceExpectedHash: ATTESTATION_REFERENCE_EXPECTED_HASH,
+      },
+    }),
+  );
+
+  const codes = errorCodes(result);
+  assert.equal(codes.has("WORKLOAD_ATTESTATION_REFERENCE_PATH_OVERRIDE_FORBIDDEN"), true);
 });
 
 test("production container mode fails when workload manifest hash does not match expected hash", async () => {

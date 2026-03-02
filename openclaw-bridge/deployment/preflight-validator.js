@@ -23,6 +23,11 @@ const {
   computeWorkloadManifestHash,
   resolveDefaultWorkloadManifestPath,
 } = require("../security/workload-manifest.js");
+const {
+  computeAttestationReferenceHash,
+  loadAttestationReferenceFromDisk,
+  resolveDefaultAttestationReferencePath,
+} = require("../security/workload-attestation.js");
 const { createToolRegistry } = require("../tools/tool-registry.js");
 const { registerBatch1Tools } = require("../tools/adapters/index.js");
 const { registerBatch2Tools } = require("../tools/adapters/batch-2-index.js");
@@ -1187,6 +1192,108 @@ function validatePhase24WorkloadIntegrity(executionConfig, errors, warnings, isP
   }
 }
 
+function validatePhase25WorkloadAttestation(executionConfig, errors, warnings, isProduction, mode) {
+  if (mode !== "container") {
+    return;
+  }
+
+  const collection = isProduction ? errors : warnings;
+  const defaultReferencePath = resolveDefaultAttestationReferencePath();
+  const configuredReferencePath = normalizeString(
+    executionConfig.workloadAttestationReferencePath || process.env.WORKLOAD_ATTESTATION_REFERENCE_PATH,
+  );
+  const configuredExpectedHash = normalizeString(
+    executionConfig.workloadAttestationReferenceExpectedHash || process.env.WORKLOAD_ATTESTATION_REFERENCE_EXPECTED_HASH,
+  ).toLowerCase();
+
+  if (isProduction) {
+    if (configuredReferencePath && resolvePath(configuredReferencePath) !== resolvePath(defaultReferencePath)) {
+      addIssue(
+        errors,
+        "WORKLOAD_ATTESTATION_REFERENCE_PATH_OVERRIDE_FORBIDDEN",
+        "Attestation reference path override is forbidden in production",
+        {
+          configuredPath: resolvePath(configuredReferencePath),
+          requiredPath: resolvePath(defaultReferencePath),
+        },
+      );
+    }
+    if (configuredExpectedHash) {
+      addIssue(
+        errors,
+        "WORKLOAD_ATTESTATION_REFERENCE_PATH_OVERRIDE_FORBIDDEN",
+        "Attestation expected hash override is forbidden in production",
+        {},
+      );
+    }
+  }
+
+  let loaded;
+  try {
+    loaded = loadAttestationReferenceFromDisk({
+      referencePath: configuredReferencePath || undefined,
+      expectedHash: configuredExpectedHash || undefined,
+      production: isProduction,
+      allowProductionPathOverride: false,
+    });
+  } catch (error) {
+    addIssue(
+      collection,
+      error && typeof error.code === "string" ? error.code : "WORKLOAD_ATTESTATION_NOT_TRUSTED",
+      "Attestation reference validation failed",
+      {
+        reason: error && error.message ? error.message : String(error),
+      },
+    );
+    return;
+  }
+
+  try {
+    const hashA = computeAttestationReferenceHash(loaded.reference);
+    const hashB = computeAttestationReferenceHash(JSON.parse(JSON.stringify(loaded.reference)));
+    if (hashA !== hashB) {
+      addIssue(
+        collection,
+        "WORKLOAD_ATTESTATION_REFERENCE_MISMATCH",
+        "Attestation reference canonical hash is non-deterministic",
+        {
+          referencePath: loaded.referencePath,
+        },
+      );
+    }
+  } catch (error) {
+    addIssue(
+      collection,
+      "WORKLOAD_ATTESTATION_REFERENCE_SCHEMA_INVALID",
+      "Attestation reference canonicalization failed",
+      {
+        reason: error && error.message ? error.message : String(error),
+      },
+    );
+  }
+
+  const ttlMs = Number(loaded.reference && loaded.reference.evidenceTtlMs);
+  if (!Number.isFinite(ttlMs) || ttlMs <= 0) {
+    addIssue(
+      collection,
+      "WORKLOAD_ATTESTATION_REFERENCE_SCHEMA_INVALID",
+      "Attestation evidence TTL must be configured",
+      {
+        evidenceTtlMs: ttlMs,
+      },
+    );
+  } else if (isProduction && ttlMs !== 120000) {
+    addIssue(
+      collection,
+      "WORKLOAD_ATTESTATION_REFERENCE_MISMATCH",
+      "Attestation evidence TTL must be 120000ms in production",
+      {
+        evidenceTtlMs: ttlMs,
+      },
+    );
+  }
+}
+
 function resolveExecutionToolImageReference(executionConfig, slug, toolConfig) {
   const direct = normalizeString(toolConfig && toolConfig.image);
   if (direct) {
@@ -1953,6 +2060,13 @@ async function runPreflightValidation(options = {}) {
     productionMode.isProduction,
     executionValidation.mode,
   );
+  validatePhase25WorkloadAttestation(
+    executionConfig,
+    errors,
+    warnings,
+    productionMode.isProduction,
+    executionValidation.mode,
+  );
   validatePhase21SecurityConfig(securityConfig, errors, productionMode.isProduction, executionValidation.mode);
   validatePhase21ObservabilityConfig(observabilityConfig, errors, warnings, productionMode.isProduction);
 
@@ -1993,6 +2107,8 @@ async function runPreflightValidation(options = {}) {
       secretManifestExpectedHash: normalizeString(executionConfig.secretManifestExpectedHash).toLowerCase(),
       workloadManifestPath: normalizeString(executionConfig.workloadManifestPath),
       workloadManifestExpectedHash: normalizeString(executionConfig.workloadManifestExpectedHash).toLowerCase(),
+      workloadAttestationReferencePath: normalizeString(executionConfig.workloadAttestationReferencePath),
+      workloadAttestationReferenceExpectedHash: normalizeString(executionConfig.workloadAttestationReferenceExpectedHash).toLowerCase(),
       secretStoreProvider: normalizeString(securityConfig.secretStoreProvider),
       secretStoreUrlConfigured: normalizeString(securityConfig.secretStoreUrl).length > 0,
       observabilityThresholdScope: normalizeString(observabilityConfig.thresholdScope),

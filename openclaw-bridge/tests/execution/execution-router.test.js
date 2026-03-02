@@ -10,9 +10,39 @@ const { createExecutionRouter } = require("../../src/core/execution-router.js");
 const { computeWorkloadManifestHash } = require("../../security/workload-manifest.js");
 
 const DEFAULT_WORKLOAD_MANIFEST_PATH = path.resolve(__dirname, "../../security/workload-manifest.json");
+const DEFAULT_ATTESTATION_REFERENCE_PATH = path.resolve(__dirname, "../../security/workload-attestation-reference.json");
+const DEFAULT_ATTESTATION_REFERENCE_HASH_PATH = path.resolve(__dirname, "../../security/workload-attestation-reference.hash");
 const DEFAULT_WORKLOAD_MANIFEST_HASH = computeWorkloadManifestHash(
   JSON.parse(fsSync.readFileSync(DEFAULT_WORKLOAD_MANIFEST_PATH, "utf8")),
 );
+const DEFAULT_ATTESTATION_REFERENCE_HASH = fsSync
+  .readFileSync(DEFAULT_ATTESTATION_REFERENCE_HASH_PATH, "utf8")
+  .trim()
+  .toLowerCase();
+
+function sha256File(filePath) {
+  return crypto.createHash("sha256").update(fsSync.readFileSync(filePath)).digest("hex");
+}
+
+function stableCanonical(value) {
+  if (Array.isArray(value)) {
+    return value
+      .map((entry) => stableCanonical(entry))
+      .sort((left, right) => JSON.stringify(left).localeCompare(JSON.stringify(right)));
+  }
+  if (!value || typeof value !== "object") {
+    return value;
+  }
+  const ordered = {};
+  for (const key of Object.keys(value).sort((a, b) => a.localeCompare(b))) {
+    ordered[key] = stableCanonical(value[key]);
+  }
+  return ordered;
+}
+
+function sha256Object(value) {
+  return crypto.createHash("sha256").update(JSON.stringify(stableCanonical(value)), "utf8").digest("hex");
+}
 
 async function makeWorkspace() {
   const workspaceRoot = await fs.mkdtemp(path.join(os.tmpdir(), "openclaw-router-"));
@@ -86,17 +116,45 @@ async function makeRegistry(workspaceRoot) {
 async function withProductionIntegrityEnv(fn) {
   const previousNodeEnv = process.env.NODE_ENV;
   const previousMode = fsSync.statSync(DEFAULT_WORKLOAD_MANIFEST_PATH).mode & 0o777;
+  const previousReferenceMode = fsSync.statSync(DEFAULT_ATTESTATION_REFERENCE_PATH).mode & 0o777;
+  const previousReferenceHashMode = fsSync.statSync(DEFAULT_ATTESTATION_REFERENCE_HASH_PATH).mode & 0o777;
   fsSync.chmodSync(DEFAULT_WORKLOAD_MANIFEST_PATH, 0o444);
+  fsSync.chmodSync(DEFAULT_ATTESTATION_REFERENCE_PATH, 0o444);
+  fsSync.chmodSync(DEFAULT_ATTESTATION_REFERENCE_HASH_PATH, 0o444);
   process.env.NODE_ENV = "production";
   try {
     await fn();
   } finally {
     fsSync.chmodSync(DEFAULT_WORKLOAD_MANIFEST_PATH, previousMode);
+    fsSync.chmodSync(DEFAULT_ATTESTATION_REFERENCE_PATH, previousReferenceMode);
+    fsSync.chmodSync(DEFAULT_ATTESTATION_REFERENCE_HASH_PATH, previousReferenceHashMode);
     if (typeof previousNodeEnv === "undefined") {
       delete process.env.NODE_ENV;
     } else {
       process.env.NODE_ENV = previousNodeEnv;
     }
+  }
+}
+
+async function withProductionManifest(manifest, fn) {
+  const previous = fsSync.readFileSync(DEFAULT_WORKLOAD_MANIFEST_PATH, "utf8");
+  const previousMode = fsSync.statSync(DEFAULT_WORKLOAD_MANIFEST_PATH).mode & 0o777;
+  const writableMode = previousMode | 0o200;
+  if ((previousMode & 0o200) === 0) {
+    fsSync.chmodSync(DEFAULT_WORKLOAD_MANIFEST_PATH, writableMode);
+  }
+  fsSync.writeFileSync(DEFAULT_WORKLOAD_MANIFEST_PATH, `${JSON.stringify(manifest, null, 2)}\n`, "utf8");
+  if ((previousMode & 0o200) === 0) {
+    fsSync.chmodSync(DEFAULT_WORKLOAD_MANIFEST_PATH, previousMode);
+  }
+  try {
+    await fn(computeWorkloadManifestHash(manifest));
+  } finally {
+    if ((previousMode & 0o200) === 0) {
+      fsSync.chmodSync(DEFAULT_WORKLOAD_MANIFEST_PATH, writableMode);
+    }
+    fsSync.writeFileSync(DEFAULT_WORKLOAD_MANIFEST_PATH, previous, "utf8");
+    fsSync.chmodSync(DEFAULT_WORKLOAD_MANIFEST_PATH, previousMode);
   }
 }
 
@@ -709,5 +767,78 @@ test("integrity enforcement order is auth then integrity then capability", { con
     });
     assert.equal(integrityBeforeArgs.ok, false);
     assert.equal(integrityBeforeArgs.code, "WORKLOAD_NOT_VERIFIED");
+  });
+});
+
+test("router blocks execution when attestation posture is untrusted", { concurrency: false }, async () => {
+  await withProductionIntegrityEnv(async () => {
+    const workspaceRoot = await makeWorkspace();
+    const registryPath = await makeRegistry(workspaceRoot);
+    await writeTokenConfig(workspaceRoot, "supervisor-token");
+    await fs.writeFile(path.join(workspaceRoot, "inside.txt"), "phase25", "utf8");
+
+    const reference = JSON.parse(fsSync.readFileSync(DEFAULT_ATTESTATION_REFERENCE_PATH, "utf8"));
+    const fixtureRoot = await fs.mkdtemp(path.join(os.tmpdir(), "openclaw-phase25-router-"));
+    const adapterPath = path.join(fixtureRoot, "adapter.js");
+    const entrypointPath = path.join(fixtureRoot, "entrypoint.js");
+    const runtimeConfig = {
+      mode: "phase25",
+      stable: true,
+    };
+    await fs.writeFile(adapterPath, "module.exports = async () => 'ok';\n", "utf8");
+    await fs.writeFile(entrypointPath, "require('./adapter.js');\n", "utf8");
+
+    const manifest = {
+      workloads: [
+        {
+          workloadID: "supervisor.read_file",
+          adapterHash: sha256File(adapterPath),
+          entrypointHash: sha256File(entrypointPath),
+          runtimeConfigHash: sha256Object(runtimeConfig),
+          workloadVersion: 25,
+          productionRequired: false,
+        },
+      ],
+    };
+
+    await withProductionManifest(manifest, async (manifestHash) => {
+      let legacyCalled = false;
+      const router = makeRouter(workspaceRoot, registryPath, {
+        workloadIntegrityEnabled: true,
+        workloadManifestExpectedHash: manifestHash,
+        workloadAttestationEnabled: true,
+        attestationReferenceExpectedHash: DEFAULT_ATTESTATION_REFERENCE_HASH,
+        workloadRuntimeDescriptorResolver: () => ({
+          adapterPath,
+          entrypointPath,
+          runtimeConfig,
+          runtimeMutated: false,
+        }),
+        integrityMetadataProvider: () => ({
+          local: {
+            executionPolicyHash: "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+            secretManifestHash: reference.secretManifestHash,
+            workloadManifestHash: reference.workloadManifestHash,
+          },
+          peers: [],
+        }),
+      });
+
+      const result = await router.execute("supervisor.read_file", { path: "inside.txt" }, {
+        requestId: "phase25-attestation-block",
+        workspaceRoot,
+        source: "http_api",
+        caller: "phase25-test",
+        authHeader: "Bearer supervisor-token",
+        legacyExecute: async () => {
+          legacyCalled = true;
+          return { ok: true };
+        },
+      });
+
+      assert.equal(result.ok, false);
+      assert.equal(result.code, "WORKLOAD_ATTESTATION_NOT_TRUSTED");
+      assert.equal(legacyCalled, false);
+    });
   });
 });

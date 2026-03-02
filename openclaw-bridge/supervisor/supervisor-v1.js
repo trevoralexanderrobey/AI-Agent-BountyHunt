@@ -352,6 +352,11 @@ function createSupervisorV1(options = {}) {
   const executionSettings = resolveExecutionSettings(options);
   const workloadMetadataProvider =
     options && typeof options.workloadMetadataProvider === "function" ? options.workloadMetadataProvider : null;
+  const attestationMetadataProvider =
+    options && typeof options.attestationMetadataProvider === "function" ? options.attestationMetadataProvider : null;
+  const attestationEvidenceProvider =
+    options && typeof options.attestationEvidenceProvider === "function" ? options.attestationEvidenceProvider : null;
+  const attestationVerifier = options && typeof options.attestationVerifier === "function" ? options.attestationVerifier : null;
   const securitySettings = isPlainObject(options.security) ? options.security : {};
   const observabilitySettings = isPlainObject(options.observability) ? options.observability : {};
   const alertThresholds = isPlainObject(observabilitySettings.alertThresholds) ? observabilitySettings.alertThresholds : {};
@@ -555,6 +560,7 @@ function createSupervisorV1(options = {}) {
           peerRegistry: federationPeerRegistry,
           intervalMs: parsePositiveInt(federationOptions.heartbeatIntervalMs, 60000),
           timeoutMs: parsePositiveInt(federationOptions.heartbeatTimeoutMs, 5000),
+          attestationVerifier,
         });
       })()
     : null;
@@ -966,6 +972,32 @@ function createSupervisorV1(options = {}) {
             : typeof record.workload_manifest_hash === "string"
             ? record.workload_manifest_hash
             : "",
+        attestationTrusted:
+          typeof record.attestationTrusted === "boolean"
+            ? record.attestationTrusted
+            : typeof record.attestation_trusted === "boolean"
+            ? record.attestation_trusted
+            : true,
+        attestationFailureReason:
+          typeof record.attestationFailureReason === "string"
+            ? record.attestationFailureReason
+            : typeof record.attestation_failure_reason === "string"
+            ? record.attestation_failure_reason
+            : "",
+        attestationEvidenceHash:
+          typeof record.attestationEvidenceHash === "string"
+            ? record.attestationEvidenceHash
+            : typeof record.attestation_evidence_hash === "string"
+            ? record.attestation_evidence_hash
+            : "",
+        attestationVerifiedAt:
+          Number.isFinite(Number(record.attestationVerifiedAt)) && Number(record.attestationVerifiedAt) > 0
+            ? Number(record.attestationVerifiedAt)
+            : Number.isFinite(Number(record.attestation_verified_at)) && Number(record.attestation_verified_at) > 0
+            ? Number(record.attestation_verified_at)
+            : 0,
+        attestationStickyUntrusted:
+          record.attestationStickyUntrusted === true || record.attestation_sticky_untrusted === true,
         executionConfigHash: typeof record.executionConfigHash === "string" ? record.executionConfigHash : "",
         executionConfigVersion: typeof record.executionConfigVersion === "string" ? record.executionConfigVersion : "",
       };
@@ -1604,6 +1636,8 @@ function createSupervisorV1(options = {}) {
         : {};
     const workloadMetadata =
       workloadMetadataProvider && typeof workloadMetadataProvider === "function" ? workloadMetadataProvider() : {};
+    const attestationMetadata =
+      attestationMetadataProvider && typeof attestationMetadataProvider === "function" ? attestationMetadataProvider() : {};
 
     return {
       ...policyMetadata,
@@ -1613,6 +1647,17 @@ function createSupervisorV1(options = {}) {
         typeof workloadMetadata.workloadManifestHash === "string"
           ? workloadMetadata.workloadManifestHash
           : normalizeString(executionSettings.workloadManifestExpectedHash).toLowerCase(),
+      attestationTrusted: attestationMetadata && attestationMetadata.trusted === true,
+      attestationBlockedReason:
+        typeof attestationMetadata.blockedReason === "string" ? attestationMetadata.blockedReason : "",
+      attestationReferenceHash:
+        typeof attestationMetadata.referenceHash === "string" ? attestationMetadata.referenceHash : "",
+      attestationEvidenceHash:
+        typeof attestationMetadata.lastEvidenceHash === "string" ? attestationMetadata.lastEvidenceHash : "",
+      attestationVerifiedAt:
+        Number.isFinite(Number(attestationMetadata.lastVerifiedAt)) && Number(attestationMetadata.lastVerifiedAt) > 0
+          ? Number(attestationMetadata.lastVerifiedAt)
+          : 0,
     };
   }
 
@@ -3641,6 +3686,17 @@ function createSupervisorV1(options = {}) {
           typeof executionMetadata.secretManifestHash === "string" ? executionMetadata.secretManifestHash : "",
         workloadManifestHash:
           typeof executionMetadata.workloadManifestHash === "string" ? executionMetadata.workloadManifestHash : "",
+        attestationTrusted: executionMetadata.attestationTrusted === true,
+        attestationBlockedReason:
+          typeof executionMetadata.attestationBlockedReason === "string" ? executionMetadata.attestationBlockedReason : "",
+        attestationReferenceHash:
+          typeof executionMetadata.attestationReferenceHash === "string" ? executionMetadata.attestationReferenceHash : "",
+        attestationEvidenceHash:
+          typeof executionMetadata.attestationEvidenceHash === "string" ? executionMetadata.attestationEvidenceHash : "",
+        attestationVerifiedAt:
+          Number.isFinite(Number(executionMetadata.attestationVerifiedAt)) && Number(executionMetadata.attestationVerifiedAt) > 0
+            ? Number(executionMetadata.attestationVerifiedAt)
+            : 0,
         thresholdScope: thresholdScope === "cluster" ? "cluster" : "node",
       },
     };
@@ -3680,12 +3736,48 @@ function createSupervisorV1(options = {}) {
           : normalizeString(executionSettings.expectedExecutionConfigVersion),
       secretManifestHash: typeof local.secretManifestHash === "string" ? local.secretManifestHash : "",
       workloadManifestHash: typeof local.workloadManifestHash === "string" ? local.workloadManifestHash : "",
+      attestationTrusted: local.attestationTrusted === true,
+      attestationBlockedReason: typeof local.attestationBlockedReason === "string" ? local.attestationBlockedReason : "",
+      attestationReferenceHash: typeof local.attestationReferenceHash === "string" ? local.attestationReferenceHash : "",
+      attestationEvidenceHash: typeof local.attestationEvidenceHash === "string" ? local.attestationEvidenceHash : "",
+      attestationVerifiedAt:
+        Number.isFinite(Number(local.attestationVerifiedAt)) && Number(local.attestationVerifiedAt) > 0
+          ? Number(local.attestationVerifiedAt)
+          : 0,
       thresholdScope: thresholdScope === "cluster" ? "cluster" : "node",
     };
   }
 
   function getExecutionPeers() {
     return getExecutionPeersForReconciliation();
+  }
+
+  function generateAttestationEvidence(challenge = {}, context = {}) {
+    if (!attestationEvidenceProvider || typeof attestationEvidenceProvider !== "function") {
+      return {
+        ok: false,
+        code: "WORKLOAD_ATTESTATION_NOT_TRUSTED",
+        message: "Attestation evidence provider unavailable",
+        details: {},
+      };
+    }
+    const localMetadata =
+      context && typeof context === "object" && context.localMetadata && typeof context.localMetadata === "object"
+        ? context.localMetadata
+        : getExecutionMetadata();
+    try {
+      return attestationEvidenceProvider(challenge, {
+        ...(context && typeof context === "object" ? context : {}),
+        localMetadata,
+      });
+    } catch (error) {
+      return {
+        ok: false,
+        code: "WORKLOAD_ATTESTATION_NOT_TRUSTED",
+        message: error && error.message ? error.message : "Attestation evidence generation failed",
+        details: {},
+      };
+    }
   }
 
   async function shutdown() {
@@ -3836,6 +3928,7 @@ function createSupervisorV1(options = {}) {
     getStatus,
     getExecutionMetadata,
     getExecutionPeers,
+    generateAttestationEvidence,
     getMetrics,
     reapIdle,
     shutdown,

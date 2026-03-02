@@ -45,6 +45,33 @@ function isPlainObject(value) {
   return Boolean(value && typeof value === "object" && !Array.isArray(value));
 }
 
+function parseAttestationChallenge(headerValue) {
+  const raw = typeof headerValue === "string" ? headerValue.trim() : "";
+  if (!raw) {
+    return {};
+  }
+
+  const candidates = [raw];
+  try {
+    candidates.push(Buffer.from(raw, "base64").toString("utf8"));
+  } catch {}
+
+  for (const candidate of candidates) {
+    try {
+      const parsed = JSON.parse(candidate);
+      if (!isPlainObject(parsed)) {
+        continue;
+      }
+      return {
+        nonce: typeof parsed.nonce === "string" ? parsed.nonce.trim() : "",
+        timestampMs: Number.isFinite(Number(parsed.timestampMs)) ? Number(parsed.timestampMs) : undefined,
+      };
+    } catch {}
+  }
+
+  return {};
+}
+
 function writeJson(res, statusCode, payload) {
   const body = JSON.stringify(payload);
   res.statusCode = statusCode;
@@ -228,6 +255,23 @@ function mapSupervisorError(error) {
     code === "WORKLOAD_MANIFEST_WRITABLE_IN_PRODUCTION"
   ) {
     return { statusCode: 503, code, message: "Execution integrity verification failed" };
+  }
+  if (
+    code === "WORKLOAD_ATTESTATION_NOT_TRUSTED" ||
+    code === "WORKLOAD_ATTESTATION_REFERENCE_MISMATCH" ||
+    code === "WORKLOAD_ATTESTATION_REFERENCE_MISSING" ||
+    code === "WORKLOAD_ATTESTATION_REFERENCE_SCHEMA_INVALID" ||
+    code === "WORKLOAD_ATTESTATION_REFERENCE_PATH_OVERRIDE_FORBIDDEN" ||
+    code === "WORKLOAD_ATTESTATION_REFERENCE_WRITABLE_IN_PRODUCTION" ||
+    code === "WORKLOAD_ATTESTATION_REFERENCE_HASH_MISSING" ||
+    code === "WORKLOAD_ATTESTATION_SIGNATURE_INVALID" ||
+    code === "WORKLOAD_ATTESTATION_EVIDENCE_INVALID" ||
+    code === "WORKLOAD_ATTESTATION_STALE" ||
+    code === "WORKLOAD_ATTESTATION_CHALLENGE_MISMATCH" ||
+    code === "WORKLOAD_ATTESTATION_REPLAY_DETECTED" ||
+    code === "WORKLOAD_ATTESTATION_PEER_STICKY_UNTRUSTED"
+  ) {
+    return { statusCode: 503, code, message: "Execution attestation verification failed" };
   }
   if (code === "SUPERVISOR_CAPACITY_EXCEEDED") {
     return { statusCode: 503, code: "INTERNAL_ERROR", message: "Service capacity exceeded" };
@@ -641,6 +685,25 @@ function createHttpHandlers(options = {}) {
       const supervisorReady = Boolean(status && status.ok === true && status.isShuttingDown !== true);
       const healthState = supervisorReady && !hasOpenCircuit ? "healthy" : "degraded";
       const executionMetadata = status && status.executionMetadata && typeof status.executionMetadata === "object" ? status.executionMetadata : {};
+      const challenge = parseAttestationChallenge(req.headers["x-openclaw-attestation-challenge"]);
+      const attestationMetadata =
+        executionRouter && typeof executionRouter.getWorkloadAttestationMetadata === "function"
+          ? executionRouter.getWorkloadAttestationMetadata()
+          : {};
+      const evidenceResult =
+        executionRouter && typeof executionRouter.generateAttestationEvidence === "function"
+          ? executionRouter.generateAttestationEvidence(challenge, {
+              localMetadata: executionMetadata,
+              runtimeMeasurements: {
+                source: "health",
+                route: "/health",
+              },
+            })
+          : {
+              ok: false,
+              code: "WORKLOAD_ATTESTATION_NOT_TRUSTED",
+              details: {},
+            };
 
       writeJson(res, 200, {
         status: healthState,
@@ -668,6 +731,33 @@ function createHttpHandlers(options = {}) {
           typeof executionMetadata.expectedExecutionConfigVersion === "string"
             ? executionMetadata.expectedExecutionConfigVersion
             : "",
+        attestation_trusted:
+          evidenceResult && evidenceResult.ok === true
+            ? true
+            : attestationMetadata && attestationMetadata.trusted === true,
+        attestation_failure_reason:
+          evidenceResult && evidenceResult.ok === false && typeof evidenceResult.code === "string"
+            ? evidenceResult.code
+            : typeof attestationMetadata.blockedReason === "string"
+            ? attestationMetadata.blockedReason
+            : "",
+        attestation_reference_hash:
+          typeof attestationMetadata.referenceHash === "string" ? attestationMetadata.referenceHash : "",
+        attestation_evidence_hash:
+          evidenceResult &&
+          evidenceResult.evidence &&
+          typeof evidenceResult.evidence === "object" &&
+          typeof evidenceResult.evidence.evidenceHash === "string"
+            ? evidenceResult.evidence.evidenceHash
+            : typeof attestationMetadata.lastEvidenceHash === "string"
+            ? attestationMetadata.lastEvidenceHash
+            : "",
+        attestation_verified_at:
+          Number.isFinite(Number(attestationMetadata.lastVerifiedAt)) && Number(attestationMetadata.lastVerifiedAt) > 0
+            ? Number(attestationMetadata.lastVerifiedAt)
+            : 0,
+        attestation_evidence:
+          evidenceResult && evidenceResult.ok === true && evidenceResult.evidence ? evidenceResult.evidence : undefined,
       });
     } catch (error) {
       writeJson(res, 503, {

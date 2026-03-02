@@ -12,6 +12,15 @@ import {
   createWorkloadIntegrityVerifier,
 } from "../security/workload-integrity";
 import { resolveDefaultWorkloadManifestPath } from "../security/workload-manifest";
+import {
+  WorkloadAttestationChallenge,
+  WorkloadAttestationEvidence,
+  WorkloadAttestationRuntime,
+  WorkloadAttestationVerificationResult,
+  generateAttestationEvidence as generateAttestationEvidenceFromRuntime,
+  getAttestationState as getRuntimeAttestationState,
+  initializeAttestation,
+} from "../security/workload-attestation";
 
 const execFileAsync = promisify(execFile);
 
@@ -68,6 +77,46 @@ export interface ExecutionRouter {
     warnings: Array<Record<string, unknown>>;
     timestamp: number;
   };
+  getWorkloadAttestationMetadata(): {
+    nodeId: string;
+    trusted: boolean;
+    blockedReason: string;
+    referenceHash: string;
+    lastEvidenceHash: string;
+    lastVerifiedAt: number;
+    peerTrustMap: Record<
+      string,
+      {
+        trusted: boolean;
+        failureReason: string;
+        evidenceHash: string;
+        verifiedAt: number;
+        stickyUntrusted: boolean;
+      }
+    >;
+  };
+  evaluateWorkloadAttestationPeerPosture(peers?: Array<Record<string, unknown>>): {
+    ok: boolean;
+    status: "aligned" | "mismatch" | "not_evaluated";
+    criticalMismatches: Array<Record<string, unknown>>;
+    warnings: Array<Record<string, unknown>>;
+    timestamp: number;
+  };
+  generateAttestationEvidence(
+    challenge?: WorkloadAttestationChallenge,
+    context?: { localMetadata?: Record<string, unknown>; runtimeMeasurements?: Record<string, unknown> },
+  ): {
+    ok: boolean;
+    code: string;
+    message: string;
+    evidence?: WorkloadAttestationEvidence;
+    details: Record<string, unknown>;
+  };
+  verifyPeerAttestationEvidence(input: {
+    peerId: string;
+    evidence: unknown;
+    challenge?: WorkloadAttestationChallenge;
+  }): WorkloadAttestationVerificationResult;
 }
 
 export interface ExecutionToolDescriptor {
@@ -119,6 +168,9 @@ export interface ExecutionRouterOptions {
   workloadManifestPath?: string;
   workloadManifestExpectedHash?: string;
   workloadIntegrityEnabled?: boolean;
+  workloadAttestationEnabled?: boolean;
+  attestationReferencePath?: string;
+  attestationReferenceExpectedHash?: string;
   workloadRuntimeDescriptorResolver?: (
     tool: string,
     context: WorkloadIntegrityContext,
@@ -214,6 +266,19 @@ const SAFE_ERROR_MESSAGES: Record<string, string> = {
   WORKLOAD_MANIFEST_MISSING: "Execution integrity verification failed",
   WORKLOAD_MANIFEST_PATH_OVERRIDE_FORBIDDEN: "Execution integrity verification failed",
   WORKLOAD_MANIFEST_WRITABLE_IN_PRODUCTION: "Execution integrity verification failed",
+  WORKLOAD_ATTESTATION_NOT_TRUSTED: "Execution attestation verification failed",
+  WORKLOAD_ATTESTATION_REFERENCE_MISMATCH: "Execution attestation verification failed",
+  WORKLOAD_ATTESTATION_REFERENCE_MISSING: "Execution attestation verification failed",
+  WORKLOAD_ATTESTATION_REFERENCE_SCHEMA_INVALID: "Execution attestation verification failed",
+  WORKLOAD_ATTESTATION_REFERENCE_PATH_OVERRIDE_FORBIDDEN: "Execution attestation verification failed",
+  WORKLOAD_ATTESTATION_REFERENCE_WRITABLE_IN_PRODUCTION: "Execution attestation verification failed",
+  WORKLOAD_ATTESTATION_REFERENCE_HASH_MISSING: "Execution attestation verification failed",
+  WORKLOAD_ATTESTATION_SIGNATURE_INVALID: "Execution attestation verification failed",
+  WORKLOAD_ATTESTATION_EVIDENCE_INVALID: "Execution attestation verification failed",
+  WORKLOAD_ATTESTATION_STALE: "Execution attestation verification failed",
+  WORKLOAD_ATTESTATION_CHALLENGE_MISMATCH: "Execution attestation verification failed",
+  WORKLOAD_ATTESTATION_REPLAY_DETECTED: "Execution attestation verification failed",
+  WORKLOAD_ATTESTATION_PEER_STICKY_UNTRUSTED: "Execution attestation verification failed",
 };
 
 const COUNTER_ALIASES: Record<string, string[]> = {
@@ -656,6 +721,18 @@ export function createExecutionRouter(options: ExecutionRouterOptions): Executio
   const workloadManifestExpectedHash = normalizeString(
     options.workloadManifestExpectedHash || process.env.WORKLOAD_MANIFEST_EXPECTED_HASH,
   ).toLowerCase();
+  const workloadAttestationEnabledConfigured =
+    typeof options.workloadAttestationEnabled === "boolean"
+      ? options.workloadAttestationEnabled
+      : parseBoolean(process.env.WORKLOAD_ATTESTATION_ENABLED, production);
+  const workloadAttestationEnabled = production ? true : workloadAttestationEnabledConfigured;
+  const attestationReferencePath =
+    typeof options.attestationReferencePath === "string"
+      ? options.attestationReferencePath
+      : normalizeString(process.env.WORKLOAD_ATTESTATION_REFERENCE_PATH);
+  const attestationReferenceExpectedHash = normalizeString(
+    options.attestationReferenceExpectedHash || process.env.WORKLOAD_ATTESTATION_REFERENCE_EXPECTED_HASH,
+  ).toLowerCase();
 
   const maxPatchBytes = parsePositiveInt(options.maxPatchBytes, DEFAULT_MAX_PATCH_BYTES);
   const maxWriteFileBytes = parsePositiveInt(options.maxWriteFileBytes, DEFAULT_MAX_WRITE_FILE_BYTES);
@@ -828,6 +905,42 @@ export function createExecutionRouter(options: ExecutionRouterOptions): Executio
       })
     : null;
 
+  const workloadAttestationRuntime: WorkloadAttestationRuntime | null = workloadAttestationEnabled
+    ? initializeAttestation({
+        production,
+        nodeId: normalizeString(process.env.SUPERVISOR_NODE_ID) || "node-unknown",
+        referencePath: attestationReferencePath || undefined,
+        expectedReferenceHash: attestationReferenceExpectedHash || undefined,
+        allowProductionPathOverride: false,
+        metrics: {
+          increment: (name, labels = {}) => {
+            incrementCounter(name, 1);
+            if (Object.keys(labels).length > 0) {
+              const stableLabel = JSON.stringify(labels, Object.keys(labels).sort());
+              incrementCounter(`${name}:${stableLabel}`, 1);
+            }
+          },
+          gauge: (name, value) => {
+            counters[name] = Number(value) || 0;
+          },
+        },
+        auditLog: (event) => {
+          auditLogger.append({
+            requestId: "workload-attestation",
+            tool: normalizeString((event.details || {}).nodeId) || "workload-attestation",
+            caller: "workload_attestation",
+            timestamp: new Date().toISOString(),
+            argsHash: hashArgs(event.details || {}),
+            resultStatus: event.status === "error" ? "error" : "ok",
+            role: "internal",
+            source: "in_process",
+            code: event.code,
+            details: event.details,
+          });
+        },
+      })
+    : null;
+
   if (workloadIntegrityVerifier) {
     const startup = workloadIntegrityVerifier.initialize();
     if (!startup.ok) {
@@ -841,6 +954,15 @@ export function createExecutionRouter(options: ExecutionRouterOptions): Executio
       }
     } else {
       incrementCounter("workload.hash.verified", 1);
+    }
+  }
+
+  if (workloadAttestationRuntime) {
+    const startup = workloadAttestationRuntime.initializeAttestation();
+    if (!startup.ok) {
+      incrementCounter("workload.attestation.failure", 1);
+    } else {
+      incrementCounter("workload.attestation.success", 1);
     }
   }
 
@@ -1262,9 +1384,9 @@ export function createExecutionRouter(options: ExecutionRouterOptions): Executio
         };
       }
 
+      const integrityMetadata = resolveIntegrityMetadata(context);
+      const localMetadata = integrityMetadata.local || {};
       if (workloadIntegrityVerifier) {
-        const integrityMetadata = resolveIntegrityMetadata(context);
-        const localMetadata = integrityMetadata.local || {};
         if (production) {
           const localPolicyHash = normalizeString(
             localMetadata.executionPolicyHash || localMetadata.execution_policy_hash || "",
@@ -1357,7 +1479,36 @@ export function createExecutionRouter(options: ExecutionRouterOptions): Executio
             };
           }
         }
+      }
 
+      if (workloadAttestationRuntime) {
+        const localAttestation = workloadAttestationRuntime.syncLocalAttestationPosture(localMetadata);
+        if (!localAttestation.ok) {
+          incrementCounter("workload.attestation.failure", 1);
+          if (production) {
+            incrementCounter("workload.attestation.block", 1);
+            return {
+              ok: false,
+              code: "WORKLOAD_ATTESTATION_NOT_TRUSTED",
+              message: sanitizeMessageForClient("WORKLOAD_ATTESTATION_NOT_TRUSTED"),
+            };
+          }
+        }
+
+        const peerAttestationSummary = workloadAttestationRuntime.evaluatePeerAttestationPosture(integrityMetadata.peers || []);
+        if (!peerAttestationSummary.ok) {
+          incrementCounter("workload.attestation.peer_untrusted", peerAttestationSummary.criticalMismatches.length || 1);
+        }
+
+        const attestationState = workloadAttestationRuntime.getAttestationState();
+        if (production && !attestationState.trusted) {
+          incrementCounter("workload.attestation.block", 1);
+          return {
+            ok: false,
+            code: "WORKLOAD_ATTESTATION_NOT_TRUSTED",
+            message: sanitizeMessageForClient("WORKLOAD_ATTESTATION_NOT_TRUSTED"),
+          };
+        }
       }
 
       const registry = await getRegistry();
@@ -1579,6 +1730,69 @@ export function createExecutionRouter(options: ExecutionRouterOptions): Executio
     return workloadIntegrityVerifier.evaluatePeerWorkloadPosture(peers);
   }
 
+  function getWorkloadAttestationMetadata() {
+    if (!workloadAttestationRuntime) {
+      return {
+        nodeId: normalizeString(process.env.SUPERVISOR_NODE_ID) || "node-unknown",
+        trusted: false,
+        blockedReason: "",
+        referenceHash: "",
+        lastEvidenceHash: "",
+        lastVerifiedAt: 0,
+        peerTrustMap: {},
+      };
+    }
+    return getRuntimeAttestationState(workloadAttestationRuntime);
+  }
+
+  function evaluateWorkloadAttestationPeerPosture(peers: Array<Record<string, unknown>> = []) {
+    if (!workloadAttestationRuntime) {
+      return {
+        ok: true,
+        status: "not_evaluated" as const,
+        criticalMismatches: [],
+        warnings: [],
+        timestamp: Date.now(),
+      };
+    }
+    return workloadAttestationRuntime.evaluatePeerAttestationPosture(peers);
+  }
+
+  function generateAttestationEvidence(
+    challenge: WorkloadAttestationChallenge = {},
+    context: { localMetadata?: Record<string, unknown>; runtimeMeasurements?: Record<string, unknown> } = {},
+  ) {
+    if (!workloadAttestationRuntime) {
+      return {
+        ok: false,
+        code: "WORKLOAD_ATTESTATION_NOT_TRUSTED",
+        message: "Workload attestation runtime is not available",
+        details: {},
+      };
+    }
+    return generateAttestationEvidenceFromRuntime(workloadAttestationRuntime, challenge, context);
+  }
+
+  function verifyPeerAttestationEvidence(input: {
+    peerId: string;
+    evidence: unknown;
+    challenge?: WorkloadAttestationChallenge;
+  }): WorkloadAttestationVerificationResult {
+    if (!workloadAttestationRuntime) {
+      return {
+        ok: false,
+        code: "WORKLOAD_ATTESTATION_NOT_TRUSTED",
+        message: "Workload attestation runtime is not available",
+        details: {},
+      };
+    }
+    return workloadAttestationRuntime.verifyPeerAttestationEvidence(
+      normalizeString(input.peerId),
+      input.evidence,
+      input.challenge || {},
+    );
+  }
+
   return {
     execute,
     listTools,
@@ -1586,5 +1800,9 @@ export function createExecutionRouter(options: ExecutionRouterOptions): Executio
     getMetrics,
     getWorkloadIntegrityMetadata,
     evaluateWorkloadPeerPosture,
+    getWorkloadAttestationMetadata,
+    evaluateWorkloadAttestationPeerPosture,
+    generateAttestationEvidence,
+    verifyPeerAttestationEvidence,
   };
 }

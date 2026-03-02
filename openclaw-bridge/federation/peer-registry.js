@@ -72,6 +72,26 @@ function normalizePolicyVersion(value) {
   return parsed;
 }
 
+function normalizeBoolean(value, fallback = false) {
+  if (typeof value === "boolean") {
+    return value;
+  }
+  return fallback;
+}
+
+function normalizeEvidenceHash(value) {
+  const normalized = typeof value === "string" ? value.trim().toLowerCase() : "";
+  return /^[a-f0-9]{64}$/.test(normalized) ? normalized : "";
+}
+
+function normalizeTimestamp(value) {
+  const parsed = Number(value);
+  if (!Number.isFinite(parsed) || parsed <= 0) {
+    return 0;
+  }
+  return Math.floor(parsed);
+}
+
 function sanitizePeer(peerId, entry, includeSecret = false) {
   const base = {
     peerId,
@@ -88,6 +108,11 @@ function sanitizePeer(peerId, entry, includeSecret = false) {
     executionPolicyVersion: entry.executionPolicyVersion,
     expectedExecutionConfigVersion: entry.expectedExecutionConfigVersion,
     nodeId: entry.nodeId,
+    attestationTrusted: entry.attestationTrusted,
+    attestationFailureReason: entry.attestationFailureReason,
+    attestationEvidenceHash: entry.attestationEvidenceHash,
+    attestationVerifiedAt: entry.attestationVerifiedAt,
+    attestationStickyUntrusted: entry.attestationStickyUntrusted,
   };
 
   if (includeSecret) {
@@ -149,6 +174,11 @@ function createPeerRegistry(options = {}) {
       executionPolicyVersion: normalizePolicyVersion(config.executionPolicyVersion),
       expectedExecutionConfigVersion: normalizeMetadataVersion(config.expectedExecutionConfigVersion),
       nodeId: normalizeMetadataVersion(config.nodeId),
+      attestationTrusted: normalizeBoolean(config.attestationTrusted, true),
+      attestationFailureReason: normalizeMetadataVersion(config.attestationFailureReason),
+      attestationEvidenceHash: normalizeEvidenceHash(config.attestationEvidenceHash),
+      attestationVerifiedAt: normalizeTimestamp(config.attestationVerifiedAt),
+      attestationStickyUntrusted: normalizeBoolean(config.attestationStickyUntrusted, false),
     };
 
     peers.set(peerId, entry);
@@ -195,6 +225,9 @@ function createPeerRegistry(options = {}) {
     return Array.from(peers.entries())
       .filter(([, entry]) => {
         if (entry.status !== STATUS_UP) {
+          return false;
+        }
+        if (entry.attestationTrusted !== true || entry.attestationStickyUntrusted === true) {
           return false;
         }
         if (!Array.isArray(entry.capabilities) || entry.capabilities.length === 0) {
@@ -268,6 +301,40 @@ function createPeerRegistry(options = {}) {
       entry.nodeId = normalizeMetadataVersion(health.nodeId);
     }
 
+    if (typeof health.attestationFailureReason === "string") {
+      entry.attestationFailureReason = normalizeMetadataVersion(health.attestationFailureReason);
+    }
+    if (typeof health.attestationEvidenceHash === "string") {
+      entry.attestationEvidenceHash = normalizeEvidenceHash(health.attestationEvidenceHash);
+    }
+    if (typeof health.attestationVerifiedAt !== "undefined") {
+      entry.attestationVerifiedAt = normalizeTimestamp(health.attestationVerifiedAt);
+    }
+    if (typeof health.attestationTrusted !== "undefined") {
+      const trusted = normalizeBoolean(health.attestationTrusted, entry.attestationTrusted === true);
+      if (trusted) {
+        if (!entry.attestationStickyUntrusted) {
+          entry.attestationTrusted = true;
+          entry.attestationFailureReason = "";
+        } else {
+          entry.attestationTrusted = false;
+        }
+      } else {
+        entry.attestationTrusted = false;
+        entry.attestationStickyUntrusted = true;
+        if (!entry.attestationFailureReason) {
+          entry.attestationFailureReason = "WORKLOAD_ATTESTATION_NOT_TRUSTED";
+        }
+      }
+    }
+    if (typeof health.attestationStickyUntrusted !== "undefined") {
+      const sticky = normalizeBoolean(health.attestationStickyUntrusted, entry.attestationStickyUntrusted === true);
+      if (sticky) {
+        entry.attestationStickyUntrusted = true;
+        entry.attestationTrusted = false;
+      }
+    }
+
     peers.set(peerId, entry);
     emitChange();
     return true;
@@ -291,6 +358,11 @@ function createPeerRegistry(options = {}) {
         executionPolicyVersion: entry.executionPolicyVersion,
         expectedExecutionConfigVersion: entry.expectedExecutionConfigVersion,
         nodeId: entry.nodeId,
+        attestationTrusted: entry.attestationTrusted,
+        attestationFailureReason: entry.attestationFailureReason,
+        attestationEvidenceHash: entry.attestationEvidenceHash,
+        attestationVerifiedAt: entry.attestationVerifiedAt,
+        attestationStickyUntrusted: entry.attestationStickyUntrusted,
       }));
   }
 
@@ -333,6 +405,11 @@ function createPeerRegistry(options = {}) {
       const executionPolicyVersion = normalizePolicyVersion(item.executionPolicyVersion);
       const expectedExecutionConfigVersion = normalizeMetadataVersion(item.expectedExecutionConfigVersion);
       const nodeId = normalizeMetadataVersion(item.nodeId);
+      const attestationTrusted = normalizeBoolean(item.attestationTrusted, true);
+      const attestationFailureReason = normalizeMetadataVersion(item.attestationFailureReason);
+      const attestationEvidenceHash = normalizeEvidenceHash(item.attestationEvidenceHash);
+      const attestationVerifiedAt = normalizeTimestamp(item.attestationVerifiedAt);
+      const attestationStickyUntrusted = normalizeBoolean(item.attestationStickyUntrusted, false);
 
       if (!existing) {
         peers.set(peerId, {
@@ -350,6 +427,11 @@ function createPeerRegistry(options = {}) {
           executionPolicyVersion,
           expectedExecutionConfigVersion,
           nodeId,
+          attestationTrusted,
+          attestationFailureReason,
+          attestationEvidenceHash,
+          attestationVerifiedAt,
+          attestationStickyUntrusted,
         });
         created += 1;
         continue;
@@ -367,6 +449,11 @@ function createPeerRegistry(options = {}) {
       existing.executionPolicyVersion = executionPolicyVersion;
       existing.expectedExecutionConfigVersion = expectedExecutionConfigVersion;
       existing.nodeId = nodeId;
+      existing.attestationTrusted = attestationStickyUntrusted ? false : attestationTrusted;
+      existing.attestationFailureReason = attestationFailureReason;
+      existing.attestationEvidenceHash = attestationEvidenceHash;
+      existing.attestationVerifiedAt = attestationVerifiedAt;
+      existing.attestationStickyUntrusted = attestationStickyUntrusted;
       if (existing.authToken) {
         existing.status = status;
       } else {

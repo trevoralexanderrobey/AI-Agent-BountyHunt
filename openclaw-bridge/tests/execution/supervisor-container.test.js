@@ -6,6 +6,7 @@ const os = require("node:os");
 const path = require("node:path");
 
 const { createSupervisorV1 } = require("../../supervisor/supervisor-v1.js");
+const { createPeerRegistry } = require("../../federation/peer-registry.js");
 const { BaseToolAdapter } = require("../../tools/base-adapter.js");
 const { createExecutionRouter } = require("../../src/core/execution-router.js");
 const { computeWorkloadManifestHash } = require("../../security/workload-manifest.js");
@@ -949,7 +950,10 @@ test("federation workload manifest mismatch propagates to router integrity block
 
   const previousNodeEnv = process.env.NODE_ENV;
   const previousMode = fsSync.statSync(manifestPath).mode & 0o777;
+  const referencePath = path.resolve(__dirname, "../../security/workload-attestation-reference.json");
+  const previousReferenceMode = fsSync.statSync(referencePath).mode & 0o777;
   fsSync.chmodSync(manifestPath, 0o444);
+  fsSync.chmodSync(referencePath, 0o444);
   process.env.NODE_ENV = "production";
 
   const supervisor = createSupervisorV1({
@@ -1009,10 +1013,77 @@ test("federation workload manifest mismatch propagates to router integrity block
   } finally {
     await supervisor.shutdown();
     fsSync.chmodSync(manifestPath, previousMode);
+    fsSync.chmodSync(referencePath, previousReferenceMode);
     if (typeof previousNodeEnv === "undefined") {
       delete process.env.NODE_ENV;
     } else {
       process.env.NODE_ENV = previousNodeEnv;
     }
+  }
+});
+
+test("peer attestation mismatch marks peer untrusted and excludes routing participation", async () => {
+  const peerRegistry = createPeerRegistry();
+  peerRegistry.registerPeer("node-b", {
+    url: "http://127.0.0.1:65530",
+    authToken: "token-b",
+    status: "UP",
+    capabilities: ["dummy-supervisor"],
+    attestationTrusted: true,
+  });
+
+  const supervisor = createSupervisorV1({
+    execution: {
+      executionMode: "host",
+      containerRuntimeEnabled: false,
+      backend: "mock",
+    },
+    federation: {
+      enabled: true,
+      peerRegistry,
+      heartbeat: {
+        start: () => {},
+        stop: () => {},
+        runOnce: async () => {},
+      },
+      remoteClient: {
+        executeRemote: async () => ({
+          ok: false,
+          error: {
+            code: "REMOTE_UNAVAILABLE",
+            message: "remote unavailable",
+            details: {},
+          },
+        }),
+      },
+    },
+  });
+
+  try {
+    const evidenceHash = "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd";
+    const nowMs = Date.now();
+    peerRegistry.updatePeerHealth("node-b", {
+      status: "UP",
+      attestationTrusted: false,
+      attestationFailureReason: "WORKLOAD_ATTESTATION_REFERENCE_MISMATCH",
+      attestationEvidenceHash: evidenceHash,
+      attestationVerifiedAt: nowMs,
+      attestationStickyUntrusted: true,
+    });
+
+    const peers = supervisor.getExecutionPeers();
+    const peer = peers.find((item) => item.peerId === "node-b");
+    assert.ok(peer);
+    assert.equal(peer.attestationTrusted, false);
+    assert.equal(peer.attestationStickyUntrusted, true);
+    assert.equal(peer.attestationFailureReason, "WORKLOAD_ATTESTATION_REFERENCE_MISMATCH");
+    assert.equal(peer.attestationEvidenceHash, evidenceHash);
+    assert.equal(peer.attestationVerifiedAt > 0, true);
+
+    const healthy = peerRegistry.getHealthyPeersForSlug("dummy-supervisor");
+    assert.equal(Array.isArray(healthy), true);
+    assert.equal(healthy.length, 0);
+  } finally {
+    await supervisor.shutdown();
   }
 });

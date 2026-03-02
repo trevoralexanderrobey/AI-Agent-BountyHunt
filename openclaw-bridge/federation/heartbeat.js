@@ -16,6 +16,7 @@ function createPeerHeartbeat(options = {}) {
   if (!peerRegistry || typeof peerRegistry.listPeers !== "function" || typeof peerRegistry.updatePeerHealth !== "function") {
     throw new Error("peerRegistry with listPeers() and updatePeerHealth() is required");
   }
+  const attestationVerifier = options && typeof options.attestationVerifier === "function" ? options.attestationVerifier : null;
 
   const intervalMs = normalizePositiveInt(options.intervalMs, 60000);
   const timeoutMs = normalizePositiveInt(options.timeoutMs, 5000);
@@ -23,10 +24,19 @@ function createPeerHeartbeat(options = {}) {
   let timer = null;
   let running = false;
 
+  function createAttestationChallenge() {
+    return {
+      nonce: Buffer.from(`${Date.now()}-${Math.random()}`).toString("hex").slice(0, 32),
+      timestampMs: Date.now(),
+    };
+  }
+
   function probePeer(peer) {
     return new Promise((resolve) => {
       const startedAt = Date.now();
       let endpoint;
+      const attestationChallenge = createAttestationChallenge();
+      const challengeHeader = Buffer.from(JSON.stringify(attestationChallenge), "utf8").toString("base64");
 
       try {
         endpoint = new URL("/health", peer.url);
@@ -49,6 +59,7 @@ function createPeerHeartbeat(options = {}) {
           method: "GET",
           headers: {
             accept: "application/json",
+            "x-openclaw-attestation-challenge": challengeHeader,
           },
         },
         (res) => {
@@ -89,6 +100,24 @@ function createPeerHeartbeat(options = {}) {
                         ? parsed.expected_execution_config_version
                         : undefined,
                     nodeId: typeof parsed.node_id === "string" ? parsed.node_id : undefined,
+                    attestationEvidence:
+                      parsed.attestation_evidence && typeof parsed.attestation_evidence === "object"
+                        ? parsed.attestation_evidence
+                        : undefined,
+                    attestationTrusted:
+                      typeof parsed.attestation_trusted === "boolean" ? parsed.attestation_trusted : undefined,
+                    attestationFailureReason:
+                      typeof parsed.attestation_failure_reason === "string"
+                        ? parsed.attestation_failure_reason
+                        : undefined,
+                    attestationEvidenceHash:
+                      typeof parsed.attestation_evidence_hash === "string"
+                        ? parsed.attestation_evidence_hash
+                        : undefined,
+                    attestationVerifiedAt:
+                      Number.isFinite(Number(parsed.attestation_verified_at))
+                        ? Number(parsed.attestation_verified_at)
+                        : undefined,
                   };
                 }
               } catch {
@@ -101,6 +130,7 @@ function createPeerHeartbeat(options = {}) {
               latencyMs,
               timestamp: Date.now(),
               metadata,
+              attestationChallenge,
             });
           });
         },
@@ -162,7 +192,64 @@ function createPeerHeartbeat(options = {}) {
               ? result.metadata.expectedExecutionConfigVersion
               : undefined,
           nodeId: result && result.metadata && typeof result.metadata.nodeId === "string" ? result.metadata.nodeId : undefined,
+          attestationTrusted:
+            result && result.metadata && typeof result.metadata.attestationTrusted === "boolean"
+              ? result.metadata.attestationTrusted
+              : undefined,
+          attestationFailureReason:
+            result && result.metadata && typeof result.metadata.attestationFailureReason === "string"
+              ? result.metadata.attestationFailureReason
+              : undefined,
+          attestationEvidenceHash:
+            result && result.metadata && typeof result.metadata.attestationEvidenceHash === "string"
+              ? result.metadata.attestationEvidenceHash
+              : undefined,
+          attestationVerifiedAt:
+            result && result.metadata && Number.isFinite(Number(result.metadata.attestationVerifiedAt))
+              ? Number(result.metadata.attestationVerifiedAt)
+              : undefined,
         });
+
+        if (
+          attestationVerifier &&
+          result &&
+          result.metadata &&
+          result.metadata.attestationEvidence &&
+          typeof result.metadata.attestationEvidence === "object"
+        ) {
+          let verification;
+          try {
+            verification = attestationVerifier({
+              peer,
+              challenge: result.attestationChallenge || {},
+              evidence: result.metadata.attestationEvidence,
+              metadata: result.metadata,
+            });
+          } catch (error) {
+            verification = {
+              ok: false,
+              code: "WORKLOAD_ATTESTATION_NOT_TRUSTED",
+              details: {
+                reason: error && error.message ? error.message : String(error),
+              },
+            };
+          }
+
+          const details = verification && verification.details && typeof verification.details === "object" ? verification.details : {};
+          peerRegistry.updatePeerHealth(peer.peerId, {
+            attestationTrusted: verification && verification.ok === true,
+            attestationFailureReason:
+              verification && verification.ok === false && typeof verification.code === "string"
+                ? verification.code
+                : "",
+            attestationEvidenceHash:
+              details && typeof details.evidenceHash === "string"
+                ? details.evidenceHash
+                : result.metadata.attestationEvidenceHash,
+            attestationVerifiedAt: Date.now(),
+            attestationStickyUntrusted: verification && verification.ok === false,
+          });
+        }
       }),
     );
   }

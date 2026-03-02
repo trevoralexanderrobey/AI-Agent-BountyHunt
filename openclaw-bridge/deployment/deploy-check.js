@@ -47,6 +47,14 @@ const REQUIRED_PHASE24_FILES = [
   path.resolve(__dirname, "..", "scripts", "verify-workload-manifest.ts"),
   path.resolve(__dirname, "..", "scripts", "validate-phase24.ts"),
 ];
+const REQUIRED_PHASE25_FILES = [
+  path.resolve(__dirname, "..", "src", "security", "workload-attestation.ts"),
+  path.resolve(__dirname, "..", "security", "workload-attestation.js"),
+  path.resolve(__dirname, "..", "security", "workload-attestation-reference.json"),
+  path.resolve(__dirname, "..", "security", "workload-attestation-reference.hash"),
+  path.resolve(__dirname, "..", "scripts", "verify-workload-attestation.ts"),
+  path.resolve(__dirname, "..", "scripts", "validate-phase25.ts"),
+];
 
 function normalizeString(value) {
   return typeof value === "string" ? value.trim() : "";
@@ -208,6 +216,17 @@ async function runDeployCheck(options = {}) {
     });
   }
 
+  const phase25AttestationCheck = checkRequiredAbsoluteFiles(REQUIRED_PHASE25_FILES);
+  if (phase25AttestationCheck.missing.length > 0) {
+    errors.push({
+      code: "PHASE25_ATTESTATION_GOVERNANCE_MISSING",
+      message: "One or more Phase 25 attestation governance files are missing or empty",
+      details: {
+        missing: phase25AttestationCheck.missing,
+      },
+    });
+  }
+
   const result = {
     ready_for_production: errors.length === 0,
     warnings,
@@ -250,6 +269,11 @@ async function runDeployCheck(options = {}) {
         required: REQUIRED_PHASE24_FILES,
         present: phase24WorkloadCheck.present,
         missing: phase24WorkloadCheck.missing,
+      },
+      phase25Attestation: {
+        required: REQUIRED_PHASE25_FILES,
+        present: phase25AttestationCheck.present,
+        missing: phase25AttestationCheck.missing,
       },
     },
   };

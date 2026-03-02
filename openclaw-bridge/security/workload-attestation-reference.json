@@ -1,0 +1,7 @@
+{
+  "referenceVersion": 1,
+  "executionPolicyHash": "1cc42dc491b60ee6edab0d06232b9f548b68432ee84005c49983abd044775599",
+  "secretManifestHash": "24d0f01bfb6206f1da0afd170f4cbbf2ba22d7a27e72389499ae922bed64fdc8",
+  "workloadManifestHash": "18a01a1729177ca3ccf9da30ea701e53faaffff3617dcb965e9a8062d5ca1671",
+  "evidenceTtlMs": 120000
+}

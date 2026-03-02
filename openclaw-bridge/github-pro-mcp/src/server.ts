@@ -111,6 +111,11 @@ function createRouter(): { router: ExecutionRouterLike | null; workspaceRoot: st
         workloadIntegrityEnabled:
           parseBoolean(process.env.WORKLOAD_INTEGRITY_ENABLED, false) ||
           String(process.env.NODE_ENV || "").trim().toLowerCase() === "production",
+        workloadAttestationEnabled:
+          parseBoolean(process.env.WORKLOAD_ATTESTATION_ENABLED, false) ||
+          String(process.env.NODE_ENV || "").trim().toLowerCase() === "production",
+        attestationReferencePath: String(process.env.WORKLOAD_ATTESTATION_REFERENCE_PATH || "").trim(),
+        attestationReferenceExpectedHash: String(process.env.WORKLOAD_ATTESTATION_REFERENCE_EXPECTED_HASH || "").trim().toLowerCase(),
         legacyVisibleToolsByRole: {
           supervisor: legacyTools,
           internal: legacyTools,

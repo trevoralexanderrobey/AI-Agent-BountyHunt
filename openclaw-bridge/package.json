@@ -30,7 +30,10 @@
     "execution:test": "npm run bridge:build && node --test tests/execution/*.test.js",
     "workload:verify": "npm run bridge:build && node dist/scripts/verify-workload-manifest.js",
     "phase24:validate": "npm run bridge:build && node dist/scripts/validate-phase24.js",
-    "ci:phase24-governance": "npm run workload:verify && npm run phase24:validate"
+    "ci:phase24-governance": "npm run workload:verify && npm run phase24:validate",
+    "attestation:verify": "npm run bridge:build && node dist/scripts/verify-workload-attestation.js",
+    "phase25:validate": "npm run bridge:build && node dist/scripts/validate-phase25.js",
+    "ci:phase25-governance": "npm run attestation:verify && npm run phase25:validate"
   },
   "version": "0.1.0"
 }
