@@ -1,10 +1,18 @@
 const test = require("node:test");
 const assert = require("node:assert/strict");
 const fs = require("node:fs/promises");
+const fsSync = require("node:fs");
+const crypto = require("node:crypto");
 const os = require("node:os");
 const path = require("node:path");
 
 const { createExecutionRouter } = require("../../src/core/execution-router.js");
+const { computeWorkloadManifestHash } = require("../../security/workload-manifest.js");
+
+const DEFAULT_WORKLOAD_MANIFEST_PATH = path.resolve(__dirname, "../../security/workload-manifest.json");
+const DEFAULT_WORKLOAD_MANIFEST_HASH = computeWorkloadManifestHash(
+  JSON.parse(fsSync.readFileSync(DEFAULT_WORKLOAD_MANIFEST_PATH, "utf8")),
+);
 
 async function makeWorkspace() {
   const workspaceRoot = await fs.mkdtemp(path.join(os.tmpdir(), "openclaw-router-"));
@@ -73,6 +81,23 @@ async function makeRegistry(workspaceRoot) {
     },
   ]);
   return registryPath;
+}
+
+async function withProductionIntegrityEnv(fn) {
+  const previousNodeEnv = process.env.NODE_ENV;
+  const previousMode = fsSync.statSync(DEFAULT_WORKLOAD_MANIFEST_PATH).mode & 0o777;
+  fsSync.chmodSync(DEFAULT_WORKLOAD_MANIFEST_PATH, 0o444);
+  process.env.NODE_ENV = "production";
+  try {
+    await fn();
+  } finally {
+    fsSync.chmodSync(DEFAULT_WORKLOAD_MANIFEST_PATH, previousMode);
+    if (typeof previousNodeEnv === "undefined") {
+      delete process.env.NODE_ENV;
+    } else {
+      process.env.NODE_ENV = previousNodeEnv;
+    }
+  }
 }
 
 function makeRouter(workspaceRoot, registryPath, overrides = {}) {
@@ -596,4 +621,93 @@ test("role resolution is per-request and does not trust replayed invalid tokens"
     authHeader: "Bearer supervisor-token-invalid",
   });
   assert.equal(replayedInvalidRole, "anonymous");
+});
+
+test("execution router refuses execution when workload integrity is not verified", { concurrency: false }, async () => {
+  await withProductionIntegrityEnv(async () => {
+    const workspaceRoot = await makeWorkspace();
+    const registryPath = await makeRegistry(workspaceRoot);
+    await writeTokenConfig(workspaceRoot, "supervisor-token");
+    await fs.writeFile(path.join(workspaceRoot, "inside.txt"), "hello", "utf8");
+
+    const router = makeRouter(workspaceRoot, registryPath, {
+      workloadIntegrityEnabled: true,
+      workloadManifestExpectedHash: DEFAULT_WORKLOAD_MANIFEST_HASH,
+    });
+
+    const result = await router.execute("supervisor.read_file", { path: "inside.txt" }, {
+      requestId: "phase24-block",
+      workspaceRoot,
+      source: "http_api",
+      caller: "phase24-test",
+      authHeader: "Bearer supervisor-token",
+    });
+
+    assert.equal(result.ok, false);
+    assert.equal(result.code, "WORKLOAD_NOT_VERIFIED");
+  });
+});
+
+test("integrity block prevents legacy fallback bypass paths", { concurrency: false }, async () => {
+  await withProductionIntegrityEnv(async () => {
+    const workspaceRoot = await makeWorkspace();
+    const registryPath = await makeRegistry(workspaceRoot);
+    await writeTokenConfig(workspaceRoot, "supervisor-token");
+
+    const router = makeRouter(workspaceRoot, registryPath, {
+      workloadIntegrityEnabled: true,
+      workloadManifestExpectedHash: DEFAULT_WORKLOAD_MANIFEST_HASH,
+    });
+
+    let legacyCalled = false;
+    const result = await router.execute("legacy.fake_tool", { test: true }, {
+      requestId: "phase24-legacy-block",
+      workspaceRoot,
+      source: "http_api",
+      caller: "phase24-test",
+      authHeader: "Bearer supervisor-token",
+      legacyExecute: async () => {
+        legacyCalled = true;
+        return { ok: true };
+      },
+    });
+
+    assert.equal(result.ok, false);
+    assert.equal(result.code, "WORKLOAD_NOT_VERIFIED");
+    assert.equal(legacyCalled, false);
+  });
+});
+
+test("integrity enforcement order is auth then integrity then capability", { concurrency: false }, async () => {
+  await withProductionIntegrityEnv(async () => {
+    const workspaceRoot = await makeWorkspace();
+    const registryPath = await makeRegistry(workspaceRoot);
+    await writeTokenConfig(workspaceRoot, "supervisor-token");
+
+    const router = makeRouter(workspaceRoot, registryPath, {
+      supervisorMode: true,
+      supervisorAuthPhase: "strict",
+      workloadIntegrityEnabled: true,
+      workloadManifestExpectedHash: DEFAULT_WORKLOAD_MANIFEST_HASH,
+    });
+
+    const anonymous = await router.execute("supervisor.read_file", { path: "inside.txt" }, {
+      requestId: "phase24-order-anon",
+      workspaceRoot,
+      source: "http_api",
+      caller: "phase24-test",
+    });
+    assert.equal(anonymous.ok, false);
+    assert.equal(anonymous.code, "UNAUTHORIZED");
+
+    const integrityBeforeArgs = await router.execute("supervisor.read_file", {}, {
+      requestId: "phase24-order-integrity",
+      workspaceRoot,
+      source: "http_api",
+      caller: "phase24-test",
+      authHeader: "Bearer supervisor-token",
+    });
+    assert.equal(integrityBeforeArgs.ok, false);
+    assert.equal(integrityBeforeArgs.code, "WORKLOAD_NOT_VERIFIED");
+  });
 });

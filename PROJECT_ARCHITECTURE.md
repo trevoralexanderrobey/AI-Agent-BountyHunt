@@ -4,9 +4,12 @@
 
 The AI-Agent-BountyHunt project is a sophisticated local AI agent runtime stack that bridges GitHub Pro Agent Mode with OpenClaw for autonomous security research and bounty hunting workflows. It integrates multiple AI models, security tools (Burp Suite, LLDB), and a job queue system to enable intelligent, privileged task execution.
 
-**Current Date**: February 22, 2026
+**Current Date**: March 2, 2026
 **Project Root**: `/Users/trevorrobey/AI-Agent-BountyHunt`
 **Primary Maintainer**: Trevor Robey
+**Canonical Branch**: `main`
+**Architecture Checkpoint Tag**: `supervisor-kernel-v1`
+**Branch Normalization Date**: March 2, 2026
 
 ---
 
@@ -58,6 +61,8 @@ The AI-Agent-BountyHunt project is a sophisticated local AI agent runtime stack 
 │  • LLDB (via triage_bridge.py)                                  │
 └─────────────────────────────────────────────────────────────────┘
 ```
+
+Policy enforcement is centralized in `openclaw-bridge/src/core/execution-router.ts`, which acts as the canonical policy enforcement point for tool execution, role checks, sandboxing, and audit events.
 
 ---
 
@@ -790,8 +795,11 @@ Bridge / Director Agent
 #### Capabilities
 - **Canonical Routing**: Delegates all HTTP, Bridge, and MCP execution calls through a single validated router context.
 - **Strict Role Boundaries**: Explicit roles (`supervisor`, `internal`, `admin`, `anonymous`) mapping to capability matrices.
+- **Deny by Default**: Unknown roles/tools are denied, and strict mode rejects external legacy fallbacks.
 - **Workspace Sandboxing**: Prevents path traversal and strictly scopes tool resources within the explicit `workspaceRoot`.
 - **Queued Audit Sink**: Asynchronous file-backed logging with fast appends and robust rotation.
+- **Role-Aware Visibility**: `tools/list` responses are filtered by resolved role and strict-mode policy.
+- **Import Boundary Guard**: Runtime supervisor registry imports are constrained to `execution-router`.
 
 ---
 

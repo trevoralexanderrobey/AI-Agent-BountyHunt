@@ -12,6 +12,7 @@ export interface SupervisorAuditRecord {
   role?: string;
   source?: string;
   code?: string;
+  details?: Record<string, unknown>;
 }
 
 export interface AuditLoggerStats {

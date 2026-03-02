@@ -37,6 +37,16 @@ const REQUIRED_PHASE23_FILES = [
   path.resolve(__dirname, "..", "security", "verify-secret-manifest.js"),
   path.resolve(__dirname, "..", "security", "validate-phase23.js"),
 ];
+const REQUIRED_PHASE24_FILES = [
+  path.resolve(__dirname, "..", "src", "security", "workload-manifest.ts"),
+  path.resolve(__dirname, "..", "src", "security", "workload-integrity.ts"),
+  path.resolve(__dirname, "..", "security", "workload-manifest.js"),
+  path.resolve(__dirname, "..", "security", "workload-integrity.js"),
+  path.resolve(__dirname, "..", "security", "workload-manifest.json"),
+  path.resolve(__dirname, "..", "security", "workload-manifest.hash"),
+  path.resolve(__dirname, "..", "scripts", "verify-workload-manifest.ts"),
+  path.resolve(__dirname, "..", "scripts", "validate-phase24.ts"),
+];
 
 function normalizeString(value) {
   return typeof value === "string" ? value.trim() : "";
@@ -187,6 +197,17 @@ async function runDeployCheck(options = {}) {
     });
   }
 
+  const phase24WorkloadCheck = checkRequiredAbsoluteFiles(REQUIRED_PHASE24_FILES);
+  if (phase24WorkloadCheck.missing.length > 0) {
+    errors.push({
+      code: "PHASE24_WORKLOAD_GOVERNANCE_MISSING",
+      message: "One or more Phase 24 workload governance files are missing or empty",
+      details: {
+        missing: phase24WorkloadCheck.missing,
+      },
+    });
+  }
+
   const result = {
     ready_for_production: errors.length === 0,
     warnings,
@@ -224,6 +245,11 @@ async function runDeployCheck(options = {}) {
         required: REQUIRED_PHASE23_FILES,
         present: phase23SecretCheck.present,
         missing: phase23SecretCheck.missing,
+      },
+      phase24Workload: {
+        required: REQUIRED_PHASE24_FILES,
+        present: phase24WorkloadCheck.present,
+        missing: phase24WorkloadCheck.missing,
       },
     },
   };

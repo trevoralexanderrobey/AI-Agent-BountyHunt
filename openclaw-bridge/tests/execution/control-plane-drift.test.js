@@ -4,7 +4,7 @@ const path = require("node:path");
 const fs = require("node:fs");
 const { execSync } = require("node:child_process");
 
-test("phase 23 does not modify cluster-manager control-plane file", () => {
+test("phase 24 does not modify cluster-manager control-plane file", () => {
   const repoRoot = path.resolve(__dirname, "../../..");
   const output = execSync(`git -C ${JSON.stringify(repoRoot)} diff --name-only`, {
     encoding: "utf8",

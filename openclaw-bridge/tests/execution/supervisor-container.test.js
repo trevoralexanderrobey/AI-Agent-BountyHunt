@@ -1,8 +1,14 @@
 const test = require("node:test");
 const assert = require("node:assert/strict");
+const fs = require("node:fs/promises");
+const fsSync = require("node:fs");
+const os = require("node:os");
+const path = require("node:path");
 
 const { createSupervisorV1 } = require("../../supervisor/supervisor-v1.js");
 const { BaseToolAdapter } = require("../../tools/base-adapter.js");
+const { createExecutionRouter } = require("../../src/core/execution-router.js");
+const { computeWorkloadManifestHash } = require("../../security/workload-manifest.js");
 
 class DummySupervisorAdapter extends BaseToolAdapter {
   constructor() {
@@ -885,5 +891,128 @@ test("supervisor surfaces centralized quota rejection before execution dispatch"
     assert.equal(runtimeCalls, 0);
   } finally {
     await supervisor.shutdown();
+  }
+});
+
+test("supervisor status metadata includes workloadManifestHash", async () => {
+  const expectedWorkloadHash = "9999999999999999999999999999999999999999999999999999999999999999";
+  const supervisor = createSupervisorV1({
+    execution: {
+      executionMode: "host",
+      containerRuntimeEnabled: false,
+      backend: "mock",
+    },
+    workloadMetadataProvider: () => ({
+      workloadManifestHash: expectedWorkloadHash,
+    }),
+  });
+
+  try {
+    const status = await supervisor.getStatus();
+    assert.equal(status.ok, true);
+    assert.equal(status.executionMetadata.workloadManifestHash, expectedWorkloadHash);
+  } finally {
+    await supervisor.shutdown();
+  }
+});
+
+test("federation workload manifest mismatch propagates to router integrity block", { concurrency: false }, async () => {
+  const manifestPath = path.resolve(__dirname, "../../security/workload-manifest.json");
+  const manifestHash = computeWorkloadManifestHash(JSON.parse(fsSync.readFileSync(manifestPath, "utf8")));
+  const workspaceRoot = await fs.mkdtemp(path.join(os.tmpdir(), "openclaw-phase24-supervisor-"));
+  const registryPath = path.join(workspaceRoot, "supervisor", "supervisor-registry.json");
+  const tokenPath = path.join(workspaceRoot, ".cline", "cline_mcp_settings.json");
+
+  await fs.mkdir(path.dirname(registryPath), { recursive: true });
+  await fs.mkdir(path.dirname(tokenPath), { recursive: true });
+  await fs.mkdir(path.join(workspaceRoot, ".openclaw"), { recursive: true });
+  await fs.writeFile(
+    registryPath,
+    `${JSON.stringify(
+      [
+        {
+          name: "phase24.test.tool",
+          description: "phase24 tool",
+          inputSchema: { type: "object", properties: {}, additionalProperties: false },
+          mutationClass: "read",
+          loggingLevel: "info",
+          roles: ["supervisor", "internal", "admin"],
+        },
+      ],
+      null,
+      2,
+    )}\n`,
+    "utf8",
+  );
+  await fs.writeFile(tokenPath, `${JSON.stringify({ token: "phase24-token" }, null, 2)}\n`, { encoding: "utf8", mode: 0o600 });
+  await fs.chmod(tokenPath, 0o600);
+
+  const previousNodeEnv = process.env.NODE_ENV;
+  const previousMode = fsSync.statSync(manifestPath).mode & 0o777;
+  fsSync.chmodSync(manifestPath, 0o444);
+  process.env.NODE_ENV = "production";
+
+  const supervisor = createSupervisorV1({
+    execution: {
+      executionMode: "host",
+      containerRuntimeEnabled: false,
+      backend: "mock",
+      workloadManifestExpectedHash: manifestHash,
+    },
+    federation: {
+      enabled: true,
+      peers: [
+        {
+          peerId: "node-b",
+          url: "http://127.0.0.1:65530",
+          authToken: "token-b",
+          status: "UP",
+          capabilities: ["*"],
+          executionPolicyHash: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          secretManifestHash: "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+          workloadManifestHash: "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+        },
+      ],
+    },
+  });
+
+  try {
+    const router = createExecutionRouter({
+      workspaceRoot,
+      registryPath,
+      auditLogPath: path.join(workspaceRoot, ".openclaw", "audit.log"),
+      supervisorMode: false,
+      workloadIntegrityEnabled: true,
+      workloadManifestExpectedHash: manifestHash,
+      integrityMetadataProvider: () => ({
+        local: supervisor.getExecutionMetadata(),
+        peers: supervisor.getExecutionPeers(),
+      }),
+      workloadRuntimeDescriptorResolver: () => ({
+        adapterPath: path.resolve(workspaceRoot, "noop-adapter.js"),
+        entrypointPath: path.resolve(workspaceRoot, "noop-entrypoint.js"),
+        runtimeConfig: {},
+        runtimeMutated: false,
+      }),
+    });
+
+    const result = await router.execute("phase24.test.tool", {}, {
+      requestId: "phase24-peer-mismatch",
+      workspaceRoot,
+      source: "http_api",
+      caller: "phase24-test",
+      authHeader: "Bearer phase24-token",
+    });
+
+    assert.equal(result.ok, false);
+    assert.equal(result.code, "WORKLOAD_MANIFEST_MISMATCH");
+  } finally {
+    await supervisor.shutdown();
+    fsSync.chmodSync(manifestPath, previousMode);
+    if (typeof previousNodeEnv === "undefined") {
+      delete process.env.NODE_ENV;
+    } else {
+      process.env.NODE_ENV = previousNodeEnv;
+    }
   }
 });

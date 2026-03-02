@@ -603,6 +603,19 @@ function resolveHttpErrorStatus(error: unknown): number {
   if (code === "PATH_OUTSIDE_WORKSPACE") return 403;
   if (code === "INVALID_REQUEST" || code === "INVALID_ARGUMENT") return 400;
   if (code === "RATE_LIMIT_EXCEEDED" || code === "MAX_CONCURRENT_EXECUTIONS_EXCEEDED" || code === "SOURCE_CONCURRENCY_LIMIT_EXCEEDED") return 429;
+  if (
+    code === "WORKLOAD_NOT_VERIFIED" ||
+    code === "WORKLOAD_HASH_MISMATCH" ||
+    code === "WORKLOAD_IMAGE_MISMATCH" ||
+    code === "WORKLOAD_MANIFEST_MISMATCH" ||
+    code === "WORKLOAD_MUTATION_DETECTED" ||
+    code === "WORKLOAD_MANIFEST_SCHEMA_INVALID" ||
+    code === "WORKLOAD_MANIFEST_MISSING" ||
+    code === "WORKLOAD_MANIFEST_PATH_OVERRIDE_FORBIDDEN" ||
+    code === "WORKLOAD_MANIFEST_WRITABLE_IN_PRODUCTION"
+  ) {
+    return 503;
+  }
   const message = error instanceof Error ? error.message.toLowerCase() : String(error).toLowerCase();
   if (message.includes("out of scope")) return 403;
   if (message.includes("bioniclink")) return 502;
@@ -1058,6 +1071,11 @@ async function main(): Promise<void> {
     registryPath: path.resolve(process.cwd(), "supervisor", "supervisor-registry.json"),
     auditLogPath: path.join(workspaceRoot, ".openclaw", "audit.log"),
     auditMaxBytes: 10 * 1024 * 1024,
+    workloadManifestPath: String(process.env.WORKLOAD_MANIFEST_PATH || "").trim(),
+    workloadManifestExpectedHash: String(process.env.WORKLOAD_MANIFEST_EXPECTED_HASH || "").trim().toLowerCase(),
+    workloadIntegrityEnabled:
+      String(process.env.WORKLOAD_INTEGRITY_ENABLED || "").trim().toLowerCase() === "true" ||
+      String(process.env.NODE_ENV || "").trim().toLowerCase() === "production",
     legacyVisibleToolsByRole: {
       supervisor: ["bridge_health", "bridge_list_jobs", "bridge_job_status", "bridge_submit_job", "bridge_cancel_job", "bridge_execute_tool"],
       internal: BRIDGE_MCP_TOOLS.map((tool) => tool.name),

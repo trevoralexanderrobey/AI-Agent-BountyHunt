@@ -5,6 +5,13 @@ import path from "node:path";
 import { promisify } from "node:util";
 import { AsyncRotatingAuditLogger, AuditLoggerStats, hashArgs } from "./audit-log";
 import { assertPathInsideWorkspace, canonicalizeWorkspaceRoot } from "./workspace-guard";
+import {
+  WorkloadIntegrityContext,
+  WorkloadIntegrityVerifier,
+  WorkloadRuntimeDescriptor,
+  createWorkloadIntegrityVerifier,
+} from "../security/workload-integrity";
+import { resolveDefaultWorkloadManifestPath } from "../security/workload-manifest";
 
 const execFileAsync = promisify(execFile);
 
@@ -46,6 +53,21 @@ export interface ExecutionRouter {
   listTools(context: ExecutionContext): Promise<Array<ExecutionToolDescriptor>>;
   resolveRole(context: ExecutionContext): Promise<ExecutionRole>;
   getMetrics(): ExecutionRouterMetrics;
+  getWorkloadIntegrityMetadata(): {
+    nodeId: string;
+    workloadManifestHash: string;
+    workloadManifestLoaded: boolean;
+    startupVerified: boolean;
+    blocked: boolean;
+    blockedReason: string;
+  };
+  evaluateWorkloadPeerPosture(peers?: Array<Record<string, unknown>>): {
+    ok: boolean;
+    status: "aligned" | "mismatch" | "not_evaluated";
+    criticalMismatches: Array<Record<string, unknown>>;
+    warnings: Array<Record<string, unknown>>;
+    timestamp: number;
+  };
 }
 
 export interface ExecutionToolDescriptor {
@@ -94,6 +116,17 @@ export interface ExecutionRouterOptions {
   rgTimeoutMs?: number;
   nodeTimeoutMs?: number;
   taskRunnerTimeoutMs?: number;
+  workloadManifestPath?: string;
+  workloadManifestExpectedHash?: string;
+  workloadIntegrityEnabled?: boolean;
+  workloadRuntimeDescriptorResolver?: (
+    tool: string,
+    context: WorkloadIntegrityContext,
+  ) => WorkloadRuntimeDescriptor | null;
+  integrityMetadataProvider?: (context: ExecutionContext) => {
+    local?: Record<string, unknown>;
+    peers?: Array<Record<string, unknown>>;
+  };
   onHighRiskToolEvent?: (event: {
     requestId: string;
     tool: string;
@@ -170,6 +203,17 @@ const SAFE_ERROR_MESSAGES: Record<string, string> = {
   TASK_RUNNER_FAILED: "Task runner execution failed",
   SECURITY_AUDIT_FAILED: "Security audit failed",
   SUPERVISOR_TOOL_FAILED: "Tool execution failed",
+  EXECUTION_CONFIG_MISMATCH: "Execution policy authority mismatch",
+  SECRET_MANIFEST_MISMATCH: "Secret authority mismatch",
+  WORKLOAD_NOT_VERIFIED: "Execution integrity verification failed",
+  WORKLOAD_HASH_MISMATCH: "Execution integrity verification failed",
+  WORKLOAD_IMAGE_MISMATCH: "Execution integrity verification failed",
+  WORKLOAD_MANIFEST_MISMATCH: "Execution integrity verification failed",
+  WORKLOAD_MUTATION_DETECTED: "Execution integrity verification failed",
+  WORKLOAD_MANIFEST_SCHEMA_INVALID: "Execution integrity verification failed",
+  WORKLOAD_MANIFEST_MISSING: "Execution integrity verification failed",
+  WORKLOAD_MANIFEST_PATH_OVERRIDE_FORBIDDEN: "Execution integrity verification failed",
+  WORKLOAD_MANIFEST_WRITABLE_IN_PRODUCTION: "Execution integrity verification failed",
 };
 
 const COUNTER_ALIASES: Record<string, string[]> = {
@@ -198,6 +242,10 @@ function parsePositiveInt(value: unknown, fallback: number): number {
     return fallback;
   }
   return parsed;
+}
+
+function normalizeString(value: unknown): string {
+  return typeof value === "string" ? value.trim() : "";
 }
 
 function parseBearerToken(authHeader: string | undefined): string {
@@ -595,6 +643,19 @@ export function createExecutionRouter(options: ExecutionRouterOptions): Executio
       ? options.supervisorInternalToken
       : String(process.env.SUPERVISOR_INTERNAL_TOKEN || "").trim();
   const registryPath = options.registryPath || path.resolve(process.cwd(), "supervisor", "supervisor-registry.json");
+  const production = normalizeString(process.env.NODE_ENV).toLowerCase() === "production";
+  const workloadIntegrityEnabledConfigured =
+    typeof options.workloadIntegrityEnabled === "boolean"
+      ? options.workloadIntegrityEnabled
+      : parseBoolean(process.env.WORKLOAD_INTEGRITY_ENABLED, production);
+  const workloadIntegrityEnabled = production ? true : workloadIntegrityEnabledConfigured;
+  const workloadManifestPath =
+    typeof options.workloadManifestPath === "string"
+      ? options.workloadManifestPath
+      : normalizeString(process.env.WORKLOAD_MANIFEST_PATH);
+  const workloadManifestExpectedHash = normalizeString(
+    options.workloadManifestExpectedHash || process.env.WORKLOAD_MANIFEST_EXPECTED_HASH,
+  ).toLowerCase();
 
   const maxPatchBytes = parsePositiveInt(options.maxPatchBytes, DEFAULT_MAX_PATCH_BYTES);
   const maxWriteFileBytes = parsePositiveInt(options.maxWriteFileBytes, DEFAULT_MAX_WRITE_FILE_BYTES);
@@ -639,11 +700,149 @@ export function createExecutionRouter(options: ExecutionRouterOptions): Executio
 
   const supervisorHandlers = options.supervisorHandlers || {};
   const legacyVisibleToolsByRole = options.legacyVisibleToolsByRole || {};
+  const integrityMetadataProvider =
+    typeof options.integrityMetadataProvider === "function" ? options.integrityMetadataProvider : null;
 
   let registryPromise: Promise<SupervisorToolDefinition[]> | null = null;
   let tokenCache: TokenCache | null = null;
   const sourceExecutionState = new Map<string, SourceExecutionState>();
   let activeExecutionCount = 0;
+
+  function resolveRuntimeImageDigest(context: { transportMetadata?: Record<string, unknown> }): string {
+    const transportMetadata = normalizeRecord(context.transportMetadata);
+    const direct = normalizeString(transportMetadata.containerImageDigest || transportMetadata.container_image_digest);
+    if (direct) {
+      return direct;
+    }
+    return normalizeString(transportMetadata.executionImageDigest || transportMetadata.execution_image_digest);
+  }
+
+  function hasRuntimeMutationAttempt(context: { transportMetadata?: Record<string, unknown> }): boolean {
+    const transportMetadata = normalizeRecord(context.transportMetadata);
+    const overrideRequested =
+      transportMetadata.workload_hash_override === true ||
+      transportMetadata.workloadHashOverride === true ||
+      transportMetadata.workload_manifest_override === true ||
+      transportMetadata.workloadManifestOverride === true;
+    if (overrideRequested) {
+      return true;
+    }
+    const runtimeOverrideFlag =
+      parseBoolean(process.env.WORKLOAD_HASH_OVERRIDE, false) ||
+      parseBoolean(process.env.WORKLOAD_INTEGRITY_BYPASS, false) ||
+      parseBoolean(process.env.WORKLOAD_INTEGRITY_ALLOW_OVERRIDE, false);
+    if (runtimeOverrideFlag) {
+      return true;
+    }
+    if (!production) {
+      return false;
+    }
+    const configuredPath = normalizeString(process.env.WORKLOAD_MANIFEST_PATH);
+    if (configuredPath && path.resolve(configuredPath) !== resolveDefaultWorkloadManifestPath()) {
+      return true;
+    }
+    return false;
+  }
+
+  const defaultRuntimeDescriptorResolver = (
+    tool: string,
+    context: WorkloadIntegrityContext,
+  ): WorkloadRuntimeDescriptor | null => {
+    const normalizedTool = normalizeToolName(tool);
+    if (!normalizedTool) {
+      return null;
+    }
+    const sourcePath = path.resolve(__dirname, "execution-router.js");
+    return {
+      adapterPath: sourcePath,
+      entrypointPath: sourcePath,
+      runtimeConfig: {
+        tool: normalizedTool,
+        supervisorMode,
+        supervisorAuthPhase,
+        mutationGuardEnabled,
+      },
+      containerImageDigest: resolveRuntimeImageDigest({
+        transportMetadata: normalizeRecord(context.transportMetadata),
+      }),
+      runtimeMutated: hasRuntimeMutationAttempt({
+        transportMetadata: normalizeRecord(context.transportMetadata),
+      }),
+    };
+  };
+
+  const workloadRuntimeDescriptorResolver =
+    typeof options.workloadRuntimeDescriptorResolver === "function"
+      ? options.workloadRuntimeDescriptorResolver
+      : defaultRuntimeDescriptorResolver;
+
+  function resolveIntegrityMetadata(context: ExecutionContext): {
+    local: Record<string, unknown>;
+    peers: Array<Record<string, unknown>>;
+  } {
+    const fromProvider = integrityMetadataProvider ? integrityMetadataProvider(context) : {};
+    const local = normalizeRecord(
+      normalizeRecord(fromProvider).local || normalizeRecord(context.transportMetadata).executionMetadata || {},
+    );
+    const peersRaw = normalizeRecord(fromProvider).peers;
+    const peers = Array.isArray(peersRaw)
+      ? peersRaw.filter((peer) => peer && typeof peer === "object").map((peer) => normalizeRecord(peer))
+      : [];
+    return { local, peers };
+  }
+
+  const workloadIntegrityVerifier: WorkloadIntegrityVerifier | null = workloadIntegrityEnabled
+    ? createWorkloadIntegrityVerifier({
+        production,
+        nodeId: normalizeString(process.env.SUPERVISOR_NODE_ID) || "node-unknown",
+        manifestPath: workloadManifestPath || undefined,
+        expectedHash: workloadManifestExpectedHash || undefined,
+        allowProductionPathOverride: false,
+        runtimeDescriptorResolver: workloadRuntimeDescriptorResolver,
+        metrics: {
+          increment: (name, labels = {}) => {
+            incrementCounter(name, 1);
+            if (Object.keys(labels).length > 0) {
+              const stableLabel = JSON.stringify(labels, Object.keys(labels).sort());
+              incrementCounter(`${name}:${stableLabel}`, 1);
+            }
+          },
+          gauge: (name, value) => {
+            counters[name] = Number(value) || 0;
+          },
+        },
+        auditLog: (event) => {
+          auditLogger.append({
+            requestId: "workload-integrity",
+            tool: normalizeString((event.details || {}).workloadID) || "workload-integrity",
+            caller: "workload_integrity",
+            timestamp: new Date().toISOString(),
+            argsHash: hashArgs(event.details || {}),
+            resultStatus: event.status === "error" ? "error" : "ok",
+            role: "internal",
+            source: "in_process",
+            code: event.code,
+            details: event.details,
+          });
+        },
+      })
+    : null;
+
+  if (workloadIntegrityVerifier) {
+    const startup = workloadIntegrityVerifier.initialize();
+    if (!startup.ok) {
+      incrementCounter("workload.attestation.failure", 1);
+      if (startup.code === "WORKLOAD_IMAGE_MISMATCH") {
+        incrementCounter("workload.image.mismatch", 1);
+      } else if (startup.code === "WORKLOAD_MANIFEST_MISMATCH") {
+        incrementCounter("workload.manifest.hash.mismatch", 1);
+      } else {
+        incrementCounter("workload.hash.mismatch", 1);
+      }
+    } else {
+      incrementCounter("workload.hash.verified", 1);
+    }
+  }
 
   async function getCanonicalWorkspaceRoot(): Promise<string> {
     return canonicalWorkspaceRootPromise;
@@ -1063,6 +1262,104 @@ export function createExecutionRouter(options: ExecutionRouterOptions): Executio
         };
       }
 
+      if (workloadIntegrityVerifier) {
+        const integrityMetadata = resolveIntegrityMetadata(context);
+        const localMetadata = integrityMetadata.local || {};
+        if (production) {
+          const localPolicyHash = normalizeString(
+            localMetadata.executionPolicyHash || localMetadata.execution_policy_hash || "",
+          ).toLowerCase();
+          const localSecretHash = normalizeString(
+            localMetadata.secretManifestHash || localMetadata.secret_manifest_hash || "",
+          ).toLowerCase();
+          const peerList = Array.isArray(integrityMetadata.peers) ? integrityMetadata.peers : [];
+
+          for (const peer of peerList) {
+            const peerStatus = normalizeString(peer.status).toUpperCase();
+            if (peerStatus && peerStatus !== "UP") {
+              continue;
+            }
+            const peerPolicyHash = normalizeString(peer.executionPolicyHash || peer.execution_policy_hash || "").toLowerCase();
+            const peerSecretHash = normalizeString(peer.secretManifestHash || peer.secret_manifest_hash || "").toLowerCase();
+
+            if (localPolicyHash && peerPolicyHash && localPolicyHash !== peerPolicyHash) {
+              incrementCounter("workload.integrity.block", 1);
+              return {
+                ok: false,
+                code: "EXECUTION_CONFIG_MISMATCH",
+                message: sanitizeMessageForClient("EXECUTION_CONFIG_MISMATCH"),
+              };
+            }
+            if (localSecretHash && peerSecretHash && localSecretHash !== peerSecretHash) {
+              incrementCounter("workload.integrity.block", 1);
+              return {
+                ok: false,
+                code: "SECRET_MANIFEST_MISMATCH",
+                message: sanitizeMessageForClient("SECRET_MANIFEST_MISMATCH"),
+              };
+            }
+          }
+        }
+
+        const peerSummary = workloadIntegrityVerifier.evaluatePeerWorkloadPosture(integrityMetadata.peers || []);
+        if (production && !peerSummary.ok) {
+          return {
+            ok: false,
+            code: "WORKLOAD_MANIFEST_MISMATCH",
+            message: sanitizeMessageForClient("WORKLOAD_MANIFEST_MISMATCH"),
+          };
+        }
+
+        const integrityTransportMetadata = {
+          ...normalizeRecord(context.transportMetadata),
+          execution_policy_hash: normalizeString(
+            localMetadata.executionPolicyHash || localMetadata.execution_policy_hash || "",
+          ).toLowerCase(),
+          secret_manifest_hash: normalizeString(
+            localMetadata.secretManifestHash || localMetadata.secret_manifest_hash || "",
+          ).toLowerCase(),
+          workload_manifest_hash: normalizeString(
+            localMetadata.workloadManifestHash || localMetadata.workload_manifest_hash || "",
+          ).toLowerCase(),
+        };
+
+        const verification = workloadIntegrityVerifier.verifyExecution({
+          tool: toolName,
+          context: {
+            requestId: context.requestId,
+            workspaceRoot: context.workspaceRoot,
+            source: context.source,
+            caller: context.caller,
+            transportMetadata: integrityTransportMetadata,
+          },
+        });
+
+        if (!verification.ok) {
+          if (!production) {
+            auditLogger.append({
+              requestId: context.requestId,
+              tool: toolName,
+              caller: context.caller,
+              timestamp: new Date().toISOString(),
+              argsHash: hashArgs(args),
+              resultStatus: "error",
+              role,
+              source: context.source,
+              code: verification.code || "WORKLOAD_NOT_VERIFIED",
+              details: verification.details,
+            });
+            incrementCounter("workload.integrity.warning", 1);
+          } else {
+            return {
+              ok: false,
+              code: verification.code || "WORKLOAD_NOT_VERIFIED",
+              message: sanitizeMessageForClient(verification.code || "WORKLOAD_NOT_VERIFIED", verification.message),
+            };
+          }
+        }
+
+      }
+
       const registry = await getRegistry();
       const definition = registry.find((entry) => entry.name === toolName);
 
@@ -1255,10 +1552,39 @@ export function createExecutionRouter(options: ExecutionRouterOptions): Executio
     };
   }
 
+  function getWorkloadIntegrityMetadata() {
+    if (!workloadIntegrityVerifier) {
+      return {
+        nodeId: normalizeString(process.env.SUPERVISOR_NODE_ID) || "node-unknown",
+        workloadManifestHash: "",
+        workloadManifestLoaded: false,
+        startupVerified: false,
+        blocked: false,
+        blockedReason: "",
+      };
+    }
+    return workloadIntegrityVerifier.getActiveMetadata();
+  }
+
+  function evaluateWorkloadPeerPosture(peers: Array<Record<string, unknown>> = []) {
+    if (!workloadIntegrityVerifier) {
+      return {
+        ok: true,
+        status: "not_evaluated" as const,
+        criticalMismatches: [],
+        warnings: [],
+        timestamp: Date.now(),
+      };
+    }
+    return workloadIntegrityVerifier.evaluatePeerWorkloadPosture(peers);
+  }
+
   return {
     execute,
     listTools,
     resolveRole,
     getMetrics,
+    getWorkloadIntegrityMetadata,
+    evaluateWorkloadPeerPosture,
   };
 }

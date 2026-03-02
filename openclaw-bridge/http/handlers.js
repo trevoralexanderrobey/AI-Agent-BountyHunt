@@ -216,6 +216,19 @@ function mapSupervisorError(error) {
   ) {
     return { statusCode: 503, code: "EXECUTION_CONFIG_MISMATCH", message: "Execution policy authority mismatch" };
   }
+  if (
+    code === "WORKLOAD_NOT_VERIFIED" ||
+    code === "WORKLOAD_HASH_MISMATCH" ||
+    code === "WORKLOAD_IMAGE_MISMATCH" ||
+    code === "WORKLOAD_MANIFEST_MISMATCH" ||
+    code === "WORKLOAD_MUTATION_DETECTED" ||
+    code === "WORKLOAD_MANIFEST_SCHEMA_INVALID" ||
+    code === "WORKLOAD_MANIFEST_MISSING" ||
+    code === "WORKLOAD_MANIFEST_PATH_OVERRIDE_FORBIDDEN" ||
+    code === "WORKLOAD_MANIFEST_WRITABLE_IN_PRODUCTION"
+  ) {
+    return { statusCode: 503, code, message: "Execution integrity verification failed" };
+  }
   if (code === "SUPERVISOR_CAPACITY_EXCEEDED") {
     return { statusCode: 503, code: "INTERNAL_ERROR", message: "Service capacity exceeded" };
   }
@@ -486,6 +499,10 @@ function createHttpHandlers(options = {}) {
         });
         if (executionRouter) {
           const tool = `${parsed.slug}.${parsed.method}`;
+          const executionMetadata =
+            supervisor && typeof supervisor.getExecutionMetadata === "function" ? supervisor.getExecutionMetadata() : {};
+          const executionPeers =
+            supervisor && typeof supervisor.getExecutionPeers === "function" ? supervisor.getExecutionPeers() : [];
           const execution = await executionRouter.execute(tool, isPlainObject(parsed.params) ? parsed.params : {}, {
             requestId,
             workspaceRoot,
@@ -497,6 +514,8 @@ function createHttpHandlers(options = {}) {
               slug: parsed.slug,
               method: parsed.method,
               principalId,
+              executionMetadata,
+              peers: Array.isArray(executionPeers) ? executionPeers : [],
             },
             legacyExecute: async () => supervisor.execute(parsed.slug, parsed.method, parsed.params, requestContext),
           });
@@ -635,6 +654,8 @@ function createHttpHandlers(options = {}) {
           typeof executionMetadata.executionPolicyHash === "string" ? executionMetadata.executionPolicyHash : "",
         secret_manifest_hash:
           typeof executionMetadata.secretManifestHash === "string" ? executionMetadata.secretManifestHash : "",
+        workload_manifest_hash:
+          typeof executionMetadata.workloadManifestHash === "string" ? executionMetadata.workloadManifestHash : "",
         execution_policy_version:
           Number.isFinite(Number(executionMetadata.executionPolicyVersion)) && Number(executionMetadata.executionPolicyVersion) > 0
             ? Number(executionMetadata.executionPolicyVersion)

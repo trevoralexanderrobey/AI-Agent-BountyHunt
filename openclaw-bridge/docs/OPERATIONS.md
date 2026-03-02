@@ -490,7 +490,25 @@ Establishes strict workspace sandboxing and canonical execution boundaries using
 
 - **Internal Bypass Rules**: An external `internal=true` flag is ignored unless explicitly signed by the `SUPERVISOR_INTERNAL_TOKEN` or called via in-process trusted boundaries.
 - **Audit Logging**: Asynchronous auditing is output strictly into the isolated workspace boundary at `<workspaceRoot>/.openclaw/audit.log` featuring internal 10MB auto-rotation.
+- **Strict Legacy Containment**: In strict mode, external unknown tools are denied and do not use legacy fallbacks.
+- **Role-Aware Tool Visibility**: `tools/list` output is filtered by resolved role (`supervisor`, `internal`, `admin`, `anonymous`).
+- **Token File Resolution**: Supervisor bearer token is resolved from `<workspaceRoot>/.cline/cline_mcp_settings.json` (env fallback retained for compatibility).
+- **Token Permission Posture**: Non-`0600` token file permissions emit a security warning and should be corrected in production.
 - **Rollback Playbook**: To temporarily bypass or fallback in the event of supervisor faults:
   1. Set `SUPERVISOR_MODE=false`.
   2. Set `SUPERVISOR_AUTH_PHASE=compat`.
   3. Restart bridge services.
+
+Recommended validation after changes:
+
+```bash
+cd "/Users/trevorrobey/AI-Agent-BountyHunt/openclaw-bridge"
+npm run bridge:build
+npm run execution:test
+npm run bridge:test
+```
+
+Canonical architecture checkpoint:
+
+- Tag: `supervisor-kernel-v1`
+- Branch: `main`

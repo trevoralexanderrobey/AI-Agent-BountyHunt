@@ -138,7 +138,6 @@ function createHttpServer(options = {}) {
       : process.env.BRIDGE_WORKSPACE_ROOT || process.cwd();
   const logger = options.logger && typeof options.logger === "object" ? options.logger : createNoopLogger();
   const metrics = options.metrics && typeof options.metrics === "object" ? options.metrics : createMetrics();
-  const supervisor = options.supervisor || createSupervisorV1(options.supervisorOptions || {});
   const authEnabled = Boolean(
     (options.supervisorOptions && options.supervisorOptions.auth && options.supervisorOptions.auth.enabled) || options.authEnabled,
   );
@@ -157,6 +156,18 @@ function createHttpServer(options = {}) {
     options.prometheusExporter && typeof options.prometheusExporter.enabled !== "undefined"
       ? Boolean(options.prometheusExporter.enabled)
       : parseBoolean(process.env.PROMETHEUS_EXPORTER_ENABLED, false);
+  let executionRouterRef = null;
+  const supervisor =
+    options.supervisor ||
+    createSupervisorV1({
+      ...(options.supervisorOptions || {}),
+      workloadMetadataProvider: () => {
+        if (!executionRouterRef || typeof executionRouterRef.getWorkloadIntegrityMetadata !== "function") {
+          return {};
+        }
+        return executionRouterRef.getWorkloadIntegrityMetadata();
+      },
+    });
   const executionRouter =
     options.executionRouter ||
     createExecutionRouter({
@@ -167,7 +178,18 @@ function createHttpServer(options = {}) {
       registryPath: path.join(process.cwd(), "supervisor", "supervisor-registry.json"),
       auditLogPath: path.join(workspaceRoot, ".openclaw", "audit.log"),
       auditMaxBytes: parsePositiveInt(process.env.SUPERVISOR_AUDIT_MAX_BYTES, 10 * 1024 * 1024),
+      workloadManifestPath: String(process.env.WORKLOAD_MANIFEST_PATH || "").trim(),
+      workloadManifestExpectedHash: String(process.env.WORKLOAD_MANIFEST_EXPECTED_HASH || "").trim().toLowerCase(),
+      workloadIntegrityEnabled: parseBoolean(
+        process.env.WORKLOAD_INTEGRITY_ENABLED,
+        String(process.env.NODE_ENV || "").trim().toLowerCase() === "production",
+      ),
+      integrityMetadataProvider: () => ({
+        local: typeof supervisor.getExecutionMetadata === "function" ? supervisor.getExecutionMetadata() : {},
+        peers: typeof supervisor.getExecutionPeers === "function" ? supervisor.getExecutionPeers() : [],
+      }),
     });
+  executionRouterRef = executionRouter;
 
   const state = {
     server: null,

@@ -177,6 +177,11 @@ function resolveExecutionSettings(options = {}) {
       : normalizeString(execution.secretManifestPath) || normalizeString(process.env.SECRET_MANIFEST_PATH),
     secretManifestExpectedHash:
       normalizeString(execution.secretManifestExpectedHash) || normalizeString(process.env.SECRET_MANIFEST_EXPECTED_HASH),
+    workloadManifestPath: production
+      ? ""
+      : normalizeString(execution.workloadManifestPath) || normalizeString(process.env.WORKLOAD_MANIFEST_PATH),
+    workloadManifestExpectedHash:
+      normalizeString(execution.workloadManifestExpectedHash) || normalizeString(process.env.WORKLOAD_MANIFEST_EXPECTED_HASH),
   };
 }
 
@@ -345,6 +350,8 @@ function createSupervisorV1(options = {}) {
         : undefined,
   });
   const executionSettings = resolveExecutionSettings(options);
+  const workloadMetadataProvider =
+    options && typeof options.workloadMetadataProvider === "function" ? options.workloadMetadataProvider : null;
   const securitySettings = isPlainObject(options.security) ? options.security : {};
   const observabilitySettings = isPlainObject(options.observability) ? options.observability : {};
   const alertThresholds = isPlainObject(observabilitySettings.alertThresholds) ? observabilitySettings.alertThresholds : {};
@@ -952,6 +959,12 @@ function createSupervisorV1(options = {}) {
             ? record.secretManifestHash
             : typeof record.secret_manifest_hash === "string"
             ? record.secret_manifest_hash
+            : "",
+        workloadManifestHash:
+          typeof record.workloadManifestHash === "string"
+            ? record.workloadManifestHash
+            : typeof record.workload_manifest_hash === "string"
+            ? record.workload_manifest_hash
             : "",
         executionConfigHash: typeof record.executionConfigHash === "string" ? record.executionConfigHash : "",
         executionConfigVersion: typeof record.executionConfigVersion === "string" ? record.executionConfigVersion : "",
@@ -1589,11 +1602,17 @@ function createSupervisorV1(options = {}) {
       secretAuthority && typeof secretAuthority.getActiveMetadata === "function"
         ? secretAuthority.getActiveMetadata()
         : {};
+    const workloadMetadata =
+      workloadMetadataProvider && typeof workloadMetadataProvider === "function" ? workloadMetadataProvider() : {};
 
     return {
       ...policyMetadata,
       secretManifestHash:
         typeof secretMetadata.secretManifestHash === "string" ? secretMetadata.secretManifestHash : "",
+      workloadManifestHash:
+        typeof workloadMetadata.workloadManifestHash === "string"
+          ? workloadMetadata.workloadManifestHash
+          : normalizeString(executionSettings.workloadManifestExpectedHash).toLowerCase(),
     };
   }
 
@@ -1618,6 +1637,8 @@ function createSupervisorV1(options = {}) {
         typeof metadata.executionPolicyHash === "string" ? metadata.executionPolicyHash : "",
       secret_manifest_hash:
         typeof metadata.secretManifestHash === "string" ? metadata.secretManifestHash : "",
+      workload_manifest_hash:
+        typeof metadata.workloadManifestHash === "string" ? metadata.workloadManifestHash : "",
     });
   }
 
@@ -3618,6 +3639,8 @@ function createSupervisorV1(options = {}) {
             : normalizeString(executionSettings.expectedExecutionConfigVersion),
         secretManifestHash:
           typeof executionMetadata.secretManifestHash === "string" ? executionMetadata.secretManifestHash : "",
+        workloadManifestHash:
+          typeof executionMetadata.workloadManifestHash === "string" ? executionMetadata.workloadManifestHash : "",
         thresholdScope: thresholdScope === "cluster" ? "cluster" : "node",
       },
     };
@@ -3656,8 +3679,13 @@ function createSupervisorV1(options = {}) {
           ? local.expectedExecutionConfigVersion
           : normalizeString(executionSettings.expectedExecutionConfigVersion),
       secretManifestHash: typeof local.secretManifestHash === "string" ? local.secretManifestHash : "",
+      workloadManifestHash: typeof local.workloadManifestHash === "string" ? local.workloadManifestHash : "",
       thresholdScope: thresholdScope === "cluster" ? "cluster" : "node",
     };
+  }
+
+  function getExecutionPeers() {
+    return getExecutionPeersForReconciliation();
   }
 
   async function shutdown() {
@@ -3807,6 +3835,7 @@ function createSupervisorV1(options = {}) {
     execute,
     getStatus,
     getExecutionMetadata,
+    getExecutionPeers,
     getMetrics,
     reapIdle,
     shutdown,

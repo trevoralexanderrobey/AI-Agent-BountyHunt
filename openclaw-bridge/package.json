@@ -27,7 +27,10 @@
     "bridge:logs": "./scripts/bridge-control.sh logs",
     "bridge:health": "./scripts/bridge-control.sh health",
     "bridge:test": "vitest run bridge/tests",
-    "execution:test": "node --test tests/execution/*.test.js"
+    "execution:test": "npm run bridge:build && node --test tests/execution/*.test.js",
+    "workload:verify": "npm run bridge:build && node dist/scripts/verify-workload-manifest.js",
+    "phase24:validate": "npm run bridge:build && node dist/scripts/validate-phase24.js",
+    "ci:phase24-governance": "npm run workload:verify && npm run phase24:validate"
   },
   "version": "0.1.0"
 }

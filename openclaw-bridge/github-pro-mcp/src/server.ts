@@ -106,6 +106,11 @@ function createRouter(): { router: ExecutionRouterLike | null; workspaceRoot: st
         registryPath,
         auditLogPath,
         auditMaxBytes: Number.parseInt(String(process.env.SUPERVISOR_AUDIT_MAX_BYTES || "10485760"), 10) || 10 * 1024 * 1024,
+        workloadManifestPath: String(process.env.WORKLOAD_MANIFEST_PATH || "").trim(),
+        workloadManifestExpectedHash: String(process.env.WORKLOAD_MANIFEST_EXPECTED_HASH || "").trim().toLowerCase(),
+        workloadIntegrityEnabled:
+          parseBoolean(process.env.WORKLOAD_INTEGRITY_ENABLED, false) ||
+          String(process.env.NODE_ENV || "").trim().toLowerCase() === "production",
         legacyVisibleToolsByRole: {
           supervisor: legacyTools,
           internal: legacyTools,

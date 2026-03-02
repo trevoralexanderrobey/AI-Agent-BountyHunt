@@ -1,5 +1,6 @@
 const test = require("node:test");
 const assert = require("node:assert/strict");
+const os = require("node:os");
 const path = require("node:path");
 const fs = require("node:fs");
 
@@ -7,6 +8,7 @@ const pkg = require("../../package.json");
 const { runPreflightValidation } = require("../../deployment/preflight-validator.js");
 const { computePolicyHash } = require("../../policy/execution-policy-manifest.js");
 const { computeSecretManifestHash } = require("../../security/secret-manifest.js");
+const { computeWorkloadManifestHash } = require("../../security/workload-manifest.js");
 
 const POLICY_MANIFEST_PATH = path.resolve(__dirname, "../../policy/execution-policy.json");
 const POLICY_SIGNATURE_PATH = path.resolve(__dirname, "../../policy/execution-policy.json.sig");
@@ -14,6 +16,10 @@ const POLICY_PUBLIC_KEY_PATH = path.resolve(__dirname, "../../policy/execution-p
 const POLICY_EXPECTED_HASH = computePolicyHash(JSON.parse(fs.readFileSync(POLICY_MANIFEST_PATH, "utf8")));
 const SECRET_MANIFEST_PATH = path.resolve(__dirname, "../../security/secret-manifest.json");
 const SECRET_MANIFEST_EXPECTED_HASH = computeSecretManifestHash(JSON.parse(fs.readFileSync(SECRET_MANIFEST_PATH, "utf8")));
+const WORKLOAD_MANIFEST_PATH = path.resolve(__dirname, "../../security/workload-manifest.json");
+const WORKLOAD_MANIFEST_EXPECTED_HASH = computeWorkloadManifestHash(
+  JSON.parse(fs.readFileSync(WORKLOAD_MANIFEST_PATH, "utf8")),
+);
 
 function healthySecretStoreProvider() {
   return {
@@ -69,6 +75,8 @@ function baseProductionOptions(overrides = {}) {
       policyExpectedHash: POLICY_EXPECTED_HASH,
       secretManifestPath: SECRET_MANIFEST_PATH,
       secretManifestExpectedHash: SECRET_MANIFEST_EXPECTED_HASH,
+      workloadManifestPath: WORKLOAD_MANIFEST_PATH,
+      workloadManifestExpectedHash: WORKLOAD_MANIFEST_EXPECTED_HASH,
       tools: {
         curl: {
           signatureVerified: true,
@@ -241,9 +249,15 @@ test("production container mode fails for unknown tool slug with undefined resou
 });
 
 test("production container mode passes when execution policies are complete", async () => {
-  const result = await runPreflightValidation(baseProductionOptions());
-  assert.equal(result.ready_for_production, true);
-  assert.equal((result.errors || []).length, 0);
+  const previousMode = fs.statSync(WORKLOAD_MANIFEST_PATH).mode & 0o777;
+  fs.chmodSync(WORKLOAD_MANIFEST_PATH, 0o444);
+  try {
+    const result = await runPreflightValidation(baseProductionOptions());
+    assert.equal(result.ready_for_production, true);
+    assert.equal((result.errors || []).length, 0);
+  } finally {
+    fs.chmodSync(WORKLOAD_MANIFEST_PATH, previousMode);
+  }
 });
 
 test("production container mode fails when phase 21 governance settings are missing", async () => {
@@ -356,4 +370,124 @@ test("production container mode fails when secret manifest hash does not match e
 
   const codes = errorCodes(result);
   assert.equal(codes.has("SECRET_MANIFEST_MISMATCH"), true);
+});
+
+test("production container mode fails when workload manifest path is overridden", async () => {
+  const result = await runPreflightValidation(
+    baseProductionOptions({
+      execution: {
+        ...baseProductionOptions().execution,
+        workloadManifestPath: path.resolve(__dirname, "./tmp-workload-manifest.json"),
+      },
+    }),
+  );
+
+  const codes = errorCodes(result);
+  assert.equal(codes.has("WORKLOAD_MANIFEST_PATH_OVERRIDE_FORBIDDEN"), true);
+});
+
+test("production container mode fails when workload manifest hash does not match expected hash", async () => {
+  const result = await runPreflightValidation(
+    baseProductionOptions({
+      execution: {
+        ...baseProductionOptions().execution,
+        workloadManifestExpectedHash: "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+      },
+    }),
+  );
+
+  const codes = errorCodes(result);
+  assert.equal(codes.has("WORKLOAD_MANIFEST_MISMATCH"), true);
+});
+
+test("production container mode fails when workload manifest is missing", async () => {
+  const missingPath = path.resolve(__dirname, "./missing-workload-manifest.json");
+  try {
+    fs.unlinkSync(missingPath);
+  } catch {}
+
+  const result = await runPreflightValidation(
+    baseProductionOptions({
+      execution: {
+        ...baseProductionOptions().execution,
+        workloadManifestPath: missingPath,
+      },
+    }),
+  );
+
+  const codes = errorCodes(result);
+  assert.equal(codes.has("WORKLOAD_MANIFEST_MISSING"), true);
+});
+
+test("production container mode fails when workload manifest schema is invalid", async () => {
+  const invalidManifestPath = path.join(
+    fs.mkdtempSync(path.join(os.tmpdir(), "openclaw-preflight-workload-invalid-")),
+    "workload-manifest.json",
+  );
+  fs.writeFileSync(
+    invalidManifestPath,
+    `${JSON.stringify(
+      {
+        workloads: [
+          {
+            workloadID: "invalid.tool",
+            adapterHash: "not-a-hash",
+            entrypointHash: "also-not-a-hash",
+            runtimeConfigHash: "nope",
+            workloadVersion: 1,
+            productionRequired: true,
+          },
+        ],
+      },
+      null,
+      2,
+    )}\n`,
+    "utf8",
+  );
+
+  const result = await runPreflightValidation(
+    baseProductionOptions({
+      execution: {
+        ...baseProductionOptions().execution,
+        workloadManifestPath: invalidManifestPath,
+        workloadManifestExpectedHash: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      },
+    }),
+  );
+
+  const codes = errorCodes(result);
+  assert.equal(codes.has("WORKLOAD_MANIFEST_SCHEMA_INVALID"), true);
+});
+
+test("production container mode rejects production workload entries without digest pinning", async () => {
+  const invalidDigestManifestPath = path.join(
+    fs.mkdtempSync(path.join(os.tmpdir(), "openclaw-preflight-workload-digest-")),
+    "workload-manifest.json",
+  );
+  const manifest = {
+    workloads: [
+      {
+        workloadID: "prod.tool",
+        adapterHash: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        entrypointHash: "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        runtimeConfigHash: "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+        workloadVersion: 1,
+        productionRequired: true,
+      },
+    ],
+  };
+  fs.writeFileSync(invalidDigestManifestPath, `${JSON.stringify(manifest, null, 2)}\n`, "utf8");
+
+  const result = await runPreflightValidation(
+    baseProductionOptions({
+      execution: {
+        ...baseProductionOptions().execution,
+        workloadManifestPath: invalidDigestManifestPath,
+        workloadManifestExpectedHash: computeWorkloadManifestHash(manifest),
+      },
+    }),
+  );
+
+  const codes = errorCodes(result);
+  assert.equal(codes.has("WORKLOAD_IMAGE_MISMATCH"), true);
 });

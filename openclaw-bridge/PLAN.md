@@ -1,5 +1,10 @@
 # Supervisor Migration Structural Hardening Plan
 
+## Status
+- Implemented and merged into `main` on March 2, 2026.
+- Canonical checkpoint tag: `supervisor-kernel-v1`.
+- Phase 2 enforcement activation remains deferred unless explicitly enabled.
+
 ## Scope
 This pass is structural hardening only. `SUPERVISOR_MODE` remains `false` by default and no Phase 2 enforcement activation is included here.
 

@@ -17,6 +17,12 @@ const {
   computeSecretManifestHash,
 } = require("../security/secret-manifest.js");
 const { createSecretAuthority, resolveDefaultSecretManifestPath } = require("../security/secret-authority.js");
+const {
+  validateWorkloadManifest,
+  getCanonicalWorkloadManifest,
+  computeWorkloadManifestHash,
+  resolveDefaultWorkloadManifestPath,
+} = require("../security/workload-manifest.js");
 const { createToolRegistry } = require("../tools/tool-registry.js");
 const { registerBatch1Tools } = require("../tools/adapters/index.js");
 const { registerBatch2Tools } = require("../tools/adapters/batch-2-index.js");
@@ -1036,6 +1042,151 @@ async function validatePhase23SecretGovernance(executionConfig, securityConfig, 
   }
 }
 
+function validatePhase24WorkloadIntegrity(executionConfig, errors, warnings, isProduction, mode) {
+  if (mode !== "container") {
+    return;
+  }
+
+  const defaultManifestPath = resolveDefaultWorkloadManifestPath();
+  const configuredManifestPath = normalizeString(executionConfig.workloadManifestPath || process.env.WORKLOAD_MANIFEST_PATH);
+  const expectedManifestHash = normalizeString(
+    executionConfig.workloadManifestExpectedHash || process.env.WORKLOAD_MANIFEST_EXPECTED_HASH,
+  ).toLowerCase();
+  const manifestPath = isProduction
+    ? configuredManifestPath || defaultManifestPath
+    : configuredManifestPath
+    ? configuredManifestPath
+    : defaultManifestPath;
+
+  const collection = isProduction ? errors : warnings;
+
+  if (isProduction) {
+    if (configuredManifestPath && resolvePath(configuredManifestPath) !== resolvePath(defaultManifestPath)) {
+      addIssue(
+        errors,
+        "WORKLOAD_MANIFEST_PATH_OVERRIDE_FORBIDDEN",
+        "Workload manifest path override is forbidden in production",
+        {
+          configuredPath: resolvePath(configuredManifestPath),
+          requiredPath: resolvePath(defaultManifestPath),
+        },
+      );
+    }
+    if (!expectedManifestHash) {
+      addIssue(errors, "WORKLOAD_MANIFEST_MISMATCH", "execution.workloadManifestExpectedHash is required in production", {});
+    }
+  }
+
+  if (!manifestPath) {
+    addIssue(collection, "WORKLOAD_MANIFEST_MISSING", "execution.workloadManifestPath is required for workload governance", {});
+    return;
+  }
+
+  const resolvedManifestPath = resolvePath(manifestPath);
+  if (!fs.existsSync(resolvedManifestPath)) {
+    addIssue(collection, "WORKLOAD_MANIFEST_MISSING", "Workload manifest file is missing", {
+      manifestPath: resolvedManifestPath,
+    });
+    return;
+  }
+
+  if (isProduction) {
+    try {
+      const stat = fs.lstatSync(resolvedManifestPath);
+      if (typeof stat.isSymbolicLink === "function" && stat.isSymbolicLink()) {
+        addIssue(errors, "WORKLOAD_MANIFEST_PATH_OVERRIDE_FORBIDDEN", "Workload manifest must not be symlinked in production", {
+          manifestPath: resolvedManifestPath,
+        });
+      }
+      try {
+        fs.accessSync(resolvedManifestPath, fs.constants.W_OK);
+        addIssue(errors, "WORKLOAD_MANIFEST_WRITABLE_IN_PRODUCTION", "Workload manifest must not be writable in production", {
+          manifestPath: resolvedManifestPath,
+        });
+      } catch {}
+    } catch (error) {
+      addIssue(collection, "WORKLOAD_MANIFEST_MISSING", "Workload manifest file metadata could not be loaded", {
+        manifestPath: resolvedManifestPath,
+        reason: error && error.message ? error.message : String(error),
+      });
+      return;
+    }
+  }
+
+  let workloadManifest;
+  try {
+    workloadManifest = JSON.parse(fs.readFileSync(resolvedManifestPath, "utf8"));
+  } catch (error) {
+    addIssue(collection, "WORKLOAD_MANIFEST_SCHEMA_INVALID", "Workload manifest JSON could not be parsed", {
+      manifestPath: resolvedManifestPath,
+      reason: error && error.message ? error.message : String(error),
+    });
+    return;
+  }
+
+  const schemaValidation = validateWorkloadManifest(workloadManifest);
+  if (!schemaValidation.valid) {
+    addIssue(collection, "WORKLOAD_MANIFEST_SCHEMA_INVALID", "Workload manifest schema validation failed", {
+      errors: schemaValidation.errors,
+    });
+    return;
+  }
+
+  let canonical;
+  let actualHash = "";
+  let deterministic = false;
+  try {
+    canonical = getCanonicalWorkloadManifest(workloadManifest);
+    actualHash = computeWorkloadManifestHash(canonical);
+    deterministic = actualHash === computeWorkloadManifestHash(JSON.parse(JSON.stringify(canonical)));
+  } catch (error) {
+    addIssue(collection, "WORKLOAD_MANIFEST_SCHEMA_INVALID", "Workload manifest canonicalization failed", {
+      reason: error && error.message ? error.message : String(error),
+    });
+    return;
+  }
+
+  if (!deterministic) {
+    addIssue(collection, "WORKLOAD_MANIFEST_MISMATCH", "Workload manifest canonical hash is non-deterministic", {
+      manifestPath: resolvedManifestPath,
+    });
+  }
+
+  if (expectedManifestHash && actualHash !== expectedManifestHash) {
+    addIssue(collection, "WORKLOAD_MANIFEST_MISMATCH", "Workload manifest hash does not match expected hash", {
+      expectedHash: expectedManifestHash,
+      actualHash,
+    });
+  }
+
+  if (isProduction && canonical && Array.isArray(canonical.workloads)) {
+    for (const entry of canonical.workloads) {
+      if (!entry || typeof entry !== "object") {
+        continue;
+      }
+      const workloadID = normalizeString(entry.workloadID);
+      const productionRequired = entry.productionRequired === true;
+      if (!productionRequired) {
+        continue;
+      }
+
+      const digest = normalizeString(entry.containerImageDigest).toLowerCase();
+      if (!digest) {
+        addIssue(errors, "WORKLOAD_IMAGE_MISMATCH", "Production workload requires digest-pinned container image", {
+          workloadID,
+        });
+        continue;
+      }
+      if (!/^sha256:[a-f0-9]{64}$/.test(digest)) {
+        addIssue(errors, "WORKLOAD_IMAGE_MISMATCH", "Production workload image must use digest pinning", {
+          workloadID,
+          containerImageDigest: digest,
+        });
+      }
+    }
+  }
+}
+
 function resolveExecutionToolImageReference(executionConfig, slug, toolConfig) {
   const direct = normalizeString(toolConfig && toolConfig.image);
   if (direct) {
@@ -1795,6 +1946,13 @@ async function runPreflightValidation(options = {}) {
     productionMode.isProduction,
     executionValidation.mode,
   );
+  validatePhase24WorkloadIntegrity(
+    executionConfig,
+    errors,
+    warnings,
+    productionMode.isProduction,
+    executionValidation.mode,
+  );
   validatePhase21SecurityConfig(securityConfig, errors, productionMode.isProduction, executionValidation.mode);
   validatePhase21ObservabilityConfig(observabilityConfig, errors, warnings, productionMode.isProduction);
 
@@ -1833,6 +1991,8 @@ async function runPreflightValidation(options = {}) {
       executionPolicyExpectedHash: normalizeString(executionConfig.policyExpectedHash).toLowerCase(),
       secretManifestPath: normalizeString(executionConfig.secretManifestPath),
       secretManifestExpectedHash: normalizeString(executionConfig.secretManifestExpectedHash).toLowerCase(),
+      workloadManifestPath: normalizeString(executionConfig.workloadManifestPath),
+      workloadManifestExpectedHash: normalizeString(executionConfig.workloadManifestExpectedHash).toLowerCase(),
       secretStoreProvider: normalizeString(securityConfig.secretStoreProvider),
       secretStoreUrlConfigured: normalizeString(securityConfig.secretStoreUrl).length > 0,
       observabilityThresholdScope: normalizeString(observabilityConfig.thresholdScope),

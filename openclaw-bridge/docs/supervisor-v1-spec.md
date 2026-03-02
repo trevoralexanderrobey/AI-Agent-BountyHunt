@@ -9,6 +9,12 @@ Supervisor v1 is a deterministic routing and pooling layer over Spawner v2.
 - Never changes MCP/runtime payload contracts.
 - Never exposes container tokens.
 
+Execution router relationship:
+
+- `src/core/execution-router.ts` is the canonical policy enforcement point for external execution paths.
+- Supervisor v1 remains the runtime execution backend for slug/method dispatch where legacy/runtime flows are delegated.
+- Transport layers should apply parsing/serialization only and delegate authorization/tool policy decisions to the execution router when enabled.
+
 Module path:
 
 - `/Users/trevorrobey/AI-Agent-BountyHunt/openclaw-bridge/supervisor/supervisor-v1.js`

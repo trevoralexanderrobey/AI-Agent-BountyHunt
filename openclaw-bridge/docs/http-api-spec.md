@@ -1,14 +1,15 @@
-# HTTP API Spec (Phase 21)
+# HTTP API Spec (Phase 21 + Supervisor Hardening)
 
 ## Scope
 
-This document defines the external HTTP ingress layer that wraps Supervisor v1 with Phase 21 governance controls.
+This document defines the external HTTP ingress layer that wraps Supervisor v1 with Phase 21 governance controls and Supervisor structural hardening.
 
 - Implementation files:
   - `/Users/trevorrobey/AI-Agent-BountyHunt/openclaw-bridge/http/server.js`
   - `/Users/trevorrobey/AI-Agent-BountyHunt/openclaw-bridge/http/handlers.js`
 - Internal runtime semantics are unchanged.
 - Supervisor, Spawner, MCP, and Runtime contracts are preserved.
+- When `executionRouter` is configured, transport-level authorization checks are delegated to router policy.
 
 ## Configuration
 
@@ -70,15 +71,16 @@ Header forwarding:
 - `X-Request-Id` used if valid (`<=128`) or generated.
 - `X-Principal-Id` forwarded as `principalId`.
 - `X-API-Version` optional; defaults to `v1`.
-- `X-Principal-Id` is mandatory for execution (identity required).
+- `X-Principal-Id` is mandatory only when router delegation is disabled; with `executionRouter` enabled, identity and authorization are decided centrally per request.
 
 ### API Hardening Requirements
 
-1. Authentication required when auth is enabled.
-2. Identity required on every execution request.
+1. Authentication required when auth is enabled and router delegation is disabled.
+2. Identity required on execution when router delegation is disabled.
 3. Deterministic request body size limit (`maxBodyBytes`).
 4. Per-user burst quota and hourly quota enforced by centralized quota store.
 5. Structured execution audit logs for auth, quota, execution, and egress decision points.
+6. With router delegation enabled, tool policy enforcement is centralized in `src/core/execution-router.ts`.
 
 Success response (`200`):
 
