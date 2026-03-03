@@ -28,6 +28,14 @@ const {
   loadAttestationReferenceFromDisk,
   resolveDefaultAttestationReferencePath,
 } = require("../security/workload-attestation.js");
+const {
+  computeBuildProvenanceHash,
+  loadBuildProvenanceFromDisk,
+  resolveDefaultBuildProvenanceHashPath,
+  resolveDefaultBuildProvenancePath,
+  resolveDefaultBuildProvenancePublicKeyPath,
+  resolveDefaultDependencyLockPath,
+} = require("../security/workload-provenance.js");
 const { createToolRegistry } = require("../tools/tool-registry.js");
 const { registerBatch1Tools } = require("../tools/adapters/index.js");
 const { registerBatch2Tools } = require("../tools/adapters/batch-2-index.js");
@@ -1294,6 +1302,151 @@ function validatePhase25WorkloadAttestation(executionConfig, errors, warnings, i
   }
 }
 
+function validatePhase26Provenance(executionConfig, errors, warnings, isProduction, mode) {
+  if (mode !== "container") {
+    return;
+  }
+
+  const collection = isProduction ? errors : warnings;
+  const defaultProvenancePath = resolveDefaultBuildProvenancePath();
+  const defaultHashPath = resolveDefaultBuildProvenanceHashPath();
+  const defaultPublicKeyPath = resolveDefaultBuildProvenancePublicKeyPath();
+  const defaultDependencyLockPath = resolveDefaultDependencyLockPath();
+
+  const configuredProvenancePath = normalizeString(
+    executionConfig.buildProvenancePath || process.env.WORKLOAD_PROVENANCE_PATH,
+  );
+  const configuredHashPath = normalizeString(
+    executionConfig.buildProvenanceHashPath || process.env.WORKLOAD_PROVENANCE_HASH_PATH,
+  );
+  const configuredPublicKeyPath = normalizeString(
+    executionConfig.buildProvenancePublicKeyPath || process.env.WORKLOAD_PROVENANCE_PUBLIC_KEY_PATH,
+  );
+  const configuredExpectedHash = normalizeString(
+    executionConfig.buildProvenanceExpectedHash || process.env.WORKLOAD_PROVENANCE_EXPECTED_HASH,
+  ).toLowerCase();
+  const inlinePublicKeyOverride = normalizeString(process.env.WORKLOAD_PROVENANCE_PUBLIC_KEY);
+
+  if (isProduction) {
+    if (configuredProvenancePath && resolvePath(configuredProvenancePath) !== resolvePath(defaultProvenancePath)) {
+      addIssue(
+        errors,
+        "WORKLOAD_PROVENANCE_PATH_OVERRIDE_FORBIDDEN",
+        "Build provenance path override is forbidden in production",
+        {
+          configuredPath: resolvePath(configuredProvenancePath),
+          requiredPath: resolvePath(defaultProvenancePath),
+        },
+      );
+    }
+    if (configuredHashPath && resolvePath(configuredHashPath) !== resolvePath(defaultHashPath)) {
+      addIssue(
+        errors,
+        "WORKLOAD_PROVENANCE_HASH_PATH_OVERRIDE_FORBIDDEN",
+        "Build provenance hash path override is forbidden in production",
+        {
+          configuredPath: resolvePath(configuredHashPath),
+          requiredPath: resolvePath(defaultHashPath),
+        },
+      );
+    }
+    if (configuredPublicKeyPath && resolvePath(configuredPublicKeyPath) !== resolvePath(defaultPublicKeyPath)) {
+      addIssue(
+        errors,
+        "WORKLOAD_PROVENANCE_KEY_PATH_OVERRIDE_FORBIDDEN",
+        "Build provenance public key path override is forbidden in production",
+        {
+          configuredPath: resolvePath(configuredPublicKeyPath),
+          requiredPath: resolvePath(defaultPublicKeyPath),
+        },
+      );
+    }
+    if (inlinePublicKeyOverride) {
+      addIssue(
+        errors,
+        "WORKLOAD_PROVENANCE_KEY_OVERRIDE_FORBIDDEN",
+        "Inline build provenance public key override is forbidden in production",
+        {},
+      );
+    }
+  }
+
+  let loaded;
+  try {
+    loaded = loadBuildProvenanceFromDisk({
+      production: isProduction,
+      provenancePath: configuredProvenancePath || undefined,
+      provenanceHashPath: configuredHashPath || undefined,
+      publicKeyPath: configuredPublicKeyPath || undefined,
+      expectedProvenanceHash: configuredExpectedHash || undefined,
+      dependencyLockPath: defaultDependencyLockPath,
+      allowProductionPathOverride: false,
+      // Preflight runs outside the runtime container context, so mount mode enforcement
+      // is handled by runtime startup checks in execution router.
+      productionContainerMode: false,
+    });
+  } catch (error) {
+    addIssue(
+      collection,
+      error && typeof error.code === "string" ? error.code : "WORKLOAD_PROVENANCE_NOT_TRUSTED",
+      "Build provenance validation failed",
+      {
+        reason: error && error.message ? error.message : String(error),
+      },
+    );
+    return;
+  }
+
+  try {
+    const hashA = loaded.canonicalPayloadHash;
+    const hashB = computeBuildProvenanceHash(JSON.parse(JSON.stringify(loaded.provenance)));
+    if (hashA !== hashB) {
+      addIssue(
+        collection,
+        "WORKLOAD_PROVENANCE_HASH_MISMATCH",
+        "Build provenance canonical hash is non-deterministic",
+        {
+          provenancePath: loaded.provenancePath,
+        },
+      );
+    }
+  } catch (error) {
+    addIssue(
+      collection,
+      "WORKLOAD_PROVENANCE_SCHEMA_INVALID",
+      "Build provenance canonicalization failed",
+      {
+        reason: error && error.message ? error.message : String(error),
+      },
+    );
+  }
+
+  const digestEntries = Object.entries((loaded.provenance && loaded.provenance.containerImageDigests) || {});
+  if (digestEntries.length === 0) {
+    addIssue(
+      collection,
+      "WORKLOAD_PROVENANCE_DIGEST_MISMATCH",
+      "Build provenance must define at least one digest-pinned workload",
+      {},
+    );
+  }
+
+  for (const [workloadID, digest] of digestEntries) {
+    const normalizedDigest = normalizeString(digest).toLowerCase();
+    if (!/^sha256:[a-f0-9]{64}$/.test(normalizedDigest)) {
+      addIssue(
+        collection,
+        "WORKLOAD_PROVENANCE_DIGEST_MISMATCH",
+        "Build provenance container digest must be immutable sha256 format",
+        {
+          workloadID,
+          digest,
+        },
+      );
+    }
+  }
+}
+
 function resolveExecutionToolImageReference(executionConfig, slug, toolConfig) {
   const direct = normalizeString(toolConfig && toolConfig.image);
   if (direct) {
@@ -2067,6 +2220,13 @@ async function runPreflightValidation(options = {}) {
     productionMode.isProduction,
     executionValidation.mode,
   );
+  validatePhase26Provenance(
+    executionConfig,
+    errors,
+    warnings,
+    productionMode.isProduction,
+    executionValidation.mode,
+  );
   validatePhase21SecurityConfig(securityConfig, errors, productionMode.isProduction, executionValidation.mode);
   validatePhase21ObservabilityConfig(observabilityConfig, errors, warnings, productionMode.isProduction);
 
@@ -2109,6 +2269,10 @@ async function runPreflightValidation(options = {}) {
       workloadManifestExpectedHash: normalizeString(executionConfig.workloadManifestExpectedHash).toLowerCase(),
       workloadAttestationReferencePath: normalizeString(executionConfig.workloadAttestationReferencePath),
       workloadAttestationReferenceExpectedHash: normalizeString(executionConfig.workloadAttestationReferenceExpectedHash).toLowerCase(),
+      buildProvenancePath: normalizeString(executionConfig.buildProvenancePath),
+      buildProvenanceHashPath: normalizeString(executionConfig.buildProvenanceHashPath),
+      buildProvenancePublicKeyPath: normalizeString(executionConfig.buildProvenancePublicKeyPath),
+      buildProvenanceExpectedHash: normalizeString(executionConfig.buildProvenanceExpectedHash).toLowerCase(),
       secretStoreProvider: normalizeString(securityConfig.secretStoreProvider),
       secretStoreUrlConfigured: normalizeString(securityConfig.secretStoreUrl).length > 0,
       observabilityThresholdScope: normalizeString(observabilityConfig.thresholdScope),

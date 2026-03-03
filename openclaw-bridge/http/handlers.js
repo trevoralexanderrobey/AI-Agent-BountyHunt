@@ -273,6 +273,30 @@ function mapSupervisorError(error) {
   ) {
     return { statusCode: 503, code, message: "Execution attestation verification failed" };
   }
+  if (
+    code === "WORKLOAD_PROVENANCE_NOT_TRUSTED" ||
+    code === "WORKLOAD_PROVENANCE_MISSING" ||
+    code === "WORKLOAD_PROVENANCE_HASH_MISSING" ||
+    code === "WORKLOAD_PROVENANCE_HASH_MISMATCH" ||
+    code === "WORKLOAD_PROVENANCE_SIGNATURE_INVALID" ||
+    code === "WORKLOAD_PROVENANCE_SCHEMA_INVALID" ||
+    code === "WORKLOAD_PROVENANCE_KEY_MISSING" ||
+    code === "WORKLOAD_PROVENANCE_KEY_INVALID" ||
+    code === "WORKLOAD_PROVENANCE_KEY_PATH_OVERRIDE_FORBIDDEN" ||
+    code === "WORKLOAD_PROVENANCE_KEY_OVERRIDE_FORBIDDEN" ||
+    code === "WORKLOAD_PROVENANCE_PATH_OVERRIDE_FORBIDDEN" ||
+    code === "WORKLOAD_PROVENANCE_HASH_PATH_OVERRIDE_FORBIDDEN" ||
+    code === "WORKLOAD_PROVENANCE_SYMLINK_FORBIDDEN" ||
+    code === "WORKLOAD_PROVENANCE_OWNER_INVALID" ||
+    code === "WORKLOAD_PROVENANCE_WRITABLE_IN_PRODUCTION" ||
+    code === "WORKLOAD_PROVENANCE_PARENT_DIR_WRITABLE" ||
+    code === "WORKLOAD_PROVENANCE_MOUNT_NOT_READONLY" ||
+    code === "WORKLOAD_PROVENANCE_LOCK_MISMATCH" ||
+    code === "WORKLOAD_PROVENANCE_SNAPSHOT_MISMATCH" ||
+    code === "WORKLOAD_PROVENANCE_DIGEST_MISMATCH"
+  ) {
+    return { statusCode: 503, code: "WORKLOAD_PROVENANCE_NOT_TRUSTED", message: "Execution provenance verification failed" };
+  }
   if (code === "SUPERVISOR_CAPACITY_EXCEEDED") {
     return { statusCode: 503, code: "INTERNAL_ERROR", message: "Service capacity exceeded" };
   }
@@ -547,6 +571,12 @@ function createHttpHandlers(options = {}) {
             supervisor && typeof supervisor.getExecutionMetadata === "function" ? supervisor.getExecutionMetadata() : {};
           const executionPeers =
             supervisor && typeof supervisor.getExecutionPeers === "function" ? supervisor.getExecutionPeers() : [];
+          const runtimeDigestHeader =
+            (typeof req.headers["x-openclaw-container-digest"] === "string" && req.headers["x-openclaw-container-digest"]) ||
+            (typeof req.headers["x-openclaw-execution-image-digest"] === "string" &&
+              req.headers["x-openclaw-execution-image-digest"]) ||
+            (typeof req.headers["x-container-image-digest"] === "string" && req.headers["x-container-image-digest"]) ||
+            "";
           const execution = await executionRouter.execute(tool, isPlainObject(parsed.params) ? parsed.params : {}, {
             requestId,
             workspaceRoot,
@@ -558,6 +588,7 @@ function createHttpHandlers(options = {}) {
               slug: parsed.slug,
               method: parsed.method,
               principalId,
+              containerImageDigest: String(runtimeDigestHeader || "").trim(),
               executionMetadata,
               peers: Array.isArray(executionPeers) ? executionPeers : [],
             },
@@ -690,6 +721,10 @@ function createHttpHandlers(options = {}) {
         executionRouter && typeof executionRouter.getWorkloadAttestationMetadata === "function"
           ? executionRouter.getWorkloadAttestationMetadata()
           : {};
+      const provenanceMetadata =
+        executionRouter && typeof executionRouter.getWorkloadProvenanceMetadata === "function"
+          ? executionRouter.getWorkloadProvenanceMetadata()
+          : {};
       const evidenceResult =
         executionRouter && typeof executionRouter.generateAttestationEvidence === "function"
           ? executionRouter.generateAttestationEvidence(challenge, {
@@ -756,6 +791,21 @@ function createHttpHandlers(options = {}) {
           Number.isFinite(Number(attestationMetadata.lastVerifiedAt)) && Number(attestationMetadata.lastVerifiedAt) > 0
             ? Number(attestationMetadata.lastVerifiedAt)
             : 0,
+        provenance_trusted: provenanceMetadata && provenanceMetadata.trusted === true,
+        provenance_failure_reason:
+          typeof provenanceMetadata.blockedReason === "string" ? provenanceMetadata.blockedReason : "",
+        provenance_hash: typeof provenanceMetadata.provenanceHash === "string" ? provenanceMetadata.provenanceHash : "",
+        provenance_git_commit_sha:
+          typeof provenanceMetadata.gitCommitSha === "string" ? provenanceMetadata.gitCommitSha : "",
+        provenance_verified_at:
+          Number.isFinite(Number(provenanceMetadata.lastVerifiedAt)) && Number(provenanceMetadata.lastVerifiedAt) > 0
+            ? Number(provenanceMetadata.lastVerifiedAt)
+            : 0,
+        provenance_ttl_ms:
+          Number.isFinite(Number(provenanceMetadata.ttlMs)) && Number(provenanceMetadata.ttlMs) > 0
+            ? Number(provenanceMetadata.ttlMs)
+            : 0,
+        provenance_stale: provenanceMetadata && provenanceMetadata.stale === true,
         attestation_evidence:
           evidenceResult && evidenceResult.ok === true && evidenceResult.evidence ? evidenceResult.evidence : undefined,
       });

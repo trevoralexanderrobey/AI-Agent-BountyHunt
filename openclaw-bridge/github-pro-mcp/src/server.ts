@@ -18,6 +18,7 @@ import {
   ListToolsRequestSchema,
   Tool,
 } from "@modelcontextprotocol/sdk/types.js";
+import fs from "node:fs";
 import path from "node:path";
 
 import { openclawTools, handleOpenclawTool } from "./tools/openclaw";
@@ -81,10 +82,13 @@ function mapToTools(listed: Array<{ name: string; description?: string; inputSch
 }
 
 function createRouter(): { router: ExecutionRouterLike | null; workspaceRoot: string } {
+  const defaultWorkspaceRoot = path.resolve(__dirname, "../..");
   const workspaceRoot =
     String(process.env.BRIDGE_WORKSPACE_ROOT || process.env.OPENCLAW_WORKSPACE_ROOT || "").trim() ||
-    path.resolve(process.cwd(), "..");
-  const registryPath = path.join(workspaceRoot, "supervisor", "supervisor-registry.json");
+    defaultWorkspaceRoot;
+  const preferredRegistryPath = path.join(workspaceRoot, "supervisor", "supervisor-registry.json");
+  const fallbackRegistryPath = path.join(defaultWorkspaceRoot, "supervisor", "supervisor-registry.json");
+  const registryPath = fs.existsSync(preferredRegistryPath) ? preferredRegistryPath : fallbackRegistryPath;
   const auditLogPath = path.join(workspaceRoot, ".openclaw", "audit.log");
   const legacyTools = ALL_TOOLS.map((tool) => tool.name);
 
@@ -116,6 +120,14 @@ function createRouter(): { router: ExecutionRouterLike | null; workspaceRoot: st
           String(process.env.NODE_ENV || "").trim().toLowerCase() === "production",
         attestationReferencePath: String(process.env.WORKLOAD_ATTESTATION_REFERENCE_PATH || "").trim(),
         attestationReferenceExpectedHash: String(process.env.WORKLOAD_ATTESTATION_REFERENCE_EXPECTED_HASH || "").trim().toLowerCase(),
+        workloadProvenanceEnabled:
+          parseBoolean(process.env.WORKLOAD_PROVENANCE_ENABLED, false) ||
+          String(process.env.NODE_ENV || "").trim().toLowerCase() === "production",
+        buildProvenancePath: String(process.env.WORKLOAD_PROVENANCE_PATH || "").trim(),
+        buildProvenanceHashPath: String(process.env.WORKLOAD_PROVENANCE_HASH_PATH || "").trim(),
+        buildProvenancePublicKeyPath: String(process.env.WORKLOAD_PROVENANCE_PUBLIC_KEY_PATH || "").trim(),
+        buildProvenanceExpectedHash: String(process.env.WORKLOAD_PROVENANCE_EXPECTED_HASH || \"\").trim().toLowerCase(),
+        workloadProvenanceReverifyTtlMs: Number.parseInt(String(process.env.WORKLOAD_PROVENANCE_REVERIFY_TTL_MS || \"\"), 10) || undefined,
         legacyVisibleToolsByRole: {
           supervisor: legacyTools,
           internal: legacyTools,
@@ -186,6 +198,9 @@ async function main(): Promise<void> {
         source: "stdio_mcp",
         caller: "github_pro_mcp",
         trustedInProcessCaller: true,
+        transportMetadata: {
+          containerImageDigest: String(process.env.EXECUTION_IMAGE_DIGEST || \"\").trim(),
+        },
         legacyExecute: async (tool: string, legacyArgs: Record<string, unknown>) => executeLegacyTool(tool, legacyArgs),
       });
 

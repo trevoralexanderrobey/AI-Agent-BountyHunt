@@ -146,3 +146,41 @@ test("http handler delegates execution through execution router when configured"
   assert.equal(parsed.ok, true);
   assert.equal(parsed.data.result.routed, true);
 });
+
+test("http handler maps provenance trust failures to 503", async () => {
+  const handlers = createHttpHandlers({
+    supervisor: {
+      execute: async () => ({ ok: true }),
+      getStatus: async () => ({ ok: true, skills: [] }),
+      getMetrics: () => ({ counters: [], histograms: [], gauges: [] }),
+    },
+    executionRouter: {
+      execute: async () => ({
+        ok: false,
+        code: "WORKLOAD_PROVENANCE_NOT_TRUSTED",
+        message: "Execution provenance verification failed",
+      }),
+    },
+    metrics: createMetrics(),
+    authEnabled: false,
+  });
+
+  const req = createRequest({
+    headers: {
+      "content-type": "application/json",
+      "x-principal-id": "user-a",
+    },
+    body: JSON.stringify({
+      slug: "nmap",
+      method: "run",
+      params: {},
+    }),
+  });
+  const res = createResponseCollector();
+
+  await handlers.handle(req, res);
+
+  assert.equal(res.statusCode, 503);
+  const parsed = JSON.parse(res.body);
+  assert.equal(parsed.error.code, "WORKLOAD_PROVENANCE_NOT_TRUSTED");
+});

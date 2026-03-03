@@ -842,3 +842,60 @@ test("router blocks execution when attestation posture is untrusted", { concurre
     });
   });
 });
+
+test("router blocks execution when provenance verification fails and prevents legacy fallback", async () => {
+  const workspaceRoot = await makeWorkspace();
+  const registryPath = await makeRegistry(workspaceRoot);
+  await writeTokenConfig(workspaceRoot, "supervisor-token");
+  await fs.writeFile(path.join(workspaceRoot, "inside.txt"), "phase26", "utf8");
+
+  const provenancePath = path.resolve(__dirname, "../../security/build-provenance.json");
+  const provenanceHashPath = path.resolve(__dirname, "../../security/build-provenance.hash");
+  const provenancePublicKeyPath = path.resolve(__dirname, "../../security/build-provenance.pub");
+
+  const tamperedRoot = await fs.mkdtemp(path.join(os.tmpdir(), "openclaw-phase26-router-"));
+  const tamperedProvenancePath = path.join(tamperedRoot, "build-provenance.json");
+  const tamperedHashPath = path.join(tamperedRoot, "build-provenance.hash");
+  const tamperedPublicKeyPath = path.join(tamperedRoot, "build-provenance.pub");
+
+  const tampered = JSON.parse(fsSync.readFileSync(provenancePath, "utf8"));
+  tampered.repository = "https://example.com/tampered.git";
+  await fs.writeFile(tamperedProvenancePath, `${JSON.stringify(tampered, null, 2)}\n`, "utf8");
+  await fs.copyFile(provenanceHashPath, tamperedHashPath);
+  await fs.copyFile(provenancePublicKeyPath, tamperedPublicKeyPath);
+
+  let legacyCalled = false;
+  const router = makeRouter(workspaceRoot, registryPath, {
+    workloadIntegrityEnabled: false,
+    workloadAttestationEnabled: false,
+    workloadProvenanceEnabled: true,
+    buildProvenancePath: tamperedProvenancePath,
+    buildProvenanceHashPath: tamperedHashPath,
+    buildProvenancePublicKeyPath: tamperedPublicKeyPath,
+  });
+
+  const result = await router.execute("supervisor.read_file", { path: "inside.txt" }, {
+    requestId: "phase26-provenance-block",
+    workspaceRoot,
+    source: "http_api",
+    caller: "phase26-test",
+    authHeader: "Bearer supervisor-token",
+    transportMetadata: {
+      containerImageDigest: "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      executionMetadata: {
+        executionPolicyHash: "a2a3f2e9d272f4f8354f5f9188b4b62e91a8269989d9bc3ec0936f69f5893de3",
+        secretManifestHash: "2c9b7debe9d561ba4879209eb20d3f2f67137847f072327fbe39dc8a6cb4209f",
+        workloadManifestHash: "c17fcb8ff98cf4df12b259abf3b5ca7f349e5fe1b6dd17a3f68ca1457e210882",
+        attestationReferenceHash: "6c48fbf7c1f5e2fdcb7ac1d18b68aa8f83338db5a6eb746f97753d6976f8b4cb",
+      },
+    },
+    legacyExecute: async () => {
+      legacyCalled = true;
+      return { ok: true };
+    },
+  });
+
+  assert.equal(result.ok, false);
+  assert.equal(result.code, "WORKLOAD_PROVENANCE_NOT_TRUSTED");
+  assert.equal(legacyCalled, false);
+});

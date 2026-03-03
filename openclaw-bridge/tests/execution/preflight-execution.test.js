@@ -26,6 +26,10 @@ const ATTESTATION_REFERENCE_EXPECTED_HASH = fs
   .readFileSync(ATTESTATION_REFERENCE_HASH_PATH, "utf8")
   .trim()
   .toLowerCase();
+const BUILD_PROVENANCE_PATH = path.resolve(__dirname, "../../security/build-provenance.json");
+const BUILD_PROVENANCE_HASH_PATH = path.resolve(__dirname, "../../security/build-provenance.hash");
+const BUILD_PROVENANCE_PUBLIC_KEY_PATH = path.resolve(__dirname, "../../security/build-provenance.pub");
+const BUILD_PROVENANCE_EXPECTED_HASH = fs.readFileSync(BUILD_PROVENANCE_HASH_PATH, "utf8").trim().toLowerCase();
 
 function healthySecretStoreProvider() {
   return {
@@ -83,6 +87,10 @@ function baseProductionOptions(overrides = {}) {
       secretManifestExpectedHash: SECRET_MANIFEST_EXPECTED_HASH,
       workloadManifestPath: WORKLOAD_MANIFEST_PATH,
       workloadManifestExpectedHash: WORKLOAD_MANIFEST_EXPECTED_HASH,
+      buildProvenancePath: BUILD_PROVENANCE_PATH,
+      buildProvenanceHashPath: BUILD_PROVENANCE_HASH_PATH,
+      buildProvenancePublicKeyPath: BUILD_PROVENANCE_PUBLIC_KEY_PATH,
+      buildProvenanceExpectedHash: BUILD_PROVENANCE_EXPECTED_HASH,
       tools: {
         curl: {
           signatureVerified: true,
@@ -424,6 +432,50 @@ test("production container mode fails when attestation expected hash is overridd
 
   const codes = errorCodes(result);
   assert.equal(codes.has("WORKLOAD_ATTESTATION_REFERENCE_PATH_OVERRIDE_FORBIDDEN"), true);
+});
+
+test("production container mode fails when build provenance path is overridden", async () => {
+  const result = await runPreflightValidation(
+    baseProductionOptions({
+      execution: {
+        ...baseProductionOptions().execution,
+        buildProvenancePath: path.resolve(__dirname, "./tmp-build-provenance.json"),
+      },
+    }),
+  );
+
+  const codes = errorCodes(result);
+  assert.equal(codes.has("WORKLOAD_PROVENANCE_PATH_OVERRIDE_FORBIDDEN"), true);
+});
+
+test("production container mode fails when build provenance public key path is overridden", async () => {
+  const result = await runPreflightValidation(
+    baseProductionOptions({
+      execution: {
+        ...baseProductionOptions().execution,
+        buildProvenancePublicKeyPath: path.resolve(__dirname, "./tmp-build-provenance.pub"),
+      },
+    }),
+  );
+
+  const codes = errorCodes(result);
+  assert.equal(codes.has("WORKLOAD_PROVENANCE_KEY_PATH_OVERRIDE_FORBIDDEN"), true);
+});
+
+test("production container mode fails when inline build provenance public key override is present", async () => {
+  const previousInline = process.env.WORKLOAD_PROVENANCE_PUBLIC_KEY;
+  process.env.WORKLOAD_PROVENANCE_PUBLIC_KEY = "override-not-allowed";
+  try {
+    const result = await runPreflightValidation(baseProductionOptions());
+    const codes = errorCodes(result);
+    assert.equal(codes.has("WORKLOAD_PROVENANCE_KEY_OVERRIDE_FORBIDDEN"), true);
+  } finally {
+    if (typeof previousInline === "undefined") {
+      delete process.env.WORKLOAD_PROVENANCE_PUBLIC_KEY;
+    } else {
+      process.env.WORKLOAD_PROVENANCE_PUBLIC_KEY = previousInline;
+    }
+  }
 });
 
 test("production container mode fails when workload manifest hash does not match expected hash", async () => {

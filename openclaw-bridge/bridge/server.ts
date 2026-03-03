@@ -523,6 +523,8 @@ async function executeLegacyBridgeMcpTool(
 }
 
 function createBridgeMcpServer(context: BridgeMcpContext): McpJsonRpcServer {
+  const trustedLocalCaller = !context.bridgeAuthToken;
+
   const server = new McpJsonRpcServer(
     {
       name: "openclaw-bridge-sse-mcp",
@@ -543,6 +545,8 @@ function createBridgeMcpServer(context: BridgeMcpContext): McpJsonRpcServer {
       source: "mcp_sse",
       caller: "bridge_mcp_sse",
       authHeader: context.sessionAuthHeader,
+      trustedInProcessCaller: trustedLocalCaller,
+      trustedInProcessRole: "internal",
       legacyListTools: async () => BRIDGE_MCP_TOOLS as unknown as ExecutionToolDescriptor[],
     });
     return {
@@ -560,8 +564,13 @@ function createBridgeMcpServer(context: BridgeMcpContext): McpJsonRpcServer {
       source: "mcp_sse",
       caller: "bridge_mcp_sse",
       authHeader: context.sessionAuthHeader,
+      trustedInProcessCaller: trustedLocalCaller,
+      trustedInProcessRole: "internal",
       internalFlagRequested: args.internal === true,
       internalToken: typeof args.internal_token === "string" ? args.internal_token : undefined,
+      transportMetadata: {
+        containerImageDigest: String(process.env.EXECUTION_IMAGE_DIGEST || "").trim(),
+      },
       legacyExecute: async (tool, legacyArgs) => executeLegacyBridgeMcpTool(context, tool, legacyArgs),
     };
 
@@ -630,6 +639,30 @@ function resolveHttpErrorStatus(error: unknown): number {
     code === "WORKLOAD_ATTESTATION_CHALLENGE_MISMATCH" ||
     code === "WORKLOAD_ATTESTATION_REPLAY_DETECTED" ||
     code === "WORKLOAD_ATTESTATION_PEER_STICKY_UNTRUSTED"
+  ) {
+    return 503;
+  }
+  if (
+    code === "WORKLOAD_PROVENANCE_NOT_TRUSTED" ||
+    code === "WORKLOAD_PROVENANCE_MISSING" ||
+    code === "WORKLOAD_PROVENANCE_HASH_MISSING" ||
+    code === "WORKLOAD_PROVENANCE_HASH_MISMATCH" ||
+    code === "WORKLOAD_PROVENANCE_SIGNATURE_INVALID" ||
+    code === "WORKLOAD_PROVENANCE_SCHEMA_INVALID" ||
+    code === "WORKLOAD_PROVENANCE_KEY_MISSING" ||
+    code === "WORKLOAD_PROVENANCE_KEY_INVALID" ||
+    code === "WORKLOAD_PROVENANCE_KEY_PATH_OVERRIDE_FORBIDDEN" ||
+    code === "WORKLOAD_PROVENANCE_KEY_OVERRIDE_FORBIDDEN" ||
+    code === "WORKLOAD_PROVENANCE_PATH_OVERRIDE_FORBIDDEN" ||
+    code === "WORKLOAD_PROVENANCE_HASH_PATH_OVERRIDE_FORBIDDEN" ||
+    code === "WORKLOAD_PROVENANCE_SYMLINK_FORBIDDEN" ||
+    code === "WORKLOAD_PROVENANCE_OWNER_INVALID" ||
+    code === "WORKLOAD_PROVENANCE_WRITABLE_IN_PRODUCTION" ||
+    code === "WORKLOAD_PROVENANCE_PARENT_DIR_WRITABLE" ||
+    code === "WORKLOAD_PROVENANCE_MOUNT_NOT_READONLY" ||
+    code === "WORKLOAD_PROVENANCE_LOCK_MISMATCH" ||
+    code === "WORKLOAD_PROVENANCE_SNAPSHOT_MISMATCH" ||
+    code === "WORKLOAD_PROVENANCE_DIGEST_MISMATCH"
   ) {
     return 503;
   }
@@ -1098,6 +1131,14 @@ async function main(): Promise<void> {
       String(process.env.NODE_ENV || "").trim().toLowerCase() === "production",
     attestationReferencePath: String(process.env.WORKLOAD_ATTESTATION_REFERENCE_PATH || "").trim(),
     attestationReferenceExpectedHash: String(process.env.WORKLOAD_ATTESTATION_REFERENCE_EXPECTED_HASH || "").trim().toLowerCase(),
+    workloadProvenanceEnabled:
+      String(process.env.WORKLOAD_PROVENANCE_ENABLED || "").trim().toLowerCase() === "true" ||
+      String(process.env.NODE_ENV || "").trim().toLowerCase() === "production",
+    buildProvenancePath: String(process.env.WORKLOAD_PROVENANCE_PATH || "").trim(),
+    buildProvenanceHashPath: String(process.env.WORKLOAD_PROVENANCE_HASH_PATH || "").trim(),
+    buildProvenancePublicKeyPath: String(process.env.WORKLOAD_PROVENANCE_PUBLIC_KEY_PATH || "").trim(),
+    buildProvenanceExpectedHash: String(process.env.WORKLOAD_PROVENANCE_EXPECTED_HASH || "").trim().toLowerCase(),
+    workloadProvenanceReverifyTtlMs: Number.parseInt(String(process.env.WORKLOAD_PROVENANCE_REVERIFY_TTL_MS || ""), 10) || undefined,
     legacyVisibleToolsByRole: {
       supervisor: ["bridge_health", "bridge_list_jobs", "bridge_job_status", "bridge_submit_job", "bridge_cancel_job", "bridge_execute_tool"],
       internal: BRIDGE_MCP_TOOLS.map((tool) => tool.name),
@@ -1251,9 +1292,16 @@ async function main(): Promise<void> {
           }
         }, mcpSseKeepAliveMs);
 
+        let cleanedUp = false;
         const cleanupSession = () => {
+          if (cleanedUp) {
+            return;
+          }
+          cleanedUp = true;
           clearInterval(keepAliveTimer);
           mcpSseSessions.delete(sessionId);
+          transport.onclose = undefined;
+          transport.onerror = undefined;
           void mcpServer.close().catch(() => undefined);
         };
 
@@ -1358,6 +1406,12 @@ async function main(): Promise<void> {
       if (method === "POST" && route.type === "execute-tool") {
         const body = await readBody(req);
         const parsed = parseExecuteToolBody(body);
+        const runtimeDigestHeader =
+          (typeof req.headers["x-openclaw-container-digest"] === "string" && req.headers["x-openclaw-container-digest"]) ||
+          (typeof req.headers["x-openclaw-execution-image-digest"] === "string" &&
+            req.headers["x-openclaw-execution-image-digest"]) ||
+          (typeof req.headers["x-container-image-digest"] === "string" && req.headers["x-container-image-digest"]) ||
+          String(process.env.EXECUTION_IMAGE_DIGEST || "").trim();
         const executionResult = await executionRouter.execute(parsed.tool, parsed.args || {}, {
           requestId: `route-execute-${Date.now()}`,
           workspaceRoot,
@@ -1368,6 +1422,7 @@ async function main(): Promise<void> {
           internalToken: parsed.internal_token,
           transportMetadata: {
             skill: parsed.skill,
+            containerImageDigest: String(runtimeDigestHeader || "").trim(),
           },
           legacyExecute: async (tool, legacyArgs) => {
             return executeLegacyBridgeRouteTool({

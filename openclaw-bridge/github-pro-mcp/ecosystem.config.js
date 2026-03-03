@@ -28,6 +28,7 @@ module.exports = {
       name: 'openclaw-opencode-daemon',
       cwd: `${__dirname}/../skills/opencode-daemon`,
       script: 'server.js',
+      exec_mode: 'fork',
       instances: 1,
       autorestart: true,
       watch: false,

@@ -33,7 +33,11 @@
     "ci:phase24-governance": "npm run workload:verify && npm run phase24:validate",
     "attestation:verify": "npm run bridge:build && node dist/scripts/verify-workload-attestation.js",
     "phase25:validate": "npm run bridge:build && node dist/scripts/validate-phase25.js",
-    "ci:phase25-governance": "npm run attestation:verify && npm run phase25:validate"
+    "ci:phase25-governance": "npm run attestation:verify && npm run phase25:validate",
+    "provenance:generate": "npm run bridge:build && node dist/scripts/generate-build-provenance.js",
+    "provenance:verify": "npm run bridge:build && node dist/scripts/verify-build-provenance.js",
+    "phase26:validate": "npm run bridge:build && node dist/scripts/validate-phase26.js",
+    "ci:phase26-governance": "npm run ci:phase25-governance && npm run provenance:verify && npm run phase26:validate"
   },
   "version": "0.1.0"
 }

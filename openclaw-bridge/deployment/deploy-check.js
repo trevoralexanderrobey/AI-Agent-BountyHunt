@@ -55,6 +55,16 @@ const REQUIRED_PHASE25_FILES = [
   path.resolve(__dirname, "..", "scripts", "verify-workload-attestation.ts"),
   path.resolve(__dirname, "..", "scripts", "validate-phase25.ts"),
 ];
+const REQUIRED_PHASE26_FILES = [
+  path.resolve(__dirname, "..", "src", "security", "workload-provenance.ts"),
+  path.resolve(__dirname, "..", "security", "workload-provenance.js"),
+  path.resolve(__dirname, "..", "security", "build-provenance.json"),
+  path.resolve(__dirname, "..", "security", "build-provenance.hash"),
+  path.resolve(__dirname, "..", "security", "build-provenance.pub"),
+  path.resolve(__dirname, "..", "scripts", "generate-build-provenance.ts"),
+  path.resolve(__dirname, "..", "scripts", "verify-build-provenance.ts"),
+  path.resolve(__dirname, "..", "scripts", "validate-phase26.ts"),
+];
 
 function normalizeString(value) {
   return typeof value === "string" ? value.trim() : "";
@@ -227,6 +237,17 @@ async function runDeployCheck(options = {}) {
     });
   }
 
+  const phase26ProvenanceCheck = checkRequiredAbsoluteFiles(REQUIRED_PHASE26_FILES);
+  if (phase26ProvenanceCheck.missing.length > 0) {
+    errors.push({
+      code: "PHASE26_PROVENANCE_GOVERNANCE_MISSING",
+      message: "One or more Phase 26 provenance governance files are missing or empty",
+      details: {
+        missing: phase26ProvenanceCheck.missing,
+      },
+    });
+  }
+
   const result = {
     ready_for_production: errors.length === 0,
     warnings,
@@ -274,6 +295,11 @@ async function runDeployCheck(options = {}) {
         required: REQUIRED_PHASE25_FILES,
         present: phase25AttestationCheck.present,
         missing: phase25AttestationCheck.missing,
+      },
+      phase26Provenance: {
+        required: REQUIRED_PHASE26_FILES,
+        present: phase26ProvenanceCheck.present,
+        missing: phase26ProvenanceCheck.missing,
       },
     },
   };

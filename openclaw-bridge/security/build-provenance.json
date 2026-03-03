@@ -1,0 +1,20 @@
+{
+  "attestationReferenceHash": "4fc4d77a01bd881aa1a4da0a799e3f92e62668eca7bcab90d2dedc49cc4a08e1",
+  "buildEnvironmentFingerprint": "959bbc57c8855122460da6a23768aff6a04fca318b5694e74e2d32e7ff4fa86d",
+  "buildTimestamp": "2026-03-03T02:28:44.472Z",
+  "containerImageDigests": {
+    "phase24.test.tool": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "supervisor.read_file": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+  },
+  "dependencyLockHash": "b11d25de0ee9da7e8a149e488aac0c4081aee3d7e35391143c3ec58feb7264e7",
+  "executionPolicyHash": "1cc42dc491b60ee6edab0d06232b9f548b68432ee84005c49983abd044775599",
+  "gitCommitSha": "5beab332c2158fbff0bd95b6d7be44029de54817",
+  "nodeVersion": "v25.3.0",
+  "provenanceHash": "979ebbacc1dea0430d73f9c55df07f46e4ee5649b7db331aaf65536e20e5fb6a",
+  "provenanceSignature": "1XyW4xFR2sQLdFr8Ja0D2OaQ/Y4x9FUwgPM3BMx8ZdkXIcMuRArn4hwdBXcicOecTXo0ZZIVbNLJIWV7CMwUBQ==",
+  "provenanceVersion": 1,
+  "repository": "https://github.com/trevoralexanderrobey/AI-Agent-BountyHunt.git",
+  "secretManifestHash": "24d0f01bfb6206f1da0afd170f4cbbf2ba22d7a27e72389499ae922bed64fdc8",
+  "signatureAlgorithm": "ed25519",
+  "workloadManifestHash": "18a01a1729177ca3ccf9da30ea701e53faaffff3617dcb965e9a8062d5ca1671"
+}

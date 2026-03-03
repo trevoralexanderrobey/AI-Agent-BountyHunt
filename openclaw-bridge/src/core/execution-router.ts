@@ -21,6 +21,11 @@ import {
   getAttestationState as getRuntimeAttestationState,
   initializeAttestation,
 } from "../security/workload-attestation";
+import {
+  WorkloadProvenanceRuntime,
+  WorkloadProvenanceVerificationResult,
+  createWorkloadProvenanceRuntime,
+} from "../security/workload-provenance";
 
 const execFileAsync = promisify(execFile);
 
@@ -117,6 +122,16 @@ export interface ExecutionRouter {
     evidence: unknown;
     challenge?: WorkloadAttestationChallenge;
   }): WorkloadAttestationVerificationResult;
+  getWorkloadProvenanceMetadata(): {
+    nodeId: string;
+    trusted: boolean;
+    blockedReason: string;
+    provenanceHash: string;
+    gitCommitSha: string;
+    lastVerifiedAt: number;
+    ttlMs: number;
+    stale: boolean;
+  };
 }
 
 export interface ExecutionToolDescriptor {
@@ -171,6 +186,12 @@ export interface ExecutionRouterOptions {
   workloadAttestationEnabled?: boolean;
   attestationReferencePath?: string;
   attestationReferenceExpectedHash?: string;
+  workloadProvenanceEnabled?: boolean;
+  buildProvenancePath?: string;
+  buildProvenanceHashPath?: string;
+  buildProvenancePublicKeyPath?: string;
+  buildProvenanceExpectedHash?: string;
+  workloadProvenanceReverifyTtlMs?: number;
   workloadRuntimeDescriptorResolver?: (
     tool: string,
     context: WorkloadIntegrityContext,
@@ -279,6 +300,26 @@ const SAFE_ERROR_MESSAGES: Record<string, string> = {
   WORKLOAD_ATTESTATION_CHALLENGE_MISMATCH: "Execution attestation verification failed",
   WORKLOAD_ATTESTATION_REPLAY_DETECTED: "Execution attestation verification failed",
   WORKLOAD_ATTESTATION_PEER_STICKY_UNTRUSTED: "Execution attestation verification failed",
+  WORKLOAD_PROVENANCE_NOT_TRUSTED: "Execution provenance verification failed",
+  WORKLOAD_PROVENANCE_MISSING: "Execution provenance verification failed",
+  WORKLOAD_PROVENANCE_HASH_MISSING: "Execution provenance verification failed",
+  WORKLOAD_PROVENANCE_HASH_MISMATCH: "Execution provenance verification failed",
+  WORKLOAD_PROVENANCE_SIGNATURE_INVALID: "Execution provenance verification failed",
+  WORKLOAD_PROVENANCE_SCHEMA_INVALID: "Execution provenance verification failed",
+  WORKLOAD_PROVENANCE_KEY_MISSING: "Execution provenance verification failed",
+  WORKLOAD_PROVENANCE_KEY_INVALID: "Execution provenance verification failed",
+  WORKLOAD_PROVENANCE_KEY_PATH_OVERRIDE_FORBIDDEN: "Execution provenance verification failed",
+  WORKLOAD_PROVENANCE_KEY_OVERRIDE_FORBIDDEN: "Execution provenance verification failed",
+  WORKLOAD_PROVENANCE_PATH_OVERRIDE_FORBIDDEN: "Execution provenance verification failed",
+  WORKLOAD_PROVENANCE_HASH_PATH_OVERRIDE_FORBIDDEN: "Execution provenance verification failed",
+  WORKLOAD_PROVENANCE_SYMLINK_FORBIDDEN: "Execution provenance verification failed",
+  WORKLOAD_PROVENANCE_OWNER_INVALID: "Execution provenance verification failed",
+  WORKLOAD_PROVENANCE_WRITABLE_IN_PRODUCTION: "Execution provenance verification failed",
+  WORKLOAD_PROVENANCE_PARENT_DIR_WRITABLE: "Execution provenance verification failed",
+  WORKLOAD_PROVENANCE_MOUNT_NOT_READONLY: "Execution provenance verification failed",
+  WORKLOAD_PROVENANCE_LOCK_MISMATCH: "Execution provenance verification failed",
+  WORKLOAD_PROVENANCE_SNAPSHOT_MISMATCH: "Execution provenance verification failed",
+  WORKLOAD_PROVENANCE_DIGEST_MISMATCH: "Execution provenance verification failed",
 };
 
 const COUNTER_ALIASES: Record<string, string[]> = {
@@ -733,6 +774,30 @@ export function createExecutionRouter(options: ExecutionRouterOptions): Executio
   const attestationReferenceExpectedHash = normalizeString(
     options.attestationReferenceExpectedHash || process.env.WORKLOAD_ATTESTATION_REFERENCE_EXPECTED_HASH,
   ).toLowerCase();
+  const workloadProvenanceEnabledConfigured =
+    typeof options.workloadProvenanceEnabled === "boolean"
+      ? options.workloadProvenanceEnabled
+      : parseBoolean(process.env.WORKLOAD_PROVENANCE_ENABLED, production);
+  const workloadProvenanceEnabled = production ? true : workloadProvenanceEnabledConfigured;
+  const buildProvenancePath =
+    typeof options.buildProvenancePath === "string"
+      ? options.buildProvenancePath
+      : normalizeString(process.env.WORKLOAD_PROVENANCE_PATH);
+  const buildProvenanceHashPath =
+    typeof options.buildProvenanceHashPath === "string"
+      ? options.buildProvenanceHashPath
+      : normalizeString(process.env.WORKLOAD_PROVENANCE_HASH_PATH);
+  const buildProvenancePublicKeyPath =
+    typeof options.buildProvenancePublicKeyPath === "string"
+      ? options.buildProvenancePublicKeyPath
+      : normalizeString(process.env.WORKLOAD_PROVENANCE_PUBLIC_KEY_PATH);
+  const buildProvenanceExpectedHash = normalizeString(
+    options.buildProvenanceExpectedHash || process.env.WORKLOAD_PROVENANCE_EXPECTED_HASH,
+  ).toLowerCase();
+  const workloadProvenanceReverifyTtlMs = parsePositiveInt(
+    options.workloadProvenanceReverifyTtlMs || process.env.WORKLOAD_PROVENANCE_REVERIFY_TTL_MS,
+    120_000,
+  );
 
   const maxPatchBytes = parsePositiveInt(options.maxPatchBytes, DEFAULT_MAX_PATCH_BYTES);
   const maxWriteFileBytes = parsePositiveInt(options.maxWriteFileBytes, DEFAULT_MAX_WRITE_FILE_BYTES);
@@ -940,6 +1005,44 @@ export function createExecutionRouter(options: ExecutionRouterOptions): Executio
         },
       })
     : null;
+  const workloadProvenanceRuntime: WorkloadProvenanceRuntime | null = workloadProvenanceEnabled
+    ? createWorkloadProvenanceRuntime({
+        production,
+        nodeId: normalizeString(process.env.SUPERVISOR_NODE_ID) || "node-unknown",
+        provenancePath: buildProvenancePath || undefined,
+        provenanceHashPath: buildProvenanceHashPath || undefined,
+        publicKeyPath: buildProvenancePublicKeyPath || undefined,
+        expectedProvenanceHash: buildProvenanceExpectedHash || undefined,
+        reverifyTtlMs: workloadProvenanceReverifyTtlMs,
+        allowProductionPathOverride: false,
+        metrics: {
+          increment: (name, labels = {}) => {
+            incrementCounter(name, 1);
+            if (Object.keys(labels).length > 0) {
+              const stableLabel = JSON.stringify(labels, Object.keys(labels).sort());
+              incrementCounter(`${name}:${stableLabel}`, 1);
+            }
+          },
+          gauge: (name, value) => {
+            counters[name] = Number(value) || 0;
+          },
+        },
+        auditLog: (event) => {
+          auditLogger.append({
+            requestId: "workload-provenance",
+            tool: normalizeString((event.details || {}).workloadID) || "workload-provenance",
+            caller: "workload_provenance",
+            timestamp: new Date().toISOString(),
+            argsHash: hashArgs(event.details || {}),
+            resultStatus: event.status === "error" ? "error" : "ok",
+            role: "internal",
+            source: "in_process",
+            code: event.code,
+            details: event.details,
+          });
+        },
+      })
+    : null;
 
   if (workloadIntegrityVerifier) {
     const startup = workloadIntegrityVerifier.initialize();
@@ -963,6 +1066,22 @@ export function createExecutionRouter(options: ExecutionRouterOptions): Executio
       incrementCounter("workload.attestation.failure", 1);
     } else {
       incrementCounter("workload.attestation.success", 1);
+    }
+  }
+
+  if (workloadProvenanceRuntime) {
+    const startup = workloadProvenanceRuntime.initializeProvenance();
+    if (!startup.ok) {
+      incrementCounter("workload.provenance.failure", 1);
+      incrementCounter("workload.provenance.block", 1);
+      if (startup.code === "WORKLOAD_PROVENANCE_SIGNATURE_INVALID") {
+        incrementCounter("workload.provenance.signature_invalid", 1);
+      }
+      if (startup.code === "WORKLOAD_PROVENANCE_LOCK_MISMATCH") {
+        incrementCounter("workload.provenance.lock_mismatch", 1);
+      }
+    } else {
+      incrementCounter("workload.provenance.success", 1);
     }
   }
 
@@ -1511,6 +1630,35 @@ export function createExecutionRouter(options: ExecutionRouterOptions): Executio
         }
       }
 
+      if (workloadProvenanceRuntime) {
+        const provenanceVerification: WorkloadProvenanceVerificationResult = await workloadProvenanceRuntime.verifyExecution({
+          workloadID: toolName,
+          runtimeDigest: resolveRuntimeImageDigest({
+            transportMetadata: normalizeRecord(context.transportMetadata),
+          }),
+          localMetadata,
+        });
+        if (!provenanceVerification.ok) {
+          incrementCounter("workload.provenance.failure", 1);
+          incrementCounter("workload.provenance.block", 1);
+          const failureReason = normalizeString(provenanceVerification.details.failureReason || provenanceVerification.code);
+          if (failureReason === "WORKLOAD_PROVENANCE_SIGNATURE_INVALID") {
+            incrementCounter("workload.provenance.signature_invalid", 1);
+          }
+          if (failureReason === "WORKLOAD_PROVENANCE_DIGEST_MISMATCH") {
+            incrementCounter("workload.provenance.digest_mismatch", 1);
+          }
+          if (failureReason === "WORKLOAD_PROVENANCE_LOCK_MISMATCH") {
+            incrementCounter("workload.provenance.lock_mismatch", 1);
+          }
+          return {
+            ok: false,
+            code: "WORKLOAD_PROVENANCE_NOT_TRUSTED",
+            message: sanitizeMessageForClient("WORKLOAD_PROVENANCE_NOT_TRUSTED"),
+          };
+        }
+      }
+
       const registry = await getRegistry();
       const definition = registry.find((entry) => entry.name === toolName);
 
@@ -1793,6 +1941,22 @@ export function createExecutionRouter(options: ExecutionRouterOptions): Executio
     );
   }
 
+  function getWorkloadProvenanceMetadata() {
+    if (!workloadProvenanceRuntime) {
+      return {
+        nodeId: normalizeString(process.env.SUPERVISOR_NODE_ID) || "node-unknown",
+        trusted: false,
+        blockedReason: "",
+        provenanceHash: "",
+        gitCommitSha: "",
+        lastVerifiedAt: 0,
+        ttlMs: 0,
+        stale: true,
+      };
+    }
+    return workloadProvenanceRuntime.getProvenanceState();
+  }
+
   return {
     execute,
     listTools,
@@ -1804,5 +1968,6 @@ export function createExecutionRouter(options: ExecutionRouterOptions): Executio
     evaluateWorkloadAttestationPeerPosture,
     generateAttestationEvidence,
     verifyPeerAttestationEvidence,
+    getWorkloadProvenanceMetadata,
   };
 }

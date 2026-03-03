@@ -222,6 +222,15 @@ function createHttpServer(options = {}) {
       ),
       attestationReferencePath: String(process.env.WORKLOAD_ATTESTATION_REFERENCE_PATH || "").trim(),
       attestationReferenceExpectedHash: String(process.env.WORKLOAD_ATTESTATION_REFERENCE_EXPECTED_HASH || "").trim().toLowerCase(),
+      workloadProvenanceEnabled: parseBoolean(
+        process.env.WORKLOAD_PROVENANCE_ENABLED,
+        String(process.env.NODE_ENV || "").trim().toLowerCase() === "production",
+      ),
+      buildProvenancePath: String(process.env.WORKLOAD_PROVENANCE_PATH || "").trim(),
+      buildProvenanceHashPath: String(process.env.WORKLOAD_PROVENANCE_HASH_PATH || "").trim(),
+      buildProvenancePublicKeyPath: String(process.env.WORKLOAD_PROVENANCE_PUBLIC_KEY_PATH || "").trim(),
+      buildProvenanceExpectedHash: String(process.env.WORKLOAD_PROVENANCE_EXPECTED_HASH || "").trim().toLowerCase(),
+      workloadProvenanceReverifyTtlMs: parsePositiveInt(process.env.WORKLOAD_PROVENANCE_REVERIFY_TTL_MS, undefined),
       integrityMetadataProvider: () => ({
         local: typeof supervisor.getExecutionMetadata === "function" ? supervisor.getExecutionMetadata() : {},
         peers: typeof supervisor.getExecutionPeers === "function" ? supervisor.getExecutionPeers() : [],

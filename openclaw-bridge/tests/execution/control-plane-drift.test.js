@@ -33,10 +33,16 @@ test("phase validation utilities are not imported by runtime authority paths", (
     assert.equal(content.includes("validate-phase23"), false, `unexpected validate-phase23 reference in ${filePath}`);
     assert.equal(content.includes("validate-phase24"), false, `unexpected validate-phase24 reference in ${filePath}`);
     assert.equal(content.includes("validate-phase25"), false, `unexpected validate-phase25 reference in ${filePath}`);
+    assert.equal(content.includes("validate-phase26"), false, `unexpected validate-phase26 reference in ${filePath}`);
     assert.equal(
       content.includes("verify-workload-attestation"),
       false,
       `unexpected verify-workload-attestation reference in ${filePath}`,
+    );
+    assert.equal(
+      content.includes("verify-build-provenance"),
+      false,
+      `unexpected verify-build-provenance reference in ${filePath}`,
     );
   }
 });
