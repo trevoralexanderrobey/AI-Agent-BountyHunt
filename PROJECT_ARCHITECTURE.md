@@ -830,7 +830,21 @@ Bridge / Director Agent
 
 ---
 
-### 30. Burp Suite Integration (BionicLink)
+### 30. Workload Provenance (Phase 26)
+
+**Provenance Runtime**: `/Users/trevorrobey/AI-Agent-BountyHunt/openclaw-bridge/src/security/workload-provenance.ts`
+**Provenance Manifest**: `/Users/trevorrobey/AI-Agent-BountyHunt/openclaw-bridge/security/build-provenance.json`
+**Dependency Lock**: `/Users/trevorrobey/AI-Agent-BountyHunt/package-lock.json`
+**Purpose**: Cryptographically tie executing container workloads back to a verified build supply chain mapping git commits to dependencies and isolated environments.
+
+#### Capabilities
+- **Supply Chain Integrity**: Validates `gitCommitSha`, dependency hashes, and build platform fingerprints to prevent supply-chain drift and guarantee reproducible environment baselines.
+- **Pinned Sub-Container Bounds**: Enforces container lifecycle orchestration to verify precise matching container image digests extracted from `containerImageDigests`.
+- **Offline Signature Anchors**: Ensures the validity of the build process via Ed25519 offline public keys that cannot be tampered with by runtime compromise.
+
+---
+
+### 31. Burp Suite Integration (BionicLink)
 
 **Extension**: BionicLink (custom Burp extension)
 **Port**: 8090 (HTTP)

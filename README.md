@@ -37,6 +37,7 @@ Key capabilities:
 - **Supervisor Structural Hardening** — Secure canonical execution routing, isolated workspace guards, and queued audit logging
 - **Preflight Validation & Workload Integrity** — Comprehensive boot-time environment enforcement and cryptographic workload validation
 - **Workload Attestation** — Cryptographic Ed25519 node posture verification, signature challenges, and peer trust convergence
+- **Workload Provenance** — Supply-chain integrity bound to git commit SHAs, dependency hashes, and pinned image digests
 - **Cluster Simulation** — Deterministic fault injection harness for multi-node scenario testing
 - **MCP Bridge** — Director → Executor pattern connecting GitHub Pro / Antigravity / Codex to OpenClaw
 
