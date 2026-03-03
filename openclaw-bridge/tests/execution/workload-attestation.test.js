@@ -18,6 +18,7 @@ function createReferenceFixture() {
     executionPolicyHash: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
     secretManifestHash: "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
     workloadManifestHash: "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+    offensiveManifestHash: "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
     evidenceTtlMs: 120000,
   };
   fs.writeFileSync(referencePath, `${JSON.stringify(reference, null, 2)}\n`, "utf8");
@@ -30,6 +31,7 @@ function createReferenceFixture() {
       executionPolicyHash: reference.executionPolicyHash,
       secretManifestHash: reference.secretManifestHash,
       workloadManifestHash: reference.workloadManifestHash,
+      offensiveManifestHash: reference.offensiveManifestHash,
     },
   };
 }

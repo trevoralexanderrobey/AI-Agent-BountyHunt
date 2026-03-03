@@ -58,6 +58,7 @@ function hasRequiredEvidenceFields(value: unknown): boolean {
     "workloadManifestHash",
     "executionPolicyHash",
     "secretManifestHash",
+    "offensiveManifestHash",
     "runtimeMeasurements",
     "snapshotHash",
     "timestampMs",
@@ -128,6 +129,7 @@ function runVerification(args: { referencePath?: string; expectedHash?: string }
     executionPolicyHash: loaded.reference.executionPolicyHash,
     secretManifestHash: loaded.reference.secretManifestHash,
     workloadManifestHash: loaded.reference.workloadManifestHash,
+    offensiveManifestHash: loaded.reference.offensiveManifestHash,
   };
 
   const runtime = initializeAttestation({

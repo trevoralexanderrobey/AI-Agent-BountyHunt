@@ -36,6 +36,13 @@ const {
   resolveDefaultBuildProvenancePublicKeyPath,
   resolveDefaultDependencyLockPath,
 } = require("../security/workload-provenance.js");
+const {
+  loadOffensiveManifestFromDisk,
+  resolveDefaultOffensiveManifestHashPath,
+  resolveDefaultOffensiveManifestPath,
+  resolveDefaultOffensiveManifestPublicKeyPath,
+  resolveDefaultOffensiveManifestSignaturePath,
+} = require("../security/offensive-workload-manifest.js");
 const { createToolRegistry } = require("../tools/tool-registry.js");
 const { registerBatch1Tools } = require("../tools/adapters/index.js");
 const { registerBatch2Tools } = require("../tools/adapters/batch-2-index.js");
@@ -1447,6 +1454,226 @@ function validatePhase26Provenance(executionConfig, errors, warnings, isProducti
   }
 }
 
+function validatePhase27OffensiveDomain(executionConfig, errors, warnings, isProduction, mode) {
+  if (mode !== "container") {
+    return;
+  }
+
+  const collection = isProduction ? errors : warnings;
+  const defaultManifestPath = resolveDefaultOffensiveManifestPath();
+  const defaultHashPath = resolveDefaultOffensiveManifestHashPath();
+  const defaultSignaturePath = resolveDefaultOffensiveManifestSignaturePath();
+  const defaultPublicKeyPath = resolveDefaultOffensiveManifestPublicKeyPath();
+  const defaultWorkloadManifestPath = resolveDefaultWorkloadManifestPath();
+  const defaultProvenancePath = resolveDefaultBuildProvenancePath();
+  const defaultProvenanceHashPath = resolveDefaultBuildProvenanceHashPath();
+  const defaultProvenancePublicKeyPath = resolveDefaultBuildProvenancePublicKeyPath();
+  const defaultDependencyLockPath = resolveDefaultDependencyLockPath();
+
+  const configuredManifestPath = normalizeString(process.env.OFFENSIVE_MANIFEST_PATH);
+  const configuredHashPath = normalizeString(process.env.OFFENSIVE_MANIFEST_HASH_PATH);
+  const configuredSignaturePath = normalizeString(process.env.OFFENSIVE_MANIFEST_SIGNATURE_PATH);
+  const configuredPublicKeyPath = normalizeString(process.env.OFFENSIVE_MANIFEST_PUBLIC_KEY_PATH);
+  const configuredExpectedHash = normalizeString(process.env.OFFENSIVE_MANIFEST_EXPECTED_HASH).toLowerCase();
+
+  if (isProduction) {
+    if (configuredManifestPath && resolvePath(configuredManifestPath) !== resolvePath(defaultManifestPath)) {
+      addIssue(errors, "OFFENSIVE_MANIFEST_PATH_OVERRIDE_FORBIDDEN", "Offensive manifest path override is forbidden in production", {
+        configuredPath: resolvePath(configuredManifestPath),
+        requiredPath: resolvePath(defaultManifestPath),
+      });
+    }
+    if (configuredHashPath && resolvePath(configuredHashPath) !== resolvePath(defaultHashPath)) {
+      addIssue(errors, "OFFENSIVE_MANIFEST_HASH_PATH_OVERRIDE_FORBIDDEN", "Offensive manifest hash path override is forbidden in production", {
+        configuredPath: resolvePath(configuredHashPath),
+        requiredPath: resolvePath(defaultHashPath),
+      });
+    }
+    if (configuredSignaturePath && resolvePath(configuredSignaturePath) !== resolvePath(defaultSignaturePath)) {
+      addIssue(
+        errors,
+        "OFFENSIVE_MANIFEST_SIGNATURE_PATH_OVERRIDE_FORBIDDEN",
+        "Offensive manifest signature path override is forbidden in production",
+        {
+          configuredPath: resolvePath(configuredSignaturePath),
+          requiredPath: resolvePath(defaultSignaturePath),
+        },
+      );
+    }
+    if (configuredPublicKeyPath && resolvePath(configuredPublicKeyPath) !== resolvePath(defaultPublicKeyPath)) {
+      addIssue(
+        errors,
+        "OFFENSIVE_MANIFEST_PUBLIC_KEY_PATH_OVERRIDE_FORBIDDEN",
+        "Offensive manifest public key path override is forbidden in production",
+        {
+          configuredPath: resolvePath(configuredPublicKeyPath),
+          requiredPath: resolvePath(defaultPublicKeyPath),
+        },
+      );
+    }
+  }
+
+  let loadedOffensive;
+  try {
+    loadedOffensive = loadOffensiveManifestFromDisk({
+      production: false,
+      manifestPath: configuredManifestPath || undefined,
+      hashPath: configuredHashPath || undefined,
+      signaturePath: configuredSignaturePath || undefined,
+      publicKeyPath: configuredPublicKeyPath || undefined,
+      expectedManifestHash: configuredExpectedHash || undefined,
+      allowProductionPathOverride: false,
+      productionContainerMode: false,
+    });
+  } catch (error) {
+    addIssue(
+      collection,
+      error && typeof error.code === "string" ? error.code : "OFFENSIVE_DOMAIN_NOT_TRUSTED",
+      "Offensive manifest verification failed",
+      {
+        reason: error && error.message ? error.message : String(error),
+      },
+    );
+    return;
+  }
+
+  const expectedToolSet = new Set(["nmap", "sqlmap", "nikto", "ffuf"]);
+  const toolNames = Array.isArray(loadedOffensive.manifest.tools)
+    ? loadedOffensive.manifest.tools.map((tool) => normalizeString(tool.toolName).toLowerCase()).filter(Boolean)
+    : [];
+  const actualToolSet = new Set(toolNames);
+  if (
+    toolNames.length !== expectedToolSet.size ||
+    actualToolSet.size !== expectedToolSet.size ||
+    Array.from(expectedToolSet).some((tool) => !actualToolSet.has(tool))
+  ) {
+    addIssue(collection, "OFFENSIVE_DOMAIN_NOT_TRUSTED", "Offensive tool registry is not static", {
+      expectedTools: Array.from(expectedToolSet).sort((a, b) => a.localeCompare(b)),
+      actualTools: Array.from(actualToolSet).sort((a, b) => a.localeCompare(b)),
+    });
+  }
+
+  for (const tool of loadedOffensive.manifest.tools || []) {
+    const digest = normalizeString(tool.containerImageDigest).toLowerCase();
+    if (!/^sha256:[a-f0-9]{64}$/.test(digest)) {
+      addIssue(collection, "WORKLOAD_PROVENANCE_DIGEST_MISMATCH", "Offensive tool digest must be immutable sha256", {
+        toolName: normalizeString(tool.toolName),
+        containerImageDigest: digest,
+      });
+    }
+
+    const profile = tool.isolationProfile && typeof tool.isolationProfile === "object" ? tool.isolationProfile : {};
+    const dropCaps = Array.isArray(profile.dropCapabilities) ? profile.dropCapabilities : [];
+    const writableVolumes = Array.isArray(profile.writableVolumes) ? profile.writableVolumes : [];
+    if (
+      profile.privileged !== false ||
+      profile.hostPID !== false ||
+      profile.hostNetwork !== false ||
+      profile.readOnlyRootFilesystem !== true ||
+      profile.tty !== false ||
+      profile.stdin !== false ||
+      dropCaps.length !== 1 ||
+      dropCaps[0] !== "ALL" ||
+      writableVolumes.length !== 1 ||
+      writableVolumes[0] !== "scratch"
+    ) {
+      addIssue(collection, "WORKLOAD_ISOLATION_INVALID", "Offensive isolation profile is invalid", {
+        toolName: normalizeString(tool.toolName),
+      });
+    }
+
+    const constraints = tool.executionConstraints && typeof tool.executionConstraints === "object" ? tool.executionConstraints : {};
+    if (constraints.nonInteractive !== true) {
+      addIssue(collection, "OFFENSIVE_ARGUMENTS_INVALID", "Offensive workload must enforce non-interactive mode", {
+        toolName: normalizeString(tool.toolName),
+      });
+    }
+  }
+
+  const sqlmapEntry = (loadedOffensive.manifest.tools || []).find(
+    (tool) => normalizeString(tool.toolName).toLowerCase() === "sqlmap",
+  );
+  if (sqlmapEntry) {
+    const forced = new Set((sqlmapEntry.forcedFlags || []).map((entry) => normalizeString(entry).toLowerCase()));
+    const denied = new Set((sqlmapEntry.deniedFlags || []).map((entry) => normalizeString(entry).toLowerCase()));
+    const requiredDenied = ["--os-shell", "--os-pwn", "--file-write", "--file-read", "--udf-inject", "--tamper"];
+    if (!forced.has("--batch")) {
+      addIssue(collection, "OFFENSIVE_ARGUMENTS_INVALID", "SQLMap must force --batch in offensive mode", {});
+    }
+    for (const deniedFlag of requiredDenied) {
+      if (!denied.has(deniedFlag)) {
+        addIssue(collection, "OFFENSIVE_ARGUMENTS_INVALID", "SQLMap denylist is incomplete", {
+          missingFlag: deniedFlag,
+        });
+      }
+    }
+  }
+
+  let workloadManifest;
+  try {
+    const workloadManifestPath = normalizeString(executionConfig.workloadManifestPath || defaultWorkloadManifestPath);
+    workloadManifest = getCanonicalWorkloadManifest(JSON.parse(fs.readFileSync(resolvePath(workloadManifestPath), "utf8")));
+  } catch (error) {
+    addIssue(collection, "WORKLOAD_MANIFEST_SCHEMA_INVALID", "Failed to load workload manifest for offensive binding check", {
+      reason: error && error.message ? error.message : String(error),
+    });
+    return;
+  }
+
+  if (normalizeString(workloadManifest.offensiveManifestHash).toLowerCase() !== loadedOffensive.canonicalPayloadHash) {
+    addIssue(collection, "WORKLOAD_MANIFEST_MISMATCH", "Workload manifest offensive hash must match offensive manifest", {
+      expectedOffensiveManifestHash: loadedOffensive.canonicalPayloadHash,
+      actualOffensiveManifestHash: normalizeString(workloadManifest.offensiveManifestHash).toLowerCase(),
+    });
+  }
+
+  let loadedProvenance;
+  try {
+    loadedProvenance = loadBuildProvenanceFromDisk({
+      production: isProduction,
+      provenancePath: normalizeString(executionConfig.buildProvenancePath) || defaultProvenancePath,
+      provenanceHashPath: normalizeString(executionConfig.buildProvenanceHashPath) || defaultProvenanceHashPath,
+      publicKeyPath: normalizeString(executionConfig.buildProvenancePublicKeyPath) || defaultProvenancePublicKeyPath,
+      expectedProvenanceHash: normalizeString(executionConfig.buildProvenanceExpectedHash).toLowerCase() || undefined,
+      dependencyLockPath: defaultDependencyLockPath,
+      allowProductionPathOverride: false,
+      productionContainerMode: false,
+    });
+  } catch (error) {
+    addIssue(
+      collection,
+      error && typeof error.code === "string" ? error.code : "WORKLOAD_PROVENANCE_NOT_TRUSTED",
+      "Failed to load build provenance for offensive binding check",
+      {
+        reason: error && error.message ? error.message : String(error),
+      },
+    );
+    return;
+  }
+
+  const provenanceOffensiveHash = normalizeString(loadedProvenance.provenance.offensiveManifestHash).toLowerCase();
+  if (provenanceOffensiveHash !== loadedOffensive.canonicalPayloadHash) {
+    addIssue(collection, "WORKLOAD_PROVENANCE_LOCK_MISMATCH", "Build provenance offensive hash must match offensive manifest", {
+      expectedOffensiveManifestHash: loadedOffensive.canonicalPayloadHash,
+      actualOffensiveManifestHash: provenanceOffensiveHash,
+    });
+  }
+
+  for (const tool of loadedOffensive.manifest.tools || []) {
+    const key = normalizeString(tool.workloadID || tool.toolName).toLowerCase();
+    const provenanceDigest = normalizeString(loadedProvenance.provenance.containerImageDigests[key]).toLowerCase();
+    const expectedDigest = normalizeString(tool.containerImageDigest).toLowerCase();
+    if (!provenanceDigest || provenanceDigest !== expectedDigest) {
+      addIssue(collection, "WORKLOAD_PROVENANCE_DIGEST_MISMATCH", "Offensive tool digest must match provenance", {
+        toolName: normalizeString(tool.toolName),
+        workloadID: key,
+        expectedDigest,
+        actualDigest: provenanceDigest,
+      });
+    }
+  }
+}
+
 function resolveExecutionToolImageReference(executionConfig, slug, toolConfig) {
   const direct = normalizeString(toolConfig && toolConfig.image);
   if (direct) {
@@ -2221,6 +2448,13 @@ async function runPreflightValidation(options = {}) {
     executionValidation.mode,
   );
   validatePhase26Provenance(
+    executionConfig,
+    errors,
+    warnings,
+    productionMode.isProduction,
+    executionValidation.mode,
+  );
+  validatePhase27OffensiveDomain(
     executionConfig,
     errors,
     warnings,

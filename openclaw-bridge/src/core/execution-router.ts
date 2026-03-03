@@ -26,6 +26,11 @@ import {
   WorkloadProvenanceVerificationResult,
   createWorkloadProvenanceRuntime,
 } from "../security/workload-provenance";
+import {
+  OffensiveExecutionPlan,
+  OffensiveDomainRuntime,
+  createOffensiveDomainRuntime,
+} from "../security/offensive-domain";
 
 const execFileAsync = promisify(execFile);
 
@@ -40,6 +45,7 @@ export interface ExecutionContext {
   workspaceRoot: string;
   source: ExecutionSource;
   caller: string;
+  principalId?: string;
   authHeader?: string;
   internalFlagRequested?: boolean;
   internalToken?: string;
@@ -132,6 +138,16 @@ export interface ExecutionRouter {
     ttlMs: number;
     stale: boolean;
   };
+  getOffensiveDomainMetadata(): {
+    nodeId: string;
+    trusted: boolean;
+    blockedReason: string;
+    manifestHash: string;
+    manifestPath: string;
+    lastVerifiedAt: number;
+    toolCount: number;
+    tools: string[];
+  };
 }
 
 export interface ExecutionToolDescriptor {
@@ -192,6 +208,17 @@ export interface ExecutionRouterOptions {
   buildProvenancePublicKeyPath?: string;
   buildProvenanceExpectedHash?: string;
   workloadProvenanceReverifyTtlMs?: number;
+  offensiveManifestPath?: string;
+  offensiveManifestHashPath?: string;
+  offensiveManifestSignaturePath?: string;
+  offensiveManifestPublicKeyPath?: string;
+  offensiveExpectedHash?: string;
+  offensiveRateLimitWindowMs?: number;
+  offensiveMaxPerToolPerWindow?: number;
+  offensiveMaxConcurrentOffensive?: number;
+  offensiveMaxConcurrentPerTool?: number;
+  offensiveBackoffBaseMs?: number;
+  offensiveBackoffMaxMs?: number;
   workloadRuntimeDescriptorResolver?: (
     tool: string,
     context: WorkloadIntegrityContext,
@@ -320,6 +347,15 @@ const SAFE_ERROR_MESSAGES: Record<string, string> = {
   WORKLOAD_PROVENANCE_LOCK_MISMATCH: "Execution provenance verification failed",
   WORKLOAD_PROVENANCE_SNAPSHOT_MISMATCH: "Execution provenance verification failed",
   WORKLOAD_PROVENANCE_DIGEST_MISMATCH: "Execution provenance verification failed",
+  OFFENSIVE_DOMAIN_NOT_TRUSTED: "Offensive workload governance verification failed",
+  UNREGISTERED_OFFENSIVE_TOOL: "Offensive workload governance verification failed",
+  WORKLOAD_ISOLATION_INVALID: "Offensive workload governance verification failed",
+  OFFENSIVE_ARGUMENTS_INVALID: "Offensive workload governance verification failed",
+  OFFENSIVE_TARGET_INVALID: "Offensive workload governance verification failed",
+  OFFENSIVE_PROTOCOL_NOT_ALLOWED: "Offensive workload governance verification failed",
+  OFFENSIVE_RATE_LIMIT_EXCEEDED: "Offensive workload governance verification failed",
+  OFFENSIVE_CONCURRENCY_EXCEEDED: "Offensive workload governance verification failed",
+  OFFENSIVE_BACKOFF_ACTIVE: "Offensive workload governance verification failed",
 };
 
 const COUNTER_ALIASES: Record<string, string[]> = {
@@ -798,6 +834,49 @@ export function createExecutionRouter(options: ExecutionRouterOptions): Executio
     options.workloadProvenanceReverifyTtlMs || process.env.WORKLOAD_PROVENANCE_REVERIFY_TTL_MS,
     120_000,
   );
+  const offensiveManifestPath =
+    typeof options.offensiveManifestPath === "string"
+      ? options.offensiveManifestPath
+      : normalizeString(process.env.OFFENSIVE_MANIFEST_PATH);
+  const offensiveManifestHashPath =
+    typeof options.offensiveManifestHashPath === "string"
+      ? options.offensiveManifestHashPath
+      : normalizeString(process.env.OFFENSIVE_MANIFEST_HASH_PATH);
+  const offensiveManifestSignaturePath =
+    typeof options.offensiveManifestSignaturePath === "string"
+      ? options.offensiveManifestSignaturePath
+      : normalizeString(process.env.OFFENSIVE_MANIFEST_SIGNATURE_PATH);
+  const offensiveManifestPublicKeyPath =
+    typeof options.offensiveManifestPublicKeyPath === "string"
+      ? options.offensiveManifestPublicKeyPath
+      : normalizeString(process.env.OFFENSIVE_MANIFEST_PUBLIC_KEY_PATH);
+  const offensiveExpectedHash = normalizeString(
+    options.offensiveExpectedHash || process.env.OFFENSIVE_MANIFEST_EXPECTED_HASH,
+  ).toLowerCase();
+  const offensiveRateLimitWindowMs = parsePositiveInt(
+    options.offensiveRateLimitWindowMs || process.env.OFFENSIVE_RATE_LIMIT_WINDOW_MS,
+    60_000,
+  );
+  const offensiveMaxPerToolPerWindow = parsePositiveInt(
+    options.offensiveMaxPerToolPerWindow || process.env.OFFENSIVE_MAX_PER_TOOL_PER_WINDOW,
+    12,
+  );
+  const offensiveMaxConcurrentOffensive = parsePositiveInt(
+    options.offensiveMaxConcurrentOffensive || process.env.OFFENSIVE_MAX_CONCURRENT,
+    8,
+  );
+  const offensiveMaxConcurrentPerTool = parsePositiveInt(
+    options.offensiveMaxConcurrentPerTool || process.env.OFFENSIVE_MAX_CONCURRENT_PER_TOOL,
+    3,
+  );
+  const offensiveBackoffBaseMs = parsePositiveInt(
+    options.offensiveBackoffBaseMs || process.env.OFFENSIVE_BACKOFF_BASE_MS,
+    3_000,
+  );
+  const offensiveBackoffMaxMs = parsePositiveInt(
+    options.offensiveBackoffMaxMs || process.env.OFFENSIVE_BACKOFF_MAX_MS,
+    60_000,
+  );
 
   const maxPatchBytes = parsePositiveInt(options.maxPatchBytes, DEFAULT_MAX_PATCH_BYTES);
   const maxWriteFileBytes = parsePositiveInt(options.maxWriteFileBytes, DEFAULT_MAX_WRITE_FILE_BYTES);
@@ -886,6 +965,49 @@ export function createExecutionRouter(options: ExecutionRouterOptions): Executio
     return false;
   }
 
+  const offensiveDomainRuntime: OffensiveDomainRuntime = createOffensiveDomainRuntime({
+    production,
+    nodeId: normalizeString(process.env.SUPERVISOR_NODE_ID) || "node-unknown",
+    manifestPath: offensiveManifestPath || undefined,
+    hashPath: offensiveManifestHashPath || undefined,
+    signaturePath: offensiveManifestSignaturePath || undefined,
+    publicKeyPath: offensiveManifestPublicKeyPath || undefined,
+    expectedManifestHash: offensiveExpectedHash || undefined,
+    allowProductionPathOverride: false,
+    rateLimitWindowMs: offensiveRateLimitWindowMs,
+    maxPerToolPerWindow: offensiveMaxPerToolPerWindow,
+    maxConcurrentOffensive: offensiveMaxConcurrentOffensive,
+    maxConcurrentPerTool: offensiveMaxConcurrentPerTool,
+    backoffBaseMs: offensiveBackoffBaseMs,
+    backoffMaxMs: offensiveBackoffMaxMs,
+    metrics: {
+      increment: (name, labels = {}) => {
+        incrementCounter(name, 1);
+        if (Object.keys(labels).length > 0) {
+          const stableLabel = JSON.stringify(labels, Object.keys(labels).sort());
+          incrementCounter(`${name}:${stableLabel}`, 1);
+        }
+      },
+      gauge: (name, value) => {
+        counters[name] = Number(value) || 0;
+      },
+    },
+    auditLog: (event) => {
+      auditLogger.append({
+        requestId: "offensive-domain",
+        tool: normalizeString((event.details || {}).toolName || "offensive-domain"),
+        caller: "offensive_domain",
+        timestamp: new Date().toISOString(),
+        argsHash: hashArgs(event.details || {}),
+        resultStatus: event.status === "error" ? "error" : event.status === "warning" ? "error" : "ok",
+        role: "internal",
+        source: "in_process",
+        code: event.code,
+        details: event.details,
+      });
+    },
+  });
+
   const defaultRuntimeDescriptorResolver = (
     tool: string,
     context: WorkloadIntegrityContext,
@@ -895,6 +1017,7 @@ export function createExecutionRouter(options: ExecutionRouterOptions): Executio
       return null;
     }
     const sourcePath = path.resolve(__dirname, "execution-router.js");
+    const offensiveRuntimeConfigHash = offensiveDomainRuntime.getToolRuntimeConfigHash(normalizedTool);
     return {
       adapterPath: sourcePath,
       entrypointPath: sourcePath,
@@ -903,6 +1026,11 @@ export function createExecutionRouter(options: ExecutionRouterOptions): Executio
         supervisorMode,
         supervisorAuthPhase,
         mutationGuardEnabled,
+        ...(offensiveRuntimeConfigHash
+          ? {
+              offensiveRuntimeConfigHash,
+            }
+          : {}),
       },
       containerImageDigest: resolveRuntimeImageDigest({
         transportMetadata: normalizeRecord(context.transportMetadata),
@@ -926,11 +1054,29 @@ export function createExecutionRouter(options: ExecutionRouterOptions): Executio
     const local = normalizeRecord(
       normalizeRecord(fromProvider).local || normalizeRecord(context.transportMetadata).executionMetadata || {},
     );
+    const offensiveManifestHash = normalizeString(
+      local.offensiveManifestHash ||
+        local.offensive_manifest_hash ||
+        offensiveDomainRuntime.getState().manifestHash ||
+        offensiveExpectedHash,
+    ).toLowerCase();
+    if (offensiveManifestHash) {
+      local.offensiveManifestHash = offensiveManifestHash;
+      local.offensive_manifest_hash = offensiveManifestHash;
+    }
     const peersRaw = normalizeRecord(fromProvider).peers;
     const peers = Array.isArray(peersRaw)
       ? peersRaw.filter((peer) => peer && typeof peer === "object").map((peer) => normalizeRecord(peer))
       : [];
     return { local, peers };
+  }
+
+  function resolvePrincipalId(context: ExecutionContext): string {
+    const explicit = normalizeString(context.principalId);
+    if (explicit) {
+      return explicit;
+    }
+    return normalizeString(normalizeRecord(context.transportMetadata).principalId) || "anonymous";
   }
 
   const workloadIntegrityVerifier: WorkloadIntegrityVerifier | null = workloadIntegrityEnabled
@@ -1083,6 +1229,14 @@ export function createExecutionRouter(options: ExecutionRouterOptions): Executio
     } else {
       incrementCounter("workload.provenance.success", 1);
     }
+  }
+
+  const offensiveStartup = offensiveDomainRuntime.initialize();
+  if (!offensiveStartup.ok) {
+    incrementCounter("offensive.domain.failure", 1);
+    incrementCounter("offensive.domain.block", 1);
+  } else {
+    incrementCounter("offensive.domain.success", 1);
   }
 
   async function getCanonicalWorkspaceRoot(): Promise<string> {
@@ -1446,6 +1600,70 @@ export function createExecutionRouter(options: ExecutionRouterOptions): Executio
     }
   }
 
+  function classifyOffensiveCompletionStatus(code: string, success: boolean): "success" | "blocked" | "timeout" | "error" {
+    if (success) {
+      return "success";
+    }
+    if (code === "COMMAND_TIMEOUT" || code === "TOOL_EXECUTION_ERROR" || code === "CONTAINER_RUNTIME_CIRCUIT_OPEN") {
+      return "timeout";
+    }
+    if (code.startsWith("OFFENSIVE_") || code === "UNREGISTERED_OFFENSIVE_TOOL" || code === "WORKLOAD_ISOLATION_INVALID") {
+      return "blocked";
+    }
+    return "error";
+  }
+
+  function appendOffensiveExecutionAudit(input: {
+    context: ExecutionContext;
+    tool: string;
+    role: ExecutionRole | "";
+    args: JsonObject;
+    plan: OffensiveExecutionPlan | null;
+    code: string;
+    resultStatus: "ok" | "error";
+    executionResult: "success" | "blocked" | "timeout" | "error";
+    startedAtMs?: number;
+    resourceUsage?: Record<string, unknown>;
+    details?: Record<string, unknown>;
+  }): void {
+    const transportMetadata = normalizeRecord(input.context.transportMetadata);
+    const provenanceState = workloadProvenanceRuntime ? workloadProvenanceRuntime.getProvenanceState() : null;
+    const attestationNonce = normalizeString(
+      transportMetadata.attestationNonce || transportMetadata.attestation_nonce || transportMetadata.nonce,
+    );
+    const durationMs = input.startedAtMs ? Math.max(0, Date.now() - input.startedAtMs) : 0;
+    const plan = input.plan;
+    auditLogger.append({
+      requestId: input.context.requestId,
+      tool: input.tool,
+      caller: input.context.caller,
+      timestamp: new Date().toISOString(),
+      argsHash: hashArgs(input.args),
+      resultStatus: input.resultStatus,
+      role: input.role || undefined,
+      source: input.context.source,
+      code: input.code,
+      details: {
+        toolName: plan ? plan.toolName : normalizeToolName(input.tool).split(".")[0],
+        workloadID: plan ? plan.workloadID : "",
+        containerDigest: plan
+          ? plan.containerImageDigest
+          : normalizeString(transportMetadata.containerImageDigest || transportMetadata.container_image_digest),
+        gitCommitSha: provenanceState ? provenanceState.gitCommitSha : "",
+        provenanceHash: provenanceState ? provenanceState.provenanceHash : "",
+        attestationNonce,
+        target: plan ? plan.target : "",
+        executionResult: input.executionResult,
+        isolationProfileHash: plan ? plan.isolationProfileHash : "",
+        offensiveManifestHash: plan ? plan.offensiveManifestHash : offensiveDomainRuntime.getState().manifestHash,
+        toolVersion: plan ? plan.toolVersion : "",
+        resourceUsage: input.resourceUsage || {},
+        executionDurationMs: durationMs,
+        ...(input.details || {}),
+      },
+    });
+  }
+
   async function execute(tool: string, argsInput: JsonObject, context: ExecutionContext): Promise<ExecutionResult> {
     const toolName = normalizeToolName(tool);
     if (!toolName) {
@@ -1461,8 +1679,16 @@ export function createExecutionRouter(options: ExecutionRouterOptions): Executio
       return permitError;
     }
 
+    let offensiveLeaseId = "";
+    let offensiveCompletionStatus: "success" | "blocked" | "timeout" | "error" = "blocked";
+    let offensivePlanForAudit: OffensiveExecutionPlan | null = null;
+    let offensiveToolRequestedForAudit = false;
+    let offensiveStartedAtMs = 0;
+    let offensiveAuditEmitted = false;
+
     try {
       const args = normalizeRecord(argsInput);
+      const principalId = resolvePrincipalId(context);
 
       const trustedInternal = hasTrustedInternalContext(context);
       if (context.internalFlagRequested && !trustedInternal) {
@@ -1502,6 +1728,10 @@ export function createExecutionRouter(options: ExecutionRouterOptions): Executio
           message: sanitizeMessageForClient("UNAUTHORIZED"),
         };
       }
+
+      const offensiveToolRequested = offensiveDomainRuntime.isOffensiveTool(toolName);
+      offensiveToolRequestedForAudit = offensiveToolRequested;
+      let offensivePlan: OffensiveExecutionPlan | null = null;
 
       const integrityMetadata = resolveIntegrityMetadata(context);
       const localMetadata = integrityMetadata.local || {};
@@ -1591,6 +1821,13 @@ export function createExecutionRouter(options: ExecutionRouterOptions): Executio
             });
             incrementCounter("workload.integrity.warning", 1);
           } else {
+            if (offensiveToolRequested && offensiveDomainRuntime.getState().trusted !== true) {
+              return {
+                ok: false,
+                code: "OFFENSIVE_DOMAIN_NOT_TRUSTED",
+                message: sanitizeMessageForClient("OFFENSIVE_DOMAIN_NOT_TRUSTED"),
+              };
+            }
             return {
               ok: false,
               code: verification.code || "WORKLOAD_NOT_VERIFIED",
@@ -1659,10 +1896,162 @@ export function createExecutionRouter(options: ExecutionRouterOptions): Executio
         }
       }
 
+      if (offensiveToolRequested) {
+        const preparation = offensiveDomainRuntime.prepareExecution({
+          tool: toolName,
+          args,
+          principalId,
+          requestId: context.requestId,
+        });
+        if (!preparation.ok || !preparation.plan || !preparation.leaseId) {
+          incrementCounter("offensive.execution.block", 1);
+          appendOffensiveExecutionAudit({
+            context,
+            tool: toolName,
+            role,
+            args,
+            plan: null,
+            code: preparation.code || "OFFENSIVE_DOMAIN_NOT_TRUSTED",
+            resultStatus: "error",
+            executionResult: "blocked",
+            startedAtMs: offensiveStartedAtMs,
+            details: {
+              reason: normalizeString(preparation.message),
+            },
+          });
+          offensiveAuditEmitted = true;
+          return {
+            ok: false,
+            code: preparation.code || "OFFENSIVE_DOMAIN_NOT_TRUSTED",
+            message: sanitizeMessageForClient(preparation.code || "OFFENSIVE_DOMAIN_NOT_TRUSTED"),
+          };
+        }
+        offensivePlan = preparation.plan;
+        offensivePlanForAudit = preparation.plan;
+        offensiveLeaseId = preparation.leaseId;
+        offensiveStartedAtMs = Date.now();
+
+        if (args.interactive === true || args.stdin === true || args.tty === true) {
+          appendOffensiveExecutionAudit({
+            context,
+            tool: toolName,
+            role,
+            args,
+            plan: offensivePlan,
+            code: "OFFENSIVE_ARGUMENTS_INVALID",
+            resultStatus: "error",
+            executionResult: "blocked",
+            startedAtMs: offensiveStartedAtMs,
+            details: {
+              reason: "interactive flags are forbidden for offensive workloads",
+            },
+          });
+          offensiveAuditEmitted = true;
+          return {
+            ok: false,
+            code: "OFFENSIVE_ARGUMENTS_INVALID",
+            message: sanitizeMessageForClient("OFFENSIVE_ARGUMENTS_INVALID"),
+          };
+        }
+      }
+
+      const effectiveContext: ExecutionContext = offensivePlan
+        ? {
+            ...context,
+            principalId,
+            transportMetadata: {
+              ...normalizeRecord(context.transportMetadata),
+              containerImageDigest: offensivePlan.containerImageDigest,
+              offensiveExecutionPlan: offensivePlan,
+            },
+          }
+        : {
+            ...context,
+            principalId,
+          };
+
       const registry = await getRegistry();
       const definition = registry.find((entry) => entry.name === toolName);
 
       if (!definition) {
+        if (offensiveToolRequested) {
+          if (!context.legacyExecute || !offensivePlan) {
+            appendOffensiveExecutionAudit({
+              context,
+              tool: toolName,
+              role,
+              args,
+              plan: offensivePlan,
+              code: "UNREGISTERED_OFFENSIVE_TOOL",
+              resultStatus: "error",
+              executionResult: "blocked",
+              startedAtMs: offensiveStartedAtMs,
+            });
+            offensiveAuditEmitted = true;
+            return {
+              ok: false,
+              code: "UNREGISTERED_OFFENSIVE_TOOL",
+              message: sanitizeMessageForClient("UNREGISTERED_OFFENSIVE_TOOL"),
+            };
+          }
+          try {
+            const startedAt = Date.now();
+            const legacyResult = await context.legacyExecute(toolName, args, effectiveContext);
+            const durationMs = Math.max(0, Date.now() - startedAt);
+            offensiveCompletionStatus = "success";
+            appendOffensiveExecutionAudit({
+              context,
+              tool: toolName,
+              role,
+              args,
+              plan: offensivePlan,
+              code: "OFFENSIVE_GOVERNED_EXECUTION",
+              resultStatus: "ok",
+              executionResult: "success",
+              startedAtMs: offensiveStartedAtMs || startedAt,
+              resourceUsage:
+                legacyResult &&
+                typeof legacyResult === "object" &&
+                !Array.isArray(legacyResult) &&
+                normalizeRecord((legacyResult as Record<string, unknown>).metadata).resourceUsage &&
+                typeof normalizeRecord((legacyResult as Record<string, unknown>).metadata).resourceUsage === "object"
+                  ? normalizeRecord(normalizeRecord((legacyResult as Record<string, unknown>).metadata).resourceUsage)
+                  : {},
+              details: {
+                executionDurationMs: durationMs,
+              },
+            });
+            offensiveAuditEmitted = true;
+            return {
+              ok: true,
+              data: legacyResult,
+            };
+          } catch (error) {
+            const code =
+              error && typeof error === "object" && "code" in error && typeof (error as { code?: unknown }).code === "string"
+                ? String((error as { code?: unknown }).code)
+                : "LEGACY_EXECUTION_FAILED";
+            offensiveCompletionStatus = classifyOffensiveCompletionStatus(code, false);
+            appendOffensiveExecutionAudit({
+              context,
+              tool: toolName,
+              role,
+              args,
+              plan: offensivePlan,
+              code,
+              resultStatus: "error",
+              executionResult: offensiveCompletionStatus,
+              startedAtMs: offensiveStartedAtMs,
+            });
+            offensiveAuditEmitted = true;
+            return {
+              ok: false,
+              code,
+              message: sanitizeMessageForClient(code, sanitizeMessageForClient("LEGACY_EXECUTION_FAILED")),
+            };
+          }
+        }
+
         const strictExternalNoLegacy = supervisorMode && supervisorAuthPhase === "strict" && !trustedInternal;
         if (strictExternalNoLegacy) {
           incrementCounter("unauthorized_tool_attempts", 1);
@@ -1676,7 +2065,7 @@ export function createExecutionRouter(options: ExecutionRouterOptions): Executio
         if (context.legacyExecute && rolePolicy.canUseLegacy) {
           incrementCounter("legacy_fallback_used", 1);
           try {
-            const legacyResult = await context.legacyExecute(toolName, args, context);
+            const legacyResult = await context.legacyExecute(toolName, args, effectiveContext);
             auditLogger.append({
               requestId: context.requestId,
               tool: toolName,
@@ -1697,7 +2086,6 @@ export function createExecutionRouter(options: ExecutionRouterOptions): Executio
               error && typeof error === "object" && "code" in error && typeof (error as { code?: unknown }).code === "string"
                 ? String((error as { code?: unknown }).code)
                 : "LEGACY_EXECUTION_FAILED";
-
             auditLogger.append({
               requestId: context.requestId,
               tool: toolName,
@@ -1772,7 +2160,6 @@ export function createExecutionRouter(options: ExecutionRouterOptions): Executio
       }
 
       if (HIGH_RISK_MUTATION_CLASSES.has(definition.mutationClass)) {
-        // Alert hook placeholder for SIEM/SOC integrations.
         try {
           options.onHighRiskToolEvent?.({
             requestId: context.requestId,
@@ -1788,8 +2175,22 @@ export function createExecutionRouter(options: ExecutionRouterOptions): Executio
 
       try {
         const customHandler = supervisorHandlers[toolName];
-        const result = customHandler ? await customHandler(args, context) : await runDefaultSupervisorHandler(toolName, args);
-
+        const result = customHandler ? await customHandler(args, effectiveContext) : await runDefaultSupervisorHandler(toolName, args);
+        offensiveCompletionStatus = offensiveLeaseId ? "success" : offensiveCompletionStatus;
+        if (offensiveLeaseId) {
+          appendOffensiveExecutionAudit({
+            context,
+            tool: toolName,
+            role,
+            args,
+            plan: offensivePlanForAudit,
+            code: "OFFENSIVE_EXECUTION_SUCCESS",
+            resultStatus: "ok",
+            executionResult: "success",
+            startedAtMs: offensiveStartedAtMs,
+          });
+          offensiveAuditEmitted = true;
+        }
         auditLogger.append({
           requestId: context.requestId,
           tool: toolName,
@@ -1800,7 +2201,6 @@ export function createExecutionRouter(options: ExecutionRouterOptions): Executio
           role,
           source: context.source,
         });
-
         return {
           ok: true,
           data: result,
@@ -1810,7 +2210,21 @@ export function createExecutionRouter(options: ExecutionRouterOptions): Executio
           error && typeof error === "object" && "code" in error && typeof (error as { code?: unknown }).code === "string"
             ? String((error as { code?: unknown }).code)
             : "SUPERVISOR_TOOL_FAILED";
-
+        offensiveCompletionStatus = classifyOffensiveCompletionStatus(code, false);
+        if (offensiveLeaseId) {
+          appendOffensiveExecutionAudit({
+            context,
+            tool: toolName,
+            role,
+            args,
+            plan: offensivePlanForAudit,
+            code,
+            resultStatus: "error",
+            executionResult: offensiveCompletionStatus,
+            startedAtMs: offensiveStartedAtMs,
+          });
+          offensiveAuditEmitted = true;
+        }
         auditLogger.append({
           requestId: context.requestId,
           tool: toolName,
@@ -1822,7 +2236,6 @@ export function createExecutionRouter(options: ExecutionRouterOptions): Executio
           source: context.source,
           code,
         });
-
         return {
           ok: false,
           code,
@@ -1834,12 +2247,33 @@ export function createExecutionRouter(options: ExecutionRouterOptions): Executio
         error && typeof error === "object" && "code" in error && typeof (error as { code?: unknown }).code === "string"
           ? String((error as { code?: unknown }).code)
           : "SUPERVISOR_TOOL_FAILED";
+      offensiveCompletionStatus = classifyOffensiveCompletionStatus(code, false);
+      if (offensiveToolRequestedForAudit && !offensiveAuditEmitted) {
+        appendOffensiveExecutionAudit({
+          context,
+          tool: toolName,
+          role: "",
+          args: normalizeRecord(argsInput),
+          plan: offensivePlanForAudit,
+          code,
+          resultStatus: "error",
+          executionResult: offensiveCompletionStatus,
+          startedAtMs: offensiveStartedAtMs,
+        });
+        offensiveAuditEmitted = true;
+      }
       return {
         ok: false,
         code,
         message: sanitizeMessageForClient(code),
       };
     } finally {
+      if (offensiveLeaseId) {
+        offensiveDomainRuntime.completeExecution({
+          leaseId: offensiveLeaseId,
+          status: offensiveCompletionStatus,
+        });
+      }
       releaseRatePermit(context);
     }
   }
@@ -1957,6 +2391,10 @@ export function createExecutionRouter(options: ExecutionRouterOptions): Executio
     return workloadProvenanceRuntime.getProvenanceState();
   }
 
+  function getOffensiveDomainMetadata() {
+    return offensiveDomainRuntime.getState();
+  }
+
   return {
     execute,
     listTools,
@@ -1969,5 +2407,6 @@ export function createExecutionRouter(options: ExecutionRouterOptions): Executio
     generateAttestationEvidence,
     verifyPeerAttestationEvidence,
     getWorkloadProvenanceMetadata,
+    getOffensiveDomainMetadata,
   };
 }

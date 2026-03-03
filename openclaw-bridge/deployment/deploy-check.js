@@ -65,6 +65,18 @@ const REQUIRED_PHASE26_FILES = [
   path.resolve(__dirname, "..", "scripts", "verify-build-provenance.ts"),
   path.resolve(__dirname, "..", "scripts", "validate-phase26.ts"),
 ];
+const REQUIRED_PHASE27_FILES = [
+  path.resolve(__dirname, "..", "src", "security", "offensive-workload-manifest.ts"),
+  path.resolve(__dirname, "..", "src", "security", "offensive-domain.ts"),
+  path.resolve(__dirname, "..", "security", "offensive-workload-manifest.js"),
+  path.resolve(__dirname, "..", "security", "offensive-domain.js"),
+  path.resolve(__dirname, "..", "security", "offensive-workloads", "manifest.json"),
+  path.resolve(__dirname, "..", "security", "offensive-workloads", "manifest.hash"),
+  path.resolve(__dirname, "..", "security", "offensive-workloads", "manifest.sig"),
+  path.resolve(__dirname, "..", "security", "offensive-workloads", "manifest.pub"),
+  path.resolve(__dirname, "..", "scripts", "verify-offensive-workloads.ts"),
+  path.resolve(__dirname, "..", "scripts", "validate-phase27.ts"),
+];
 
 function normalizeString(value) {
   return typeof value === "string" ? value.trim() : "";
@@ -248,6 +260,17 @@ async function runDeployCheck(options = {}) {
     });
   }
 
+  const phase27OffensiveCheck = checkRequiredAbsoluteFiles(REQUIRED_PHASE27_FILES);
+  if (phase27OffensiveCheck.missing.length > 0) {
+    errors.push({
+      code: "PHASE27_OFFENSIVE_GOVERNANCE_MISSING",
+      message: "One or more Phase 27 offensive governance files are missing or empty",
+      details: {
+        missing: phase27OffensiveCheck.missing,
+      },
+    });
+  }
+
   const result = {
     ready_for_production: errors.length === 0,
     warnings,
@@ -300,6 +323,11 @@ async function runDeployCheck(options = {}) {
         required: REQUIRED_PHASE26_FILES,
         present: phase26ProvenanceCheck.present,
         missing: phase26ProvenanceCheck.missing,
+      },
+      phase27Offensive: {
+        required: REQUIRED_PHASE27_FILES,
+        present: phase27OffensiveCheck.present,
+        missing: phase27OffensiveCheck.missing,
       },
     },
   };

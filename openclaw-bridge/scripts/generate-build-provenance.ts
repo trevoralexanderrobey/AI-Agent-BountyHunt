@@ -4,6 +4,7 @@ import fs from "node:fs";
 import path from "node:path";
 
 import { computeAttestationReferenceHash } from "../src/security/workload-attestation";
+import { loadOffensiveManifestFromDisk } from "../src/security/offensive-workload-manifest";
 import { computeWorkloadManifestHash } from "../src/security/workload-manifest";
 import {
   WorkloadProvenanceDocument,
@@ -16,10 +17,29 @@ import {
   resolveDefaultDependencyLockPath,
 } from "../src/security/workload-provenance";
 
-// eslint-disable-next-line @typescript-eslint/no-var-requires
-const { computePolicyHash } = require("../policy/execution-policy-manifest.js");
-// eslint-disable-next-line @typescript-eslint/no-var-requires
-const { computeSecretManifestHash } = require("../security/secret-manifest.js");
+function loadCommonJsModule<T extends Record<string, unknown>>(candidates: string[]): T {
+  for (const candidate of candidates) {
+    try {
+      // eslint-disable-next-line @typescript-eslint/no-var-requires
+      return require(candidate) as T;
+    } catch (error) {
+      if (error && typeof error === "object" && "code" in error && String((error as { code?: unknown }).code || "") === "MODULE_NOT_FOUND") {
+        continue;
+      }
+      throw error;
+    }
+  }
+  throw new Error("Required governance module could not be loaded");
+}
+
+const { computePolicyHash } = loadCommonJsModule<{ computePolicyHash: (manifest: unknown) => string }>([
+  path.resolve(__dirname, "..", "policy", "execution-policy-manifest.js"),
+  path.resolve(__dirname, "..", "..", "policy", "execution-policy-manifest.js"),
+]);
+const { computeSecretManifestHash } = loadCommonJsModule<{ computeSecretManifestHash: (manifest: unknown) => string }>([
+  path.resolve(__dirname, "..", "security", "secret-manifest.js"),
+  path.resolve(__dirname, "..", "..", "security", "secret-manifest.js"),
+]);
 
 interface CliOptions {
   outputPath: string;
@@ -76,6 +96,14 @@ function parseArgs(argv: string[]): CliOptions {
     imageDigests: {
       "phase24.test.tool": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
       "supervisor.read_file": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      nmap: "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "nmap.run": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      sqlmap: "sha256:5555555555555555555555555555555555555555555555555555555555555555",
+      "sqlmap.run": "sha256:5555555555555555555555555555555555555555555555555555555555555555",
+      nikto: "sha256:6666666666666666666666666666666666666666666666666666666666666666",
+      "nikto.run": "sha256:6666666666666666666666666666666666666666666666666666666666666666",
+      ffuf: "sha256:9999999999999999999999999999999999999999999999999999999999999999",
+      "ffuf.run": "sha256:9999999999999999999999999999999999999999999999999999999999999999",
     },
   };
 
@@ -194,6 +222,18 @@ function loadPrivateKeyPem(privateKeyPath: string): { privateKeyPem: string; pub
   };
 }
 
+function resolveRepoRoot(): string {
+  const direct = path.resolve(__dirname, "..");
+  if (fs.existsSync(path.resolve(direct, "security", "workload-manifest.json"))) {
+    return direct;
+  }
+  const distParent = path.resolve(__dirname, "..", "..");
+  if (fs.existsSync(path.resolve(distParent, "security", "workload-manifest.json"))) {
+    return distParent;
+  }
+  return direct;
+}
+
 function buildUnsignedProvenance(base: {
   gitCommitSha: string;
   repository: string;
@@ -201,6 +241,7 @@ function buildUnsignedProvenance(base: {
   workloadManifestHash: string;
   executionPolicyHash: string;
   secretManifestHash: string;
+  offensiveManifestHash: string;
   attestationReferenceHash: string;
   dependencyLockHash: string;
   containerImageDigests: Record<string, string>;
@@ -213,6 +254,7 @@ function buildUnsignedProvenance(base: {
     workloadManifestHash: normalizeString(base.workloadManifestHash).toLowerCase(),
     executionPolicyHash: normalizeString(base.executionPolicyHash).toLowerCase(),
     secretManifestHash: normalizeString(base.secretManifestHash).toLowerCase(),
+    offensiveManifestHash: normalizeString(base.offensiveManifestHash).toLowerCase(),
     attestationReferenceHash: normalizeString(base.attestationReferenceHash).toLowerCase(),
     containerImageDigests: Object.keys(base.containerImageDigests)
       .sort((left, right) => left.localeCompare(right))
@@ -235,7 +277,7 @@ function buildUnsignedProvenance(base: {
 function main(): void {
   const options = parseArgs(process.argv);
 
-  const repoRoot = path.resolve(__dirname, "..");
+  const repoRoot = resolveRepoRoot();
   const workloadManifestPath = path.resolve(repoRoot, "security", "workload-manifest.json");
   const policyManifestPath = path.resolve(repoRoot, "policy", "execution-policy.json");
   const secretManifestPath = path.resolve(repoRoot, "security", "secret-manifest.json");
@@ -245,6 +287,10 @@ function main(): void {
   const workloadManifestHash = computeWorkloadManifestHash(loadJson(workloadManifestPath));
   const executionPolicyHash = computePolicyHash(loadJson(policyManifestPath));
   const secretManifestHash = computeSecretManifestHash(loadJson(secretManifestPath));
+  const offensiveManifestHash = loadOffensiveManifestFromDisk({
+    production: false,
+    allowProductionPathOverride: true,
+  }).canonicalPayloadHash;
   const attestationReferenceHash = computeAttestationReferenceHash(loadJson(attestationReferencePath));
   const dependencyLockHash = sha256File(lockPath);
 
@@ -259,6 +305,7 @@ function main(): void {
     workloadManifestHash,
     executionPolicyHash,
     secretManifestHash,
+    offensiveManifestHash,
     attestationReferenceHash,
     dependencyLockHash,
     containerImageDigests: options.imageDigests,

@@ -1,0 +1,418 @@
+{
+  "manifestHash": "a713855f7eccdb59e389d3152e5d810b1591627ee21eb41eaf738634e12b38b0",
+  "manifestSignature": "sqR07UNzsNLpo2nXwtZQJ+X0Heak5NVQNwcsAV0VK/5qm1yblUAJfDcOy4wmGTGJ8iTQ/OI7s8SiQFlKg9Z7Cg==",
+  "manifestVersion": 1,
+  "tools": [
+    {
+      "allowedArgsSchema": {
+        "additionalProperties": false,
+        "properties": {
+          "flags": {
+            "items": {
+              "maxLength": 64,
+              "pattern": "^--?[A-Za-z0-9][A-Za-z0-9-]*(=.*)?$",
+              "type": "string"
+            },
+            "maxItems": 10,
+            "type": "array"
+          },
+          "rate": {
+            "maximum": 100,
+            "minimum": 1,
+            "type": "integer"
+          },
+          "threads": {
+            "maximum": 20,
+            "minimum": 1,
+            "type": "integer"
+          },
+          "url": {
+            "maxLength": 512,
+            "minLength": 8,
+            "pattern": "^https?://[^\\s]+FUZZ[^\\s]*$",
+            "type": "string"
+          },
+          "wordlist": {
+            "enum": [
+              "common",
+              "dirb-small",
+              "dirb-medium",
+              "params",
+              "subdomains"
+            ],
+            "type": "string"
+          }
+        },
+        "required": [
+          "url",
+          "wordlist"
+        ],
+        "type": "object"
+      },
+      "allowedFlags": [
+        "-ac",
+        "-d",
+        "-fc",
+        "-H",
+        "-mc",
+        "-X"
+      ],
+      "capabilityScope": [
+        "http.content.discovery"
+      ],
+      "containerImageDigest": "sha256:9999999999999999999999999999999999999999999999999999999999999999",
+      "deniedFlags": [
+        "--interactive",
+        "-replay-proxy"
+      ],
+      "executionConstraints": {
+        "allowCidrs": false,
+        "allowedProtocols": [
+          "http",
+          "https"
+        ],
+        "allowPrivateTargets": false,
+        "maxRuntimeSeconds": 120,
+        "maxThreads": 20,
+        "networkScope": "target-bound",
+        "nonInteractive": true,
+        "requiresTarget": true,
+        "resourceLimits": {
+          "cpuShares": 256,
+          "maxOutputBytes": 1048576,
+          "maxRuntimeSeconds": 120,
+          "memoryLimitMb": 256
+        },
+        "singleTarget": true
+      },
+      "forcedFlags": [],
+      "isolationProfile": {
+        "appArmorProfile": "openclaw-default",
+        "dropCapabilities": [
+          "ALL"
+        ],
+        "hostMounts": false,
+        "hostNetwork": false,
+        "hostPID": false,
+        "privileged": false,
+        "readOnlyRootFilesystem": true,
+        "runAsNonRoot": true,
+        "seccompProfile": "runtime/default",
+        "stdin": false,
+        "tty": false,
+        "writableVolumes": [
+          "scratch"
+        ]
+      },
+      "runtimeConfigHash": "a4ac1804aee692f3a2bfe3618f1bf3fe8a2a408d506c0b0716c0451c83b49794",
+      "toolName": "ffuf",
+      "toolVersion": "2.1.0",
+      "workloadID": "ffuf"
+    },
+    {
+      "allowedArgsSchema": {
+        "additionalProperties": false,
+        "properties": {
+          "flags": {
+            "items": {
+              "maxLength": 64,
+              "pattern": "^--?[A-Za-z0-9][A-Za-z0-9-]*(=.*)?$",
+              "type": "string"
+            },
+            "maxItems": 10,
+            "type": "array"
+          },
+          "url": {
+            "maxLength": 512,
+            "minLength": 8,
+            "pattern": "^https?://[^\\s]+$",
+            "type": "string"
+          }
+        },
+        "required": [
+          "url"
+        ],
+        "type": "object"
+      },
+      "allowedFlags": [
+        "-Cgidirs",
+        "-maxtime",
+        "-timeout"
+      ],
+      "capabilityScope": [
+        "http.web.vuln.scan"
+      ],
+      "containerImageDigest": "sha256:6666666666666666666666666666666666666666666666666666666666666666",
+      "deniedFlags": [
+        "--ask",
+        "--interactive"
+      ],
+      "executionConstraints": {
+        "allowCidrs": false,
+        "allowedProtocols": [
+          "http",
+          "https"
+        ],
+        "allowPrivateTargets": false,
+        "maxRuntimeSeconds": 180,
+        "maxThreads": 2,
+        "networkScope": "target-bound",
+        "nonInteractive": true,
+        "requiresTarget": true,
+        "resourceLimits": {
+          "cpuShares": 256,
+          "maxOutputBytes": 1572864,
+          "maxRuntimeSeconds": 180,
+          "memoryLimitMb": 384
+        },
+        "singleTarget": true
+      },
+      "forcedFlags": [],
+      "isolationProfile": {
+        "appArmorProfile": "openclaw-default",
+        "dropCapabilities": [
+          "ALL"
+        ],
+        "hostMounts": false,
+        "hostNetwork": false,
+        "hostPID": false,
+        "privileged": false,
+        "readOnlyRootFilesystem": true,
+        "runAsNonRoot": true,
+        "seccompProfile": "runtime/default",
+        "stdin": false,
+        "tty": false,
+        "writableVolumes": [
+          "scratch"
+        ]
+      },
+      "runtimeConfigHash": "9951fe69d7f4343cc1f32cb15265d0f0a4a5180d59bee69c8775fbce82c5cdba",
+      "toolName": "nikto",
+      "toolVersion": "2.5.0",
+      "workloadID": "nikto"
+    },
+    {
+      "allowedArgsSchema": {
+        "additionalProperties": false,
+        "properties": {
+          "flags": {
+            "items": {
+              "maxLength": 64,
+              "pattern": "^--?[A-Za-z0-9][A-Za-z0-9-]*(=.*)?$",
+              "type": "string"
+            },
+            "maxItems": 12,
+            "type": "array"
+          },
+          "ports": {
+            "maxLength": 128,
+            "pattern": "^[0-9,-]+$",
+            "type": "string"
+          },
+          "protocol": {
+            "enum": [
+              "tcp",
+              "udp"
+            ],
+            "type": "string"
+          },
+          "target": {
+            "maxLength": 253,
+            "minLength": 1,
+            "pattern": "^[a-zA-Z0-9.:/-]+$",
+            "type": "string"
+          }
+        },
+        "required": [
+          "target"
+        ],
+        "type": "object"
+      },
+      "allowedFlags": [
+        "--max-retries",
+        "--open",
+        "--reason",
+        "-F",
+        "-n",
+        "-Pn",
+        "-sS",
+        "-sU",
+        "-T1",
+        "-T2",
+        "-T3"
+      ],
+      "capabilityScope": [
+        "network.enumeration"
+      ],
+      "containerImageDigest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "deniedFlags": [
+        "--interactive"
+      ],
+      "executionConstraints": {
+        "allowCidrs": false,
+        "allowedProtocols": [
+          "tcp",
+          "udp"
+        ],
+        "allowPrivateTargets": false,
+        "maxRuntimeSeconds": 120,
+        "maxThreads": 4,
+        "networkScope": "target-bound",
+        "nonInteractive": true,
+        "requiresTarget": true,
+        "resourceLimits": {
+          "cpuShares": 256,
+          "maxOutputBytes": 1048576,
+          "maxRuntimeSeconds": 120,
+          "memoryLimitMb": 256
+        },
+        "singleTarget": true
+      },
+      "forcedFlags": [],
+      "isolationProfile": {
+        "appArmorProfile": "openclaw-default",
+        "dropCapabilities": [
+          "ALL"
+        ],
+        "hostMounts": false,
+        "hostNetwork": false,
+        "hostPID": false,
+        "privileged": false,
+        "readOnlyRootFilesystem": true,
+        "runAsNonRoot": true,
+        "seccompProfile": "runtime/default",
+        "stdin": false,
+        "tty": false,
+        "writableVolumes": [
+          "scratch"
+        ]
+      },
+      "runtimeConfigHash": "5b6bd5c4192270db99823955b632010df0279b5a1953ca21c3fc13b25be9494f",
+      "toolName": "nmap",
+      "toolVersion": "7.94",
+      "workloadID": "nmap"
+    },
+    {
+      "allowedArgsSchema": {
+        "additionalProperties": false,
+        "properties": {
+          "data": {
+            "maxLength": 4096,
+            "type": "string"
+          },
+          "flags": {
+            "items": {
+              "maxLength": 64,
+              "pattern": "^--?[A-Za-z0-9][A-Za-z0-9-]*(=.*)?$",
+              "type": "string"
+            },
+            "maxItems": 12,
+            "type": "array"
+          },
+          "level": {
+            "maximum": 2,
+            "minimum": 1,
+            "type": "integer"
+          },
+          "method": {
+            "enum": [
+              "GET",
+              "POST"
+            ],
+            "type": "string"
+          },
+          "risk": {
+            "maximum": 2,
+            "minimum": 1,
+            "type": "integer"
+          },
+          "threads": {
+            "maximum": 4,
+            "minimum": 1,
+            "type": "integer"
+          },
+          "url": {
+            "maxLength": 512,
+            "minLength": 8,
+            "pattern": "^https?://[^\\s]+$",
+            "type": "string"
+          }
+        },
+        "required": [
+          "url"
+        ],
+        "type": "object"
+      },
+      "allowedFlags": [
+        "--batch",
+        "--data",
+        "--level",
+        "--method",
+        "--risk",
+        "--threads",
+        "--time-sec",
+        "--timeout"
+      ],
+      "capabilityScope": [
+        "http.sqli.detection"
+      ],
+      "containerImageDigest": "sha256:5555555555555555555555555555555555555555555555555555555555555555",
+      "deniedFlags": [
+        "--eval",
+        "--file-read",
+        "--file-write",
+        "--os-pwn",
+        "--os-shell",
+        "--payload",
+        "--shell",
+        "--tamper",
+        "--udf-inject"
+      ],
+      "executionConstraints": {
+        "allowCidrs": false,
+        "allowedProtocols": [
+          "http",
+          "https"
+        ],
+        "allowPrivateTargets": false,
+        "maxRuntimeSeconds": 180,
+        "maxThreads": 4,
+        "networkScope": "target-bound",
+        "nonInteractive": true,
+        "requiresTarget": true,
+        "resourceLimits": {
+          "cpuShares": 384,
+          "maxOutputBytes": 2097152,
+          "maxRuntimeSeconds": 180,
+          "memoryLimitMb": 512
+        },
+        "singleTarget": true
+      },
+      "forcedFlags": [
+        "--batch"
+      ],
+      "isolationProfile": {
+        "appArmorProfile": "openclaw-default",
+        "dropCapabilities": [
+          "ALL"
+        ],
+        "hostMounts": false,
+        "hostNetwork": false,
+        "hostPID": false,
+        "privileged": false,
+        "readOnlyRootFilesystem": true,
+        "runAsNonRoot": true,
+        "seccompProfile": "runtime/default",
+        "stdin": false,
+        "tty": false,
+        "writableVolumes": [
+          "scratch"
+        ]
+      },
+      "runtimeConfigHash": "8e95e72d153c431dfebebd2215f0f6142a94d57ba1b00e4a102a290e3fb594df",
+      "toolName": "sqlmap",
+      "toolVersion": "1.8",
+      "workloadID": "sqlmap"
+    }
+  ]
+}

@@ -1,12 +1,50 @@
 {
+  "offensiveManifestHash": "a713855f7eccdb59e389d3152e5d810b1591627ee21eb41eaf738634e12b38b0",
   "workloads": [
     {
-      "workloadID": "phase24.test.tool",
+      "adapterHash": "7777777777777777777777777777777777777777777777777777777777777777",
+      "containerImageDigest": "sha256:9999999999999999999999999999999999999999999999999999999999999999",
+      "entrypointHash": "8888888888888888888888888888888888888888888888888888888888888888",
+      "productionRequired": false,
+      "runtimeConfigHash": "a4ac1804aee692f3a2bfe3618f1bf3fe8a2a408d506c0b0716c0451c83b49794",
+      "workloadID": "ffuf.run",
+      "workloadVersion": 27
+    },
+    {
+      "adapterHash": "5555555555555555555555555555555555555555555555555555555555555555",
+      "containerImageDigest": "sha256:6666666666666666666666666666666666666666666666666666666666666666",
+      "entrypointHash": "6666666666666666666666666666666666666666666666666666666666666666",
+      "productionRequired": false,
+      "runtimeConfigHash": "9951fe69d7f4343cc1f32cb15265d0f0a4a5180d59bee69c8775fbce82c5cdba",
+      "workloadID": "nikto.run",
+      "workloadVersion": 27
+    },
+    {
+      "adapterHash": "1111111111111111111111111111111111111111111111111111111111111111",
+      "containerImageDigest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "entrypointHash": "2222222222222222222222222222222222222222222222222222222222222222",
+      "productionRequired": false,
+      "runtimeConfigHash": "5b6bd5c4192270db99823955b632010df0279b5a1953ca21c3fc13b25be9494f",
+      "workloadID": "nmap.run",
+      "workloadVersion": 27
+    },
+    {
       "adapterHash": "0000000000000000000000000000000000000000000000000000000000000000",
+      "containerImageDigest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
       "entrypointHash": "0000000000000000000000000000000000000000000000000000000000000000",
+      "productionRequired": false,
       "runtimeConfigHash": "0000000000000000000000000000000000000000000000000000000000000000",
-      "workloadVersion": 1,
-      "productionRequired": false
+      "workloadID": "phase24.test.tool",
+      "workloadVersion": 1
+    },
+    {
+      "adapterHash": "3333333333333333333333333333333333333333333333333333333333333333",
+      "containerImageDigest": "sha256:5555555555555555555555555555555555555555555555555555555555555555",
+      "entrypointHash": "4444444444444444444444444444444444444444444444444444444444444444",
+      "productionRequired": false,
+      "runtimeConfigHash": "8e95e72d153c431dfebebd2215f0f6142a94d57ba1b00e4a102a290e3fb594df",
+      "workloadID": "sqlmap.run",
+      "workloadVersion": 27
     }
   ]
 }

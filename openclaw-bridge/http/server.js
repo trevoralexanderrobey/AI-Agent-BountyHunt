@@ -165,7 +165,16 @@ function createHttpServer(options = {}) {
         if (!executionRouterRef || typeof executionRouterRef.getWorkloadIntegrityMetadata !== "function") {
           return {};
         }
-        return executionRouterRef.getWorkloadIntegrityMetadata();
+        const integrity = executionRouterRef.getWorkloadIntegrityMetadata();
+        const offensive =
+          typeof executionRouterRef.getOffensiveDomainMetadata === "function"
+            ? executionRouterRef.getOffensiveDomainMetadata()
+            : {};
+        return {
+          ...integrity,
+          offensiveManifestHash:
+            offensive && typeof offensive.manifestHash === "string" ? offensive.manifestHash : "",
+        };
       },
       attestationMetadataProvider: () => {
         if (!executionRouterRef || typeof executionRouterRef.getWorkloadAttestationMetadata !== "function") {
@@ -231,6 +240,17 @@ function createHttpServer(options = {}) {
       buildProvenancePublicKeyPath: String(process.env.WORKLOAD_PROVENANCE_PUBLIC_KEY_PATH || "").trim(),
       buildProvenanceExpectedHash: String(process.env.WORKLOAD_PROVENANCE_EXPECTED_HASH || "").trim().toLowerCase(),
       workloadProvenanceReverifyTtlMs: parsePositiveInt(process.env.WORKLOAD_PROVENANCE_REVERIFY_TTL_MS, undefined),
+      offensiveManifestPath: String(process.env.OFFENSIVE_MANIFEST_PATH || "").trim(),
+      offensiveManifestHashPath: String(process.env.OFFENSIVE_MANIFEST_HASH_PATH || "").trim(),
+      offensiveManifestSignaturePath: String(process.env.OFFENSIVE_MANIFEST_SIGNATURE_PATH || "").trim(),
+      offensiveManifestPublicKeyPath: String(process.env.OFFENSIVE_MANIFEST_PUBLIC_KEY_PATH || "").trim(),
+      offensiveExpectedHash: String(process.env.OFFENSIVE_MANIFEST_EXPECTED_HASH || "").trim().toLowerCase(),
+      offensiveRateLimitWindowMs: parsePositiveInt(process.env.OFFENSIVE_RATE_LIMIT_WINDOW_MS, undefined),
+      offensiveMaxPerToolPerWindow: parsePositiveInt(process.env.OFFENSIVE_MAX_PER_TOOL_PER_WINDOW, undefined),
+      offensiveMaxConcurrentOffensive: parsePositiveInt(process.env.OFFENSIVE_MAX_CONCURRENT, undefined),
+      offensiveMaxConcurrentPerTool: parsePositiveInt(process.env.OFFENSIVE_MAX_CONCURRENT_PER_TOOL, undefined),
+      offensiveBackoffBaseMs: parsePositiveInt(process.env.OFFENSIVE_BACKOFF_BASE_MS, undefined),
+      offensiveBackoffMaxMs: parsePositiveInt(process.env.OFFENSIVE_BACKOFF_MAX_MS, undefined),
       integrityMetadataProvider: () => ({
         local: typeof supervisor.getExecutionMetadata === "function" ? supervisor.getExecutionMetadata() : {},
         peers: typeof supervisor.getExecutionPeers === "function" ? supervisor.getExecutionPeers() : [],

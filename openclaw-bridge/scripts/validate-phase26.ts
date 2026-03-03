@@ -123,6 +123,7 @@ async function main(): Promise<void> {
           executionPolicyHash: loaded.provenance.executionPolicyHash,
           secretManifestHash: loaded.provenance.secretManifestHash,
           workloadManifestHash: loaded.provenance.workloadManifestHash,
+          offensiveManifestHash: loaded.provenance.offensiveManifestHash,
           attestationReferenceHash: loaded.provenance.attestationReferenceHash,
         },
       });
@@ -176,6 +177,7 @@ async function main(): Promise<void> {
           executionPolicyHash: loaded.provenance.executionPolicyHash,
           secretManifestHash: loaded.provenance.secretManifestHash,
           workloadManifestHash: loaded.provenance.workloadManifestHash,
+          offensiveManifestHash: loaded.provenance.offensiveManifestHash,
           attestationReferenceHash: loaded.provenance.attestationReferenceHash,
         },
       },

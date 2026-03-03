@@ -520,6 +520,7 @@ test("production container mode fails when workload manifest schema is invalid",
     invalidManifestPath,
     `${JSON.stringify(
       {
+        offensiveManifestHash: "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
         workloads: [
           {
             workloadID: "invalid.tool",
@@ -557,6 +558,7 @@ test("production container mode rejects production workload entries without dige
     "workload-manifest.json",
   );
   const manifest = {
+    offensiveManifestHash: "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
     workloads: [
       {
         workloadID: "prod.tool",

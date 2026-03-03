@@ -790,6 +790,49 @@ function createSupervisorV1(options = {}) {
     return null;
   }
 
+  function resolveOffensiveExecutionPlan(requestContext, slug, method) {
+    const context = requestContext && typeof requestContext === "object" ? requestContext : {};
+    const transportMetadata =
+      context.transportMetadata && typeof context.transportMetadata === "object" ? context.transportMetadata : {};
+    const plan =
+      context.offensiveExecutionPlan && typeof context.offensiveExecutionPlan === "object"
+        ? context.offensiveExecutionPlan
+        : transportMetadata.offensiveExecutionPlan && typeof transportMetadata.offensiveExecutionPlan === "object"
+        ? transportMetadata.offensiveExecutionPlan
+        : null;
+    if (!plan) {
+      return null;
+    }
+
+    const planTool = normalizeString(plan.toolName).toLowerCase();
+    const normalizedSlug = normalizeString(slug).toLowerCase();
+    if (!planTool || !normalizedSlug || planTool !== normalizedSlug) {
+      throw makeFailure("WORKLOAD_ISOLATION_INVALID", "Offensive execution plan tool mismatch", {
+        expectedTool: normalizedSlug,
+        actualTool: planTool,
+      });
+    }
+
+    if (normalizeString(method).toLowerCase() !== "run") {
+      throw makeFailure("OFFENSIVE_ARGUMENTS_INVALID", "Offensive execution only supports run method", {
+        method,
+      });
+    }
+
+    const resourceLimits = plan.resourceLimits && typeof plan.resourceLimits === "object" ? plan.resourceLimits : null;
+    const isolationProfile = plan.isolationProfile && typeof plan.isolationProfile === "object" ? plan.isolationProfile : null;
+    const containerImageDigest = normalizeString(plan.containerImageDigest).toLowerCase();
+    if (!resourceLimits || !isolationProfile || !containerImageDigest) {
+      throw makeFailure("WORKLOAD_ISOLATION_INVALID", "Offensive execution plan is incomplete", {
+        hasResourceLimits: Boolean(resourceLimits),
+        hasIsolationProfile: Boolean(isolationProfile),
+        hasContainerImageDigest: Boolean(containerImageDigest),
+      });
+    }
+
+    return plan;
+  }
+
   function resolveRequestedSecretNames(slug, requestContext) {
     const context = requestContext && typeof requestContext === "object" ? requestContext : {};
     const toolConfig = readToolContainerConfig(slug);
@@ -1647,6 +1690,8 @@ function createSupervisorV1(options = {}) {
         typeof workloadMetadata.workloadManifestHash === "string"
           ? workloadMetadata.workloadManifestHash
           : normalizeString(executionSettings.workloadManifestExpectedHash).toLowerCase(),
+      offensiveManifestHash:
+        typeof workloadMetadata.offensiveManifestHash === "string" ? workloadMetadata.offensiveManifestHash : "",
       attestationTrusted: attestationMetadata && attestationMetadata.trusted === true,
       attestationBlockedReason:
         typeof attestationMetadata.blockedReason === "string" ? attestationMetadata.blockedReason : "",
@@ -2853,6 +2898,13 @@ function createSupervisorV1(options = {}) {
         let arbiterLeaseId = "";
         const adapterExecutionMode =
           validation.adapter && validation.adapter.executionMode === "container" ? "container" : "host";
+        const offensiveExecutionPlan = resolveOffensiveExecutionPlan(context, slug, method);
+        if (offensiveExecutionPlan && adapterExecutionMode !== "container") {
+          throw makeFailure("WORKLOAD_ISOLATION_INVALID", "Offensive workloads require container execution mode", {
+            slug,
+            executionMode: adapterExecutionMode,
+          });
+        }
         if (adapterExecutionMode === "container") {
           if (!arbiterReconciledFromRuntime) {
             await ensureResourceArbiterReconciled();
@@ -2862,10 +2914,15 @@ function createSupervisorV1(options = {}) {
             throw makeFailure("NODE_CAPACITY_EXCEEDED", "Resource arbiter state is not reconciled");
           }
           const eligibility = resolveContainerExecutionEligibility();
-          const requestedLimits = resolveRequestedContainerLimits(slug, params, context);
+          const requestedLimits = offensiveExecutionPlan
+            ? { ...offensiveExecutionPlan.resourceLimits }
+            : resolveRequestedContainerLimits(slug, params, context);
           const principalHashValue = hashPrincipal(principalId);
           executionInput.executionEligibility = eligibility;
           executionInput.principalHash = principalHashValue;
+          if (offensiveExecutionPlan) {
+            executionInput.offensiveExecutionPlan = offensiveExecutionPlan;
+          }
           if (requestedLimits) {
             executionInput.resourceLimits = requestedLimits;
           }
@@ -3686,6 +3743,8 @@ function createSupervisorV1(options = {}) {
           typeof executionMetadata.secretManifestHash === "string" ? executionMetadata.secretManifestHash : "",
         workloadManifestHash:
           typeof executionMetadata.workloadManifestHash === "string" ? executionMetadata.workloadManifestHash : "",
+        offensiveManifestHash:
+          typeof executionMetadata.offensiveManifestHash === "string" ? executionMetadata.offensiveManifestHash : "",
         attestationTrusted: executionMetadata.attestationTrusted === true,
         attestationBlockedReason:
           typeof executionMetadata.attestationBlockedReason === "string" ? executionMetadata.attestationBlockedReason : "",
@@ -3736,6 +3795,7 @@ function createSupervisorV1(options = {}) {
           : normalizeString(executionSettings.expectedExecutionConfigVersion),
       secretManifestHash: typeof local.secretManifestHash === "string" ? local.secretManifestHash : "",
       workloadManifestHash: typeof local.workloadManifestHash === "string" ? local.workloadManifestHash : "",
+      offensiveManifestHash: typeof local.offensiveManifestHash === "string" ? local.offensiveManifestHash : "",
       attestationTrusted: local.attestationTrusted === true,
       attestationBlockedReason: typeof local.attestationBlockedReason === "string" ? local.attestationBlockedReason : "",
       attestationReferenceHash: typeof local.attestationReferenceHash === "string" ? local.attestationReferenceHash : "",

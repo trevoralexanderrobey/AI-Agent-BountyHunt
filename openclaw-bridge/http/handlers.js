@@ -179,8 +179,14 @@ function mapSupervisorError(error) {
   if (code === "RATE_LIMIT_EXCEEDED") {
     return { statusCode: 429, code: "RATE_LIMIT_EXCEEDED", message: "Execution rate limit exceeded" };
   }
+  if (code === "OFFENSIVE_RATE_LIMIT_EXCEEDED" || code === "OFFENSIVE_BACKOFF_ACTIVE") {
+    return { statusCode: 429, code, message: "Offensive execution rate limit exceeded" };
+  }
   if (code === "MAX_CONCURRENT_EXECUTIONS_EXCEEDED" || code === "SOURCE_CONCURRENCY_LIMIT_EXCEEDED") {
     return { statusCode: 429, code, message: "Execution concurrency limit exceeded" };
+  }
+  if (code === "OFFENSIVE_CONCURRENCY_EXCEEDED") {
+    return { statusCode: 503, code, message: "Offensive execution concurrency limit exceeded" };
   }
   if (code === "UNAUTHENTICATED_EXECUTION") {
     return { statusCode: 401, code: "UNAUTHENTICATED_EXECUTION", message: "Execution requires authenticated identity" };
@@ -214,6 +220,12 @@ function mapSupervisorError(error) {
   }
   if (code === "SECRET_SCOPE_VIOLATION") {
     return { statusCode: 403, code: "SECRET_SCOPE_VIOLATION", message: "Secret scope violation" };
+  }
+  if (code === "OFFENSIVE_TARGET_INVALID" || code === "OFFENSIVE_PROTOCOL_NOT_ALLOWED") {
+    return { statusCode: 403, code, message: "Offensive target policy rejected" };
+  }
+  if (code === "OFFENSIVE_ARGUMENTS_INVALID") {
+    return { statusCode: 400, code, message: "Offensive argument validation failed" };
   }
   if (code === "SECRET_MANIFEST_MISMATCH") {
     return { statusCode: 503, code: "SECRET_MANIFEST_MISMATCH", message: "Secret manifest mismatch across nodes" };
@@ -296,6 +308,13 @@ function mapSupervisorError(error) {
     code === "WORKLOAD_PROVENANCE_DIGEST_MISMATCH"
   ) {
     return { statusCode: 503, code: "WORKLOAD_PROVENANCE_NOT_TRUSTED", message: "Execution provenance verification failed" };
+  }
+  if (
+    code === "OFFENSIVE_DOMAIN_NOT_TRUSTED" ||
+    code === "UNREGISTERED_OFFENSIVE_TOOL" ||
+    code === "WORKLOAD_ISOLATION_INVALID"
+  ) {
+    return { statusCode: 503, code, message: "Offensive domain verification failed" };
   }
   if (code === "SUPERVISOR_CAPACITY_EXCEEDED") {
     return { statusCode: 503, code: "INTERNAL_ERROR", message: "Service capacity exceeded" };
@@ -592,7 +611,49 @@ function createHttpHandlers(options = {}) {
               executionMetadata,
               peers: Array.isArray(executionPeers) ? executionPeers : [],
             },
-            legacyExecute: async () => supervisor.execute(parsed.slug, parsed.method, parsed.params, requestContext),
+            legacyExecute: async (tool, legacyArgs, legacyContext) => {
+              const toolName = typeof tool === "string" ? tool.trim() : "";
+              const [legacySlug, legacyMethod] = toolName.includes(".") ? toolName.split(".", 2) : [parsed.slug, parsed.method];
+              const forwardedContext = {
+                ...requestContext,
+                principalId:
+                  legacyContext && typeof legacyContext === "object" && typeof legacyContext.principalId === "string"
+                    ? legacyContext.principalId
+                    : requestContext.principalId,
+              };
+
+              const transportMetadata =
+                legacyContext &&
+                typeof legacyContext === "object" &&
+                legacyContext.transportMetadata &&
+                typeof legacyContext.transportMetadata === "object"
+                  ? legacyContext.transportMetadata
+                  : {};
+              if (Object.keys(transportMetadata).length > 0) {
+                forwardedContext.transportMetadata = transportMetadata;
+              }
+
+              if (
+                transportMetadata &&
+                transportMetadata.offensiveExecutionPlan &&
+                typeof transportMetadata.offensiveExecutionPlan === "object"
+              ) {
+                forwardedContext.offensiveExecutionPlan = transportMetadata.offensiveExecutionPlan;
+                if (
+                  transportMetadata.offensiveExecutionPlan.resourceLimits &&
+                  typeof transportMetadata.offensiveExecutionPlan.resourceLimits === "object"
+                ) {
+                  forwardedContext.resourceLimits = transportMetadata.offensiveExecutionPlan.resourceLimits;
+                }
+              }
+
+              return supervisor.execute(
+                typeof legacySlug === "string" && legacySlug.trim() ? legacySlug : parsed.slug,
+                typeof legacyMethod === "string" && legacyMethod.trim() ? legacyMethod : parsed.method,
+                legacyArgs && typeof legacyArgs === "object" ? legacyArgs : parsed.params,
+                forwardedContext,
+              );
+            },
           });
 
           if (!execution.ok) {

@@ -7,6 +7,7 @@ const REQUIRED_REFERENCE_KEYS = Object.freeze([
   "executionPolicyHash",
   "secretManifestHash",
   "workloadManifestHash",
+  "offensiveManifestHash",
   "evidenceTtlMs",
 ]);
 const DEFAULT_EVIDENCE_TTL_MS = 120_000;
@@ -18,6 +19,7 @@ export interface WorkloadAttestationReference {
   executionPolicyHash: string;
   secretManifestHash: string;
   workloadManifestHash: string;
+  offensiveManifestHash: string;
   evidenceTtlMs: number;
 }
 
@@ -31,6 +33,7 @@ export interface WorkloadAttestationEvidence {
   workloadManifestHash: string;
   executionPolicyHash: string;
   secretManifestHash: string;
+  offensiveManifestHash: string;
   runtimeMeasurements: Record<string, unknown>;
   snapshotHash: string;
   timestampMs: number;
@@ -315,6 +318,7 @@ function validateReference(reference: unknown): { valid: boolean; errors: string
   const policyHash = normalizeHash(reference.executionPolicyHash);
   const secretHash = normalizeHash(reference.secretManifestHash);
   const workloadHash = normalizeHash(reference.workloadManifestHash);
+  const offensiveHash = normalizeHash(reference.offensiveManifestHash);
 
   if (!/^[a-f0-9]{64}$/.test(policyHash)) {
     errors.push("executionPolicyHash must be a 64-character lowercase hex string");
@@ -324,6 +328,9 @@ function validateReference(reference: unknown): { valid: boolean; errors: string
   }
   if (!/^[a-f0-9]{64}$/.test(workloadHash)) {
     errors.push("workloadManifestHash must be a 64-character lowercase hex string");
+  }
+  if (!/^[a-f0-9]{64}$/.test(offensiveHash)) {
+    errors.push("offensiveManifestHash must be a 64-character lowercase hex string");
   }
 
   const evidenceTtlMs = parsePositiveInt(reference.evidenceTtlMs, 0);
@@ -354,6 +361,7 @@ function getCanonicalReference(reference: unknown): WorkloadAttestationReference
     executionPolicyHash: normalizeHash(input.executionPolicyHash),
     secretManifestHash: normalizeHash(input.secretManifestHash),
     workloadManifestHash: normalizeHash(input.workloadManifestHash),
+    offensiveManifestHash: normalizeHash(input.offensiveManifestHash),
     evidenceTtlMs: parsePositiveInt(input.evidenceTtlMs, DEFAULT_EVIDENCE_TTL_MS),
   };
 }
@@ -481,12 +489,14 @@ function normalizeLocalMetadata(input: unknown): {
   executionPolicyHash: string;
   secretManifestHash: string;
   workloadManifestHash: string;
+  offensiveManifestHash: string;
 } {
   const source = isPlainObject(input) ? input : {};
   return {
     executionPolicyHash: normalizeHash(source.executionPolicyHash || source.execution_policy_hash),
     secretManifestHash: normalizeHash(source.secretManifestHash || source.secret_manifest_hash),
     workloadManifestHash: normalizeHash(source.workloadManifestHash || source.workload_manifest_hash),
+    offensiveManifestHash: normalizeHash(source.offensiveManifestHash || source.offensive_manifest_hash),
   };
 }
 
@@ -494,11 +504,13 @@ function buildSnapshotHash(localMetadata: {
   executionPolicyHash: string;
   secretManifestHash: string;
   workloadManifestHash: string;
+  offensiveManifestHash: string;
 }): string {
   return sha256HexObject({
     executionPolicyHash: localMetadata.executionPolicyHash,
     secretManifestHash: localMetadata.secretManifestHash,
     workloadManifestHash: localMetadata.workloadManifestHash,
+    offensiveManifestHash: localMetadata.offensiveManifestHash,
   });
 }
 
@@ -535,6 +547,7 @@ export function verifyAttestationEvidence(
   const workloadManifestHash = normalizeHash(evidence.workloadManifestHash);
   const executionPolicyHash = normalizeHash(evidence.executionPolicyHash);
   const secretManifestHash = normalizeHash(evidence.secretManifestHash);
+  const offensiveManifestHash = normalizeHash(evidence.offensiveManifestHash);
   const nonce = normalizeString(evidence.nonce);
   const publicKey = normalizeString(evidence.publicKey);
   const evidenceHash = normalizeHash(evidence.evidenceHash);
@@ -564,6 +577,7 @@ export function verifyAttestationEvidence(
     workloadManifestHash,
     executionPolicyHash,
     secretManifestHash,
+    offensiveManifestHash,
     runtimeMeasurements: canonicalize(runtimeMeasurements) as Record<string, unknown>,
     snapshotHash,
     timestampMs,
@@ -609,6 +623,14 @@ export function verifyAttestationEvidence(
       nodeId,
       expectedSecretManifestHash: trustedReference.secretManifestHash,
       actualSecretManifestHash: secretManifestHash,
+      evidenceHash,
+    });
+  }
+  if (offensiveManifestHash !== trustedReference.offensiveManifestHash) {
+    return makeResult("WORKLOAD_ATTESTATION_REFERENCE_MISMATCH", "Offensive manifest hash mismatch", {
+      nodeId,
+      expectedOffensiveManifestHash: trustedReference.offensiveManifestHash,
+      actualOffensiveManifestHash: offensiveManifestHash,
       evidenceHash,
     });
   }
@@ -760,13 +782,19 @@ export function initializeAttestation(options: WorkloadAttestationRuntimeOptions
 
     const localMetadata = normalizeLocalMetadata(localMetadataInput);
 
-    if (!localMetadata.executionPolicyHash || !localMetadata.secretManifestHash || !localMetadata.workloadManifestHash) {
+    if (
+      !localMetadata.executionPolicyHash ||
+      !localMetadata.secretManifestHash ||
+      !localMetadata.workloadManifestHash ||
+      !localMetadata.offensiveManifestHash
+    ) {
       return makeResult("WORKLOAD_ATTESTATION_NOT_TRUSTED", "Attestation metadata is incomplete", {
         nodeId,
         missing: {
           executionPolicyHash: !localMetadata.executionPolicyHash,
           secretManifestHash: !localMetadata.secretManifestHash,
           workloadManifestHash: !localMetadata.workloadManifestHash,
+          offensiveManifestHash: !localMetadata.offensiveManifestHash,
         },
       });
     }
@@ -790,6 +818,13 @@ export function initializeAttestation(options: WorkloadAttestationRuntimeOptions
         nodeId,
         expectedWorkloadManifestHash: reference.workloadManifestHash,
         actualWorkloadManifestHash: localMetadata.workloadManifestHash,
+      });
+    }
+    if (localMetadata.offensiveManifestHash !== reference.offensiveManifestHash) {
+      return makeResult("WORKLOAD_ATTESTATION_REFERENCE_MISMATCH", "Offensive manifest hash does not match attestation reference", {
+        nodeId,
+        expectedOffensiveManifestHash: reference.offensiveManifestHash,
+        actualOffensiveManifestHash: localMetadata.offensiveManifestHash,
       });
     }
 
@@ -1007,6 +1042,7 @@ export function initializeAttestation(options: WorkloadAttestationRuntimeOptions
       workloadManifestHash: localMetadata.workloadManifestHash,
       executionPolicyHash: localMetadata.executionPolicyHash,
       secretManifestHash: localMetadata.secretManifestHash,
+      offensiveManifestHash: localMetadata.offensiveManifestHash,
       runtimeMeasurements,
       snapshotHash: buildSnapshotHash(localMetadata),
       timestampMs,

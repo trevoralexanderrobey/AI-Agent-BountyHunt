@@ -42,6 +42,7 @@ function makeFixture({ imageDigestInManifest = "", runtimeConfig = { mode: "test
   fs.writeFileSync(entrypointPath, "require('./adapter.js');\n", "utf8");
 
   const manifest = {
+    offensiveManifestHash: "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
     workloads: [
       {
         workloadID: "phase24.test.tool",

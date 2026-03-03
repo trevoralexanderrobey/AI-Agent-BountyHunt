@@ -37,7 +37,10 @@
     "provenance:generate": "npm run bridge:build && node dist/scripts/generate-build-provenance.js",
     "provenance:verify": "npm run bridge:build && node dist/scripts/verify-build-provenance.js",
     "phase26:validate": "npm run bridge:build && node dist/scripts/validate-phase26.js",
-    "ci:phase26-governance": "npm run ci:phase25-governance && npm run provenance:verify && npm run phase26:validate"
+    "ci:phase26-governance": "npm run ci:phase25-governance && npm run provenance:verify && npm run phase26:validate",
+    "offensive:verify": "npm run bridge:build && node dist/scripts/verify-offensive-workloads.js",
+    "phase27:validate": "npm run bridge:build && node dist/scripts/validate-phase27.js",
+    "ci:phase27-governance": "npm run ci:phase26-governance && npm run offensive:verify && npm run phase27:validate"
   },
   "version": "0.1.0"
 }

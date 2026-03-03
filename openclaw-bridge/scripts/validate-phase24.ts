@@ -92,6 +92,7 @@ async function main(): Promise<void> {
 
     const declaredImageDigest = "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
     const testManifest = {
+      offensiveManifestHash: "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
       workloads: [
         {
           workloadID: "phase24.test.tool",

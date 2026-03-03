@@ -310,11 +310,24 @@ class BaseToolAdapter {
 
     this.ensureExecutionEligibility(input);
 
+    const offensivePlan =
+      input && input.offensiveExecutionPlan && typeof input.offensiveExecutionPlan === "object"
+        ? input.offensiveExecutionPlan
+        : null;
+    if (offensivePlan) {
+      const planTool = typeof offensivePlan.toolName === "string" ? offensivePlan.toolName.trim().toLowerCase() : "";
+      if (!planTool || planTool !== this.slug) {
+        throw this.makeError("WORKLOAD_ISOLATION_INVALID", "Offensive execution plan tool mismatch");
+      }
+    }
+
     if (!this.containerRuntime || typeof this.containerRuntime.runContainer !== "function") {
       throw this.makeError("CONTAINER_RUNTIME_REQUIRED", "Container runtime required for container execution mode");
     }
 
-    const requestedLimitsResult = this.normalizeRequestedResourceLimits(input ? input.resourceLimits : undefined);
+    const requestedLimitsResult = offensivePlan
+      ? this.normalizeRequestedResourceLimits(offensivePlan.resourceLimits)
+      : this.normalizeRequestedResourceLimits(input ? input.resourceLimits : undefined);
     if (!requestedLimitsResult.valid) {
       const message = requestedLimitsResult.errors.length
         ? requestedLimitsResult.errors.join("; ")
@@ -356,6 +369,54 @@ class BaseToolAdapter {
     const request = this.ensureObject(invocation, "Container invocation must be an object");
     if (typeof request.image !== "string" || request.image.trim().length === 0) {
       throw this.makeError("INVALID_CONTAINER_REQUEST", "Container invocation must include image");
+    }
+
+    if (offensivePlan) {
+      const digestFromImageMatch = request.image.toLowerCase().match(/@sha256:([a-f0-9]{64})/);
+      const digestFromImage = digestFromImageMatch && digestFromImageMatch[1] ? `sha256:${digestFromImageMatch[1]}` : "";
+      const expectedDigest =
+        typeof offensivePlan.containerImageDigest === "string" ? offensivePlan.containerImageDigest.trim().toLowerCase() : "";
+      if (!expectedDigest || !digestFromImage || digestFromImage !== expectedDigest) {
+        throw this.makeError("WORKLOAD_ISOLATION_INVALID", "Container digest does not match offensive execution plan");
+      }
+
+      const profile =
+        offensivePlan.isolationProfile && typeof offensivePlan.isolationProfile === "object" ? offensivePlan.isolationProfile : {};
+      const dropCapabilities = Array.isArray(profile.dropCapabilities) ? profile.dropCapabilities.map((entry) => String(entry)) : [];
+      if (
+        profile.privileged !== false ||
+        profile.hostPID !== false ||
+        profile.hostNetwork !== false ||
+        profile.hostMounts !== false ||
+        profile.readOnlyRootFilesystem !== true ||
+        profile.tty !== false ||
+        profile.stdin !== false ||
+        dropCapabilities.length !== 1 ||
+        dropCapabilities[0] !== "ALL"
+      ) {
+        throw this.makeError("WORKLOAD_ISOLATION_INVALID", "Offensive isolation profile is invalid");
+      }
+
+      request.sandboxConfig = {
+        runAsNonRoot: true,
+        dropCapabilities: ["ALL"],
+        privileged: false,
+        hostPID: false,
+        hostNetwork: false,
+        hostMounts: false,
+        readOnlyRootFilesystem: true,
+        writableVolumes: ["scratch"],
+        seccompProfile:
+          typeof profile.seccompProfile === "string" && profile.seccompProfile.trim()
+            ? profile.seccompProfile.trim()
+            : "runtime/default",
+        appArmorProfile:
+          typeof profile.appArmorProfile === "string" && profile.appArmorProfile.trim()
+            ? profile.appArmorProfile.trim()
+            : "openclaw-default",
+      };
+      request.nonInteractive = true;
+      request.offensiveExecutionPlan = offensivePlan;
     }
 
     const context = {
@@ -404,6 +465,7 @@ class BaseToolAdapter {
         toolSlug: this.slug,
         requestId,
         principalHash: context.principalHash,
+        nonInteractive: offensivePlan ? true : false,
         policySnapshot: input && input.policySnapshot && typeof input.policySnapshot === "object" ? input.policySnapshot : null,
       }),
       timeout,

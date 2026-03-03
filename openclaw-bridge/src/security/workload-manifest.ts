@@ -2,7 +2,7 @@ import crypto from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
 
-const ROOT_KEYS = Object.freeze(["workloads"]);
+const ROOT_KEYS = Object.freeze(["workloads", "offensiveManifestHash"]);
 const REQUIRED_KEYS = Object.freeze([
   "workloadID",
   "adapterHash",
@@ -29,6 +29,7 @@ export interface WorkloadManifestEntry {
 
 export interface WorkloadManifest {
   workloads: WorkloadManifestEntry[];
+  offensiveManifestHash: string;
 }
 
 export interface WorkloadManifestValidation {
@@ -229,6 +230,9 @@ export function validateWorkloadManifest(manifest: unknown): WorkloadManifestVal
   }
 
   const workloads = manifest.workloads;
+  if (!/^[a-f0-9]{64}$/.test(normalizeHash(manifest.offensiveManifestHash))) {
+    errors.push("offensiveManifestHash must be a sha256 hex string");
+  }
   if (!Array.isArray(workloads) || workloads.length === 0) {
     errors.push("workloads must be a non-empty array");
   } else {
@@ -314,6 +318,7 @@ export function getCanonicalWorkloadManifest(inputManifest: unknown): WorkloadMa
 
   const manifest = inputManifest as WorkloadManifest;
   const normalized: WorkloadManifest = {
+    offensiveManifestHash: normalizeHash(manifest.offensiveManifestHash),
     workloads: manifest.workloads
       .map((entry) => normalizeEntry(entry))
       .sort((left, right) => left.workloadID.localeCompare(right.workloadID)),

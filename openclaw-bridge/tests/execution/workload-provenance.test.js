@@ -36,7 +36,8 @@ function makeFixture() {
     workloadManifestHash: "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
     executionPolicyHash: "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
     secretManifestHash: "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
-    attestationReferenceHash: "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+    offensiveManifestHash: "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+    attestationReferenceHash: "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
     containerImageDigests: {
       "supervisor.read_file": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
     },
@@ -207,6 +208,7 @@ test("single-flight ttl reverify runs once under concurrency", async () => {
           executionPolicyHash: fixture.document.executionPolicyHash,
           secretManifestHash: fixture.document.secretManifestHash,
           workloadManifestHash: fixture.document.workloadManifestHash,
+          offensiveManifestHash: fixture.document.offensiveManifestHash,
           attestationReferenceHash: fixture.document.attestationReferenceHash,
         },
       }),
@@ -250,6 +252,7 @@ test("snapshot mismatch makes local node untrusted", async () => {
       executionPolicyHash: "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
       secretManifestHash: fixture.document.secretManifestHash,
       workloadManifestHash: fixture.document.workloadManifestHash,
+      offensiveManifestHash: fixture.document.offensiveManifestHash,
       attestationReferenceHash: fixture.document.attestationReferenceHash,
     },
   });
@@ -264,6 +267,7 @@ test("snapshot mismatch makes local node untrusted", async () => {
       executionPolicyHash: fixture.document.executionPolicyHash,
       secretManifestHash: fixture.document.secretManifestHash,
       workloadManifestHash: fixture.document.workloadManifestHash,
+      offensiveManifestHash: fixture.document.offensiveManifestHash,
       attestationReferenceHash: fixture.document.attestationReferenceHash,
     },
   });

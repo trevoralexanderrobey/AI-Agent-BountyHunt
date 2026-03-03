@@ -22,7 +22,14 @@ const RUN_CONTAINER_REQUIRED_KEYS = Object.freeze([
   "sandboxConfig",
   "signatureVerified",
 ]);
-const RUN_CONTAINER_OPTIONAL_KEYS = Object.freeze(["inputArtifacts", "requestId", "principalHash", "policySnapshot"]);
+const RUN_CONTAINER_OPTIONAL_KEYS = Object.freeze([
+  "inputArtifacts",
+  "requestId",
+  "principalHash",
+  "policySnapshot",
+  "nonInteractive",
+  "offensiveExecutionPlan",
+]);
 const RUN_CONTAINER_KEYS = Object.freeze([...RUN_CONTAINER_REQUIRED_KEYS, ...RUN_CONTAINER_OPTIONAL_KEYS]);
 
 const CONTAINER_LABEL_ENABLED = "com.openclaw.execution";
@@ -273,6 +280,17 @@ function validateRunContainerInputShape(input) {
 
   if (Object.prototype.hasOwnProperty.call(input, "policySnapshot") && !isPlainObject(input.policySnapshot)) {
     throw makeFailure("INVALID_CONTAINER_REQUEST", "policySnapshot must be an object when provided");
+  }
+
+  if (Object.prototype.hasOwnProperty.call(input, "nonInteractive") && typeof input.nonInteractive !== "boolean") {
+    throw makeFailure("INVALID_CONTAINER_REQUEST", "nonInteractive must be a boolean when provided");
+  }
+
+  if (
+    Object.prototype.hasOwnProperty.call(input, "offensiveExecutionPlan") &&
+    !isPlainObject(input.offensiveExecutionPlan)
+  ) {
+    throw makeFailure("INVALID_CONTAINER_REQUEST", "offensiveExecutionPlan must be an object when provided");
   }
 }
 
@@ -900,8 +918,12 @@ async function createDockerBackend({ docker, executionConfig, metrics, runtimeId
       Env: buildDockerEnv(input.env, input),
       WorkingDir: "/scratch",
       User: executionConfig.nonRootUser,
+      AttachStdin: false,
       AttachStdout: true,
       AttachStderr: true,
+      OpenStdin: false,
+      StdinOnce: false,
+      Tty: false,
       Labels: labels,
       HostConfig: hostConfig,
     });
@@ -1278,6 +1300,16 @@ function createContainerRuntime(options = {}) {
   async function runContainer(input = {}) {
     ensureRuntimeEnabled();
     validateRunContainerInputShape(input);
+    if (
+      input.nonInteractive === true &&
+      Array.isArray(input.args) &&
+      input.args.some((arg) => {
+        const normalized = normalizeString(arg).toLowerCase();
+        return normalized === "-i" || normalized === "-t" || normalized === "-it" || normalized === "--interactive" || normalized === "--tty";
+      })
+    ) {
+      throw makeFailure("WORKLOAD_ISOLATION_INVALID", "Interactive container arguments are forbidden for non-interactive workloads");
+    }
     const activeExecutionConfig = resolveExecutionConfigFromPolicySnapshot(input.policySnapshot, executionConfig);
 
     const toolSlug = normalizeString(input.toolSlug).toLowerCase();

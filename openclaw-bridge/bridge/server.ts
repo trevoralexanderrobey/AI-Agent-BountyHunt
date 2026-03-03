@@ -612,6 +612,17 @@ function resolveHttpErrorStatus(error: unknown): number {
   if (code === "PATH_OUTSIDE_WORKSPACE") return 403;
   if (code === "INVALID_REQUEST" || code === "INVALID_ARGUMENT") return 400;
   if (code === "RATE_LIMIT_EXCEEDED" || code === "MAX_CONCURRENT_EXECUTIONS_EXCEEDED" || code === "SOURCE_CONCURRENCY_LIMIT_EXCEEDED") return 429;
+  if (code === "OFFENSIVE_RATE_LIMIT_EXCEEDED" || code === "OFFENSIVE_BACKOFF_ACTIVE") return 429;
+  if (code === "OFFENSIVE_CONCURRENCY_EXCEEDED") return 503;
+  if (code === "OFFENSIVE_TARGET_INVALID" || code === "OFFENSIVE_PROTOCOL_NOT_ALLOWED") return 403;
+  if (code === "OFFENSIVE_ARGUMENTS_INVALID") return 400;
+  if (
+    code === "OFFENSIVE_DOMAIN_NOT_TRUSTED" ||
+    code === "UNREGISTERED_OFFENSIVE_TOOL" ||
+    code === "WORKLOAD_ISOLATION_INVALID"
+  ) {
+    return 503;
+  }
   if (
     code === "WORKLOAD_NOT_VERIFIED" ||
     code === "WORKLOAD_HASH_MISMATCH" ||
@@ -1139,6 +1150,19 @@ async function main(): Promise<void> {
     buildProvenancePublicKeyPath: String(process.env.WORKLOAD_PROVENANCE_PUBLIC_KEY_PATH || "").trim(),
     buildProvenanceExpectedHash: String(process.env.WORKLOAD_PROVENANCE_EXPECTED_HASH || "").trim().toLowerCase(),
     workloadProvenanceReverifyTtlMs: Number.parseInt(String(process.env.WORKLOAD_PROVENANCE_REVERIFY_TTL_MS || ""), 10) || undefined,
+    offensiveManifestPath: String(process.env.OFFENSIVE_MANIFEST_PATH || "").trim(),
+    offensiveManifestHashPath: String(process.env.OFFENSIVE_MANIFEST_HASH_PATH || "").trim(),
+    offensiveManifestSignaturePath: String(process.env.OFFENSIVE_MANIFEST_SIGNATURE_PATH || "").trim(),
+    offensiveManifestPublicKeyPath: String(process.env.OFFENSIVE_MANIFEST_PUBLIC_KEY_PATH || "").trim(),
+    offensiveExpectedHash: String(process.env.OFFENSIVE_MANIFEST_EXPECTED_HASH || "").trim().toLowerCase(),
+    offensiveRateLimitWindowMs: Number.parseInt(String(process.env.OFFENSIVE_RATE_LIMIT_WINDOW_MS || ""), 10) || undefined,
+    offensiveMaxPerToolPerWindow:
+      Number.parseInt(String(process.env.OFFENSIVE_MAX_PER_TOOL_PER_WINDOW || ""), 10) || undefined,
+    offensiveMaxConcurrentOffensive: Number.parseInt(String(process.env.OFFENSIVE_MAX_CONCURRENT || ""), 10) || undefined,
+    offensiveMaxConcurrentPerTool:
+      Number.parseInt(String(process.env.OFFENSIVE_MAX_CONCURRENT_PER_TOOL || ""), 10) || undefined,
+    offensiveBackoffBaseMs: Number.parseInt(String(process.env.OFFENSIVE_BACKOFF_BASE_MS || ""), 10) || undefined,
+    offensiveBackoffMaxMs: Number.parseInt(String(process.env.OFFENSIVE_BACKOFF_MAX_MS || ""), 10) || undefined,
     legacyVisibleToolsByRole: {
       supervisor: ["bridge_health", "bridge_list_jobs", "bridge_job_status", "bridge_submit_job", "bridge_cancel_job", "bridge_execute_tool"],
       internal: BRIDGE_MCP_TOOLS.map((tool) => tool.name),

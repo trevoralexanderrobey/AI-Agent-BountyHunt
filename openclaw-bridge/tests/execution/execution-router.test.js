@@ -789,6 +789,7 @@ test("router blocks execution when attestation posture is untrusted", { concurre
     await fs.writeFile(entrypointPath, "require('./adapter.js');\n", "utf8");
 
     const manifest = {
+      offensiveManifestHash: reference.offensiveManifestHash,
       workloads: [
         {
           workloadID: "supervisor.read_file",
@@ -819,6 +820,7 @@ test("router blocks execution when attestation posture is untrusted", { concurre
             executionPolicyHash: "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
             secretManifestHash: reference.secretManifestHash,
             workloadManifestHash: reference.workloadManifestHash,
+            offensiveManifestHash: reference.offensiveManifestHash,
           },
           peers: [],
         }),
@@ -886,6 +888,7 @@ test("router blocks execution when provenance verification fails and prevents le
         executionPolicyHash: "a2a3f2e9d272f4f8354f5f9188b4b62e91a8269989d9bc3ec0936f69f5893de3",
         secretManifestHash: "2c9b7debe9d561ba4879209eb20d3f2f67137847f072327fbe39dc8a6cb4209f",
         workloadManifestHash: "c17fcb8ff98cf4df12b259abf3b5ca7f349e5fe1b6dd17a3f68ca1457e210882",
+        offensiveManifestHash: "e48f2f39d78db7199339a4dd19825f351a0cef0d6f3273e691fc765c9419b13f",
         attestationReferenceHash: "6c48fbf7c1f5e2fdcb7ac1d18b68aa8f83338db5a6eb746f97753d6976f8b4cb",
       },
     },

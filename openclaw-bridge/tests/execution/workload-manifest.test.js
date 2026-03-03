@@ -9,6 +9,7 @@ const {
 
 function sampleManifest() {
   return {
+    offensiveManifestHash: "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
     workloads: [
       {
         workloadID: "supervisor.read_file",
@@ -57,6 +58,7 @@ test("workload manifest hash changes when metadata changes", () => {
 
 test("workload manifest validation rejects missing required fields", () => {
   const invalid = {
+    offensiveManifestHash: "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
     workloads: [
       {
         workloadID: "supervisor.read_file",

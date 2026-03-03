@@ -10,6 +10,7 @@ const REQUIRED_PROVENANCE_KEYS = Object.freeze([
   "workloadManifestHash",
   "executionPolicyHash",
   "secretManifestHash",
+  "offensiveManifestHash",
   "attestationReferenceHash",
   "containerImageDigests",
   "dependencyLockHash",
@@ -37,6 +38,7 @@ export interface WorkloadProvenanceDocument {
   workloadManifestHash: string;
   executionPolicyHash: string;
   secretManifestHash: string;
+  offensiveManifestHash: string;
   attestationReferenceHash: string;
   containerImageDigests: Record<string, string>;
   dependencyLockHash: string;
@@ -721,6 +723,7 @@ export function validateBuildProvenance(input: unknown): WorkloadProvenanceValid
     "workloadManifestHash",
     "executionPolicyHash",
     "secretManifestHash",
+    "offensiveManifestHash",
     "attestationReferenceHash",
     "dependencyLockHash",
     "provenanceHash",
@@ -818,6 +821,7 @@ export function getCanonicalBuildProvenance(input: unknown): WorkloadProvenanceD
     workloadManifestHash: normalizeHash(source.workloadManifestHash),
     executionPolicyHash: normalizeHash(source.executionPolicyHash),
     secretManifestHash: normalizeHash(source.secretManifestHash),
+    offensiveManifestHash: normalizeHash(source.offensiveManifestHash),
     attestationReferenceHash: normalizeHash(source.attestationReferenceHash),
     containerImageDigests: normalizedDigestMap,
     dependencyLockHash: normalizeHash(source.dependencyLockHash),
@@ -883,6 +887,11 @@ export function verifyBuildProvenance(
 export function loadBuildProvenanceFromDisk(options: WorkloadProvenanceRuntimeOptions = {}): LoadedBuildProvenance {
   const production = options.production === true || normalizeString(process.env.NODE_ENV).toLowerCase() === "production";
   const paths = resolveProvenancePaths(options, production);
+  const inlinePublicKey = normalizeString(options.publicKey || process.env.WORKLOAD_PROVENANCE_PUBLIC_KEY);
+
+  if (production && inlinePublicKey) {
+    throw makeError("WORKLOAD_PROVENANCE_KEY_OVERRIDE_FORBIDDEN", "Inline build provenance public key override is forbidden in production", {});
+  }
 
   if (production) {
     assertProductionFilesystemIntegrity(paths, {
@@ -978,6 +987,9 @@ function evaluateSnapshotBinding(
   const localExecutionPolicyHash = normalizeHash(localMetadata.executionPolicyHash || localMetadata.execution_policy_hash);
   const localSecretManifestHash = normalizeHash(localMetadata.secretManifestHash || localMetadata.secret_manifest_hash);
   const localWorkloadManifestHash = normalizeHash(localMetadata.workloadManifestHash || localMetadata.workload_manifest_hash);
+  const localOffensiveManifestHash = normalizeHash(
+    localMetadata.offensiveManifestHash || localMetadata.offensive_manifest_hash,
+  );
   const localAttestationReferenceHash = normalizeHash(
     localMetadata.attestationReferenceHash || localMetadata.attestation_reference_hash,
   );
@@ -986,6 +998,7 @@ function evaluateSnapshotBinding(
   if (!localExecutionPolicyHash) missing.push("executionPolicyHash");
   if (!localSecretManifestHash) missing.push("secretManifestHash");
   if (!localWorkloadManifestHash) missing.push("workloadManifestHash");
+  if (!localOffensiveManifestHash) missing.push("offensiveManifestHash");
   if (!localAttestationReferenceHash) missing.push("attestationReferenceHash");
 
   if (missing.length > 0) {
@@ -1022,6 +1035,13 @@ function evaluateSnapshotBinding(
       field: "workloadManifestHash",
       expected: provenance.workloadManifestHash,
       actual: localWorkloadManifestHash,
+    });
+  }
+  if (localOffensiveManifestHash !== provenance.offensiveManifestHash) {
+    mismatches.push({
+      field: "offensiveManifestHash",
+      expected: provenance.offensiveManifestHash,
+      actual: localOffensiveManifestHash,
     });
   }
 

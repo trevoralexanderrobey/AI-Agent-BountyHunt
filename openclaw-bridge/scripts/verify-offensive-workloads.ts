@@ -1,16 +1,16 @@
 import path from "node:path";
 
 import {
-  loadBuildProvenanceFromDisk,
-  verifyBuildProvenance,
-} from "../src/security/workload-provenance";
+  loadOffensiveManifestFromDisk,
+  verifyOffensiveManifest,
+} from "../src/security/offensive-workload-manifest";
 
 interface CliOptions {
-  provenancePath?: string;
+  manifestPath?: string;
   hashPath?: string;
+  signaturePath?: string;
   publicKeyPath?: string;
   expectedHash?: string;
-  dependencyLockPath?: string;
   production: boolean;
 }
 
@@ -26,13 +26,18 @@ function parseArgs(argv: string[]): CliOptions {
 
   for (let index = 0; index < args.length; index += 1) {
     const token = args[index];
-    if (token === "--provenance" && args[index + 1]) {
-      parsed.provenancePath = path.resolve(args[index + 1]);
+    if (token === "--manifest" && args[index + 1]) {
+      parsed.manifestPath = path.resolve(args[index + 1]);
       index += 1;
       continue;
     }
     if (token === "--hash" && args[index + 1]) {
       parsed.hashPath = path.resolve(args[index + 1]);
+      index += 1;
+      continue;
+    }
+    if (token === "--signature" && args[index + 1]) {
+      parsed.signaturePath = path.resolve(args[index + 1]);
       index += 1;
       continue;
     }
@@ -43,11 +48,6 @@ function parseArgs(argv: string[]): CliOptions {
     }
     if (token === "--expected-hash" && args[index + 1]) {
       parsed.expectedHash = normalizeString(args[index + 1]).toLowerCase();
-      index += 1;
-      continue;
-    }
-    if (token === "--lockfile" && args[index + 1]) {
-      parsed.dependencyLockPath = path.resolve(args[index + 1]);
       index += 1;
       continue;
     }
@@ -62,13 +62,13 @@ function parseArgs(argv: string[]): CliOptions {
 
 function main(): void {
   const args = parseArgs(process.argv);
-  const verification = verifyBuildProvenance({
+  const verification = verifyOffensiveManifest({
     production: args.production,
-    provenancePath: args.provenancePath,
-    provenanceHashPath: args.hashPath,
+    manifestPath: args.manifestPath,
+    hashPath: args.hashPath,
+    signaturePath: args.signaturePath,
     publicKeyPath: args.publicKeyPath,
-    expectedProvenanceHash: args.expectedHash,
-    dependencyLockPath: args.dependencyLockPath,
+    expectedManifestHash: args.expectedHash,
     allowProductionPathOverride: false,
     productionContainerMode: false,
   });
@@ -78,31 +78,32 @@ function main(): void {
     process.exit(1);
   }
 
-  const loaded = loadBuildProvenanceFromDisk({
+  const loaded = loadOffensiveManifestFromDisk({
     production: args.production,
-    provenancePath: args.provenancePath,
-    provenanceHashPath: args.hashPath,
+    manifestPath: args.manifestPath,
+    hashPath: args.hashPath,
+    signaturePath: args.signaturePath,
     publicKeyPath: args.publicKeyPath,
-    expectedProvenanceHash: args.expectedHash,
-    dependencyLockPath: args.dependencyLockPath,
+    expectedManifestHash: args.expectedHash,
     allowProductionPathOverride: false,
     productionContainerMode: false,
   });
 
-  const payload = {
-    ok: true,
-    provenancePath: loaded.provenancePath,
-    hashPath: loaded.hashPath,
-    publicKeyPath: loaded.publicKeyPath,
-    dependencyLockPath: loaded.dependencyLockPath,
-    provenanceHash: loaded.canonicalPayloadHash,
-    gitCommitSha: loaded.provenance.gitCommitSha,
-    offensiveManifestHash: loaded.provenance.offensiveManifestHash,
-    signatureAlgorithm: loaded.provenance.signatureAlgorithm,
-    containerDigests: loaded.provenance.containerImageDigests,
-  };
-
-  process.stdout.write(`${JSON.stringify(payload, null, 2)}\n`);
+  process.stdout.write(
+    `${JSON.stringify(
+      {
+        ok: true,
+        manifestPath: loaded.manifestPath,
+        hashPath: loaded.hashPath,
+        signaturePath: loaded.signaturePath,
+        publicKeyPath: loaded.publicKeyPath,
+        manifestHash: loaded.canonicalPayloadHash,
+        tools: loaded.manifest.tools.map((tool) => tool.toolName),
+      },
+      null,
+      2,
+    )}\n`,
+  );
 }
 
 main();

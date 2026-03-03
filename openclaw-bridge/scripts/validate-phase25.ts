@@ -107,6 +107,7 @@ async function main(): Promise<void> {
       executionPolicyHash: loadedReference.reference.executionPolicyHash,
       secretManifestHash: loadedReference.reference.secretManifestHash,
       workloadManifestHash: loadedReference.reference.workloadManifestHash,
+      offensiveManifestHash: loadedReference.reference.offensiveManifestHash,
     };
 
     const attestationRuntime = initializeAttestation({
@@ -167,6 +168,7 @@ async function main(): Promise<void> {
           executionPolicyHash: localMetadata.executionPolicyHash,
           secretManifestHash: localMetadata.secretManifestHash,
           workloadManifestHash: localMetadata.workloadManifestHash,
+          offensiveManifestHash: localMetadata.offensiveManifestHash,
         }),
       );
       snapshot_bound_to_attestation = normalizeString(generated.evidence.snapshotHash).length === 64;
@@ -191,6 +193,7 @@ async function main(): Promise<void> {
         executionPolicyHash: peerReference.executionPolicyHash,
         secretManifestHash: peerReference.secretManifestHash,
         workloadManifestHash: peerReference.workloadManifestHash,
+        offensiveManifestHash: peerReference.offensiveManifestHash,
       }),
     });
     peerRuntime.initializeAttestation();
@@ -200,6 +203,7 @@ async function main(): Promise<void> {
         executionPolicyHash: peerReference.executionPolicyHash,
         secretManifestHash: peerReference.secretManifestHash,
         workloadManifestHash: peerReference.workloadManifestHash,
+        offensiveManifestHash: peerReference.offensiveManifestHash,
       },
       runtimeMeasurements: { source: "peer" },
     });
@@ -231,6 +235,7 @@ async function main(): Promise<void> {
       mutationGuardEnabled: false,
     };
     const temporaryManifest = {
+      offensiveManifestHash: loadedReference.reference.offensiveManifestHash,
       workloads: [
         {
           workloadID: "supervisor.read_file",
@@ -269,6 +274,7 @@ async function main(): Promise<void> {
             executionPolicyHash: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
             secretManifestHash: loadedReference.reference.secretManifestHash,
             workloadManifestHash: loadedReference.reference.workloadManifestHash,
+            offensiveManifestHash: loadedReference.reference.offensiveManifestHash,
           },
           peers: [],
         }),
