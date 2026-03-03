@@ -844,7 +844,20 @@ Bridge / Director Agent
 
 ---
 
-### 31. Burp Suite Integration (BionicLink)
+### 31. Offensive Domain & Workloads (Phase 27)
+
+**Offensive Runtime**: `/Users/trevorrobey/AI-Agent-BountyHunt/openclaw-bridge/src/security/offensive-domain.ts`
+**Offensive Manifest**: `/Users/trevorrobey/AI-Agent-BountyHunt/openclaw-bridge/security/offensive-workloads/manifest.json`
+**Purpose**: Safely broker and sandbox offensive execution requests (e.g., `nmap`, `sqlmap`) through strictly validated cryptographic manifests restricting arguments, flags, networking scopes, and concurrency.
+
+#### Capabilities
+- **Strict Parameter Scaffolding**: Blocks invalid shell inputs via precise schema validation while implicitly translating and resolving forced safety flags (e.g. `--batch`).
+- **Network Scope Bounds**: Scans URL targets and enforces isolated network constraints limiting targeting to explicit CIDRs, local host interfaces, or remote public endpoints.
+- **Domain Concurrency Strategy**: Shields host telemetry using backoff protocols and a global concurrency cap ensuring high-noise offensive tools don't saturate node orchestration sockets or CPU execution capacity.
+
+---
+
+### 32. Burp Suite Integration (BionicLink)
 
 **Extension**: BionicLink (custom Burp extension)
 **Port**: 8090 (HTTP)

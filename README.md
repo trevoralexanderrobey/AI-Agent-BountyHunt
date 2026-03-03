@@ -38,6 +38,7 @@ Key capabilities:
 - **Preflight Validation & Workload Integrity** — Comprehensive boot-time environment enforcement and cryptographic workload validation
 - **Workload Attestation** — Cryptographic Ed25519 node posture verification, signature challenges, and peer trust convergence
 - **Workload Provenance** — Supply-chain integrity bound to git commit SHAs, dependency hashes, and pinned image digests
+- **Offensive Domain Workloads** — Cryptographically isolated execution domains, rate-limiting, and network constraints for security tools
 - **Cluster Simulation** — Deterministic fault injection harness for multi-node scenario testing
 - **MCP Bridge** — Director → Executor pattern connecting GitHub Pro / Antigravity / Codex to OpenClaw
 
