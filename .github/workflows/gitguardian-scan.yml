@@ -1,0 +1,20 @@
+name: GitGuardian scan
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  gitguardian-scan:
+    name: GitGuardian scan
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: GitGuardian scan
+        uses: GitGuardian/ggshield/actions/secret@v1.48.0
+        env:
+          GITGUARDIAN_API_KEY: ${{ secrets.GITGUARDIAN_API_KEY }}
